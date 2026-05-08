@@ -1,1 +1,1 @@
-# paire-cli
+# paire
