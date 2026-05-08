@@ -1,28 +1,36 @@
 {
-  "name": "paire",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "paire-it",
+  "version": "0.0.1",
+  "description": "Agent-first CLI for Paire briefs and Git hooks.",
+  "type": "module",
+  "bin": {
+    "paire": "./src/cli.ts"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "bun run src/cli.ts",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "build": "bun build src/cli.ts --compile --outfile=dist/paire"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/paire-dev/paire.git"
   },
-  "keywords": [],
+  "keywords": [
+    "paire",
+    "cli",
+    "git",
+    "agents"
+  ],
   "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/paire-dev/paire/issues"
   },
   "homepage": "https://github.com/paire-dev/paire#readme",
   "private": true,
   "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
+    "@types/bun": "latest",
     "typescript": "^5"
   }
 }

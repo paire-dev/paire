@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - { os: darwin, arch: arm64, bun: bun-darwin-arm64 }
+          - { os: darwin, arch: x64, bun: bun-darwin-x64 }
+          - { os: linux, arch: arm64, bun: bun-linux-arm64 }
+          - { os: linux, arch: x64, bun: bun-linux-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun build src/cli.ts --compile --target=${{ matrix.target.bun }} --outfile=paire-${{ matrix.target.os }}-${{ matrix.target.arch }}
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: paire-*
