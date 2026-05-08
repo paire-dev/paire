@@ -11,7 +11,7 @@ export async function initCommand(args: string[], options: GlobalOptions, answer
   const hooksValue = getFlagValue(args, "hooks") ?? answerString(answers, "hooks") ?? (options.yes ? "pre-commit,pre-push" : "");
   const hooks = parseHooks(hooksValue);
   const configPath = writeRepoConfig(options.cwd, { ...defaultConfig, hooks });
-  const installedHooks = installHooks(options.cwd, hooks);
+  const installedHooks = await installHooks(options.cwd, hooks);
   const agentsPath = appendAgentsRule(options.cwd);
 
   return {

@@ -1,5 +1,6 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { $ } from "bun";
 import { CliError } from "../lib/io";
 import { ExitCode } from "../lib/exit-codes";
 
@@ -16,9 +17,21 @@ export function parseHooks(value: string | undefined): SupportedHook[] {
   return hooks as SupportedHook[];
 }
 
-export function installHooks(cwd: string, hooks: SupportedHook[]): string[] {
+async function resolveHooksDir(cwd: string): Promise<string> {
+  try {
+    const result = await $`git rev-parse --git-common-dir`.cwd(cwd).quiet();
+    const commonDir = result.stdout.toString().trim();
+    // git may return a relative path; resolve it against cwd
+    return join(cwd, commonDir, "hooks");
+  } catch {
+    throw new CliError("could not resolve git hooks directory", ExitCode.GitStateError);
+  }
+}
+
+export async function installHooks(cwd: string, hooks: SupportedHook[]): Promise<string[]> {
+  const hooksDir = await resolveHooksDir(cwd);
   return hooks.map((hook) => {
-    const path = join(cwd, ".git", "hooks", hook);
+    const path = join(hooksDir, hook);
     mkdirSync(dirname(path), { recursive: true });
     const command = hook === "pre-push" ? "paire push --json" : "paire it --json --no-open";
     writeFileSync(path, `#!/bin/sh\nset -eu\n${command}\n`);
