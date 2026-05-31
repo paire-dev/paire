@@ -1,0 +1,633 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+type Fixture = {
+  root: string;
+  repo: string;
+  home: string;
+  browserCapture: string;
+  htmlCapture: string;
+};
+
+let fixtures: Fixture[] = [];
+
+beforeEach(() => {
+  fixtures = [];
+});
+
+afterEach(() => {
+  for (const fixture of fixtures) {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+});
+
+test("agent loop creates a packet, applies hardcoded claims, and opens browser only after apply", () => {
+  const fixture = createFixtureRepo();
+
+  const start = runPaire(fixture, [
+    "start",
+    "--base",
+    "main",
+    "--goal",
+    "Add workspace validation",
+  ]);
+  expect(start.exitCode).toBe(0);
+  expect(start.stdout).toContain("Session ID:");
+  expect(start.stdout).toContain("Next: paire review");
+
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add workspace validation");
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.exitCode).toBe(0);
+  expect(review.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(existsSync(fixture.browserCapture)).toBe(false);
+
+  const packetPath = extractPacketPath(review.stdout);
+  const packet = JSON.parse(readFileSync(packetPath, "utf8"));
+  const agentResultPath = join(fixture.root, "agent-result.json");
+  writeFileSync(
+    agentResultPath,
+    JSON.stringify(hardcodedAgentResult(packet), null, 2),
+  );
+
+  const apply = runPaire(fixture, ["review", "--apply", agentResultPath]);
+  expect(apply.exitCode).toBe(0);
+  expect(apply.stdout).toContain("Review burden:");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
+    "http://127.0.0.1:",
+  );
+  const html = readFileSync(fixture.htmlCapture, "utf8");
+  expect(html).toContain('data-human-status="accepted"');
+  expect(html).toContain('data-human-status="concern"');
+  expect(html).toContain('data-human-status="irrelevant"');
+  expect(html).not.toContain("cdn.tailwindcss.com");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const claims = db
+    .query<{ count: number }, []>("select count(*) as count from claims")
+    .get();
+  const evidences = db
+    .query<
+      { count: number },
+      []
+    >("select count(*) as count from claim_evidences")
+    .get();
+  expect(claims?.count).toBe(1);
+  expect(evidences?.count).toBe(1);
+  db.close();
+
+  writeFileSync(fixture.browserCapture, "");
+  const reviewAgain = runPaire(fixture, ["review"]);
+  expect(reviewAgain.exitCode).toBe(0);
+  expect(reviewAgain.stdout).not.toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
+    "http://127.0.0.1:",
+  );
+});
+
+test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", () => {
+  const fixture = createFixtureRepo();
+
+  const start = runPaire(fixture, [
+    "start",
+    "--base",
+    "main",
+    "--goal",
+    "Sandbox validation smoke test",
+  ]);
+  expect(start.exitCode).toBe(0);
+
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null, name: string) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id, name };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(fixture.repo, "src/workspace.ts"),
+    [
+      "export function validateWorkspace(input: { name?: string }) {",
+      "  if (!input.name) {",
+      "    throw new Error('Missing workspace name');",
+      "  }",
+      "  return input.name.trim();",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add auth and workspace validation");
+
+  const firstReview = runPaire(fixture, ["review"]);
+  expect(firstReview.exitCode).toBe(0);
+  expect(firstReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(existsSync(fixture.browserCapture)).toBe(false);
+  const firstPacket = JSON.parse(
+    readFileSync(extractPacketPath(firstReview.stdout), "utf8"),
+  );
+  expect(
+    firstPacket.changedFiles.map((file: { path: string }) => file.path).sort(),
+  ).toEqual(["src/app.ts", "src/workspace.ts"]);
+  expect(JSON.stringify(firstPacket.touchedSnippets)).toContain(
+    "validateWorkspace",
+  );
+
+  const firstResult = join(fixture.root, "sandbox-agent-result.json");
+  writeFileSync(
+    firstResult,
+    JSON.stringify(sandboxAgentResult(firstPacket, "new"), null, 2),
+  );
+  const firstApply = runPaire(fixture, ["review", "--apply", firstResult]);
+  expect(firstApply.exitCode).toBe(0);
+  expect(firstApply.stdout).toContain("Review burden: 2 new");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
+    "http://127.0.0.1:",
+  );
+
+  writeFileSync(fixture.browserCapture, "");
+  const reopen = runPaire(fixture, ["review"]);
+  expect(reopen.exitCode).toBe(0);
+  expect(reopen.stdout).not.toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
+    "http://127.0.0.1:",
+  );
+
+  writeFileSync(
+    join(fixture.repo, "src/workspace.ts"),
+    [
+      "export function validateWorkspace(input: { name?: string }) {",
+      "  if (!input.name) {",
+      "    throw new Error('Missing workspace name');",
+      "  }",
+      "  return input.name.trim();",
+      "}",
+      "",
+      "export const workspaceValidationVersion = 2;",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add workspace validation version");
+  writeFileSync(fixture.browserCapture, "");
+  const staleReview = runPaire(fixture, ["review"]);
+  expect(staleReview.exitCode).toBe(0);
+  expect(staleReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
+  const secondPacket = JSON.parse(
+    readFileSync(extractPacketPath(staleReview.stdout), "utf8"),
+  );
+  expect(
+    secondPacket.changedFiles.map((file: { path: string }) => file.path),
+  ).toEqual(["src/workspace.ts"]);
+  expect(JSON.stringify(secondPacket.touchedSnippets)).toContain(
+    "workspaceValidationVersion",
+  );
+
+  const secondResult = join(fixture.root, "sandbox-agent-result-2.json");
+  writeFileSync(
+    secondResult,
+    JSON.stringify(sandboxAgentResult(secondPacket, "amended"), null, 2),
+  );
+  const secondApply = runPaire(fixture, ["review", "--apply", secondResult]);
+  expect(secondApply.exitCode).toBe(0);
+  expect(secondApply.stdout).toContain("Review burden: 1 amended, 1 unchanged");
+});
+
+test("dirty worktree asks for committed changes instead of creating a packet", () => {
+  const fixture = createFixtureRepo();
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const start = runPaire(fixture, ["start", "--base", "main"]);
+  expect(start.exitCode).toBe(0);
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.exitCode).toBe(0);
+  expect(review.stdout).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
+  expect(review.stdout).toContain("Paire reviews committed code only");
+  expect(existsSync(fixture.browserCapture)).toBe(false);
+});
+
+test("committed files that started untracked are included in review packets", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/new-workspace.ts"),
+    [
+      "export function validateWorkspace(input: { name?: string }) {",
+      "  if (!input.name) throw new Error('Missing workspace name');",
+      "  return input.name;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add workspace validator");
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const changedFile = packet.changedFiles.find(
+    (file: { path: string }) => file.path === "src/new-workspace.ts",
+  );
+  expect(changedFile).toBeTruthy();
+  expect(JSON.stringify(packet.touchedSnippets)).toContain("validateWorkspace");
+  expect(readFileSync(packet.incrementalDiffArtifactPath, "utf8")).toContain(
+    "new file mode 100644",
+  );
+});
+
+test("stale apply is rejected without mutating claims or opening browser", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change value to two");
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const agentResultPath = join(fixture.root, "stale-result.json");
+  writeFileSync(
+    agentResultPath,
+    JSON.stringify(hardcodedAgentResult(packet), null, 2),
+  );
+
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 3;\n");
+  commitAll(fixture.repo, "change value to three");
+
+  const apply = runPaire(fixture, ["review", "--apply", agentResultPath]);
+  expect(apply.exitCode).not.toBe(0);
+  expect(apply.stderr).toContain("Stale Paire review update");
+  expect(existsSync(fixture.browserCapture)).toBe(false);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const claims = db
+    .query<{ count: number }, []>("select count(*) as count from claims")
+    .get();
+  expect(claims?.count).toBe(0);
+  db.close();
+});
+
+test("new git changes after apply require a fresh packet and do not open browser", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change value to two");
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "result.json");
+  writeFileSync(
+    resultPath,
+    JSON.stringify(hardcodedAgentResult(packet), null, 2),
+  );
+  expect(runPaire(fixture, ["review", "--apply", resultPath]).exitCode).toBe(0);
+
+  writeFileSync(fixture.browserCapture, "");
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 4;\n");
+  commitAll(fixture.repo, "change value to four");
+  const staleReview = runPaire(fixture, ["review"]);
+  expect(staleReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
+});
+
+test("incremental packet after an applied commit only includes changes since the last Paire apply", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) return null;",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "make create project nullable");
+  const firstReview = runPaire(fixture, ["review"]);
+  const firstPacket = JSON.parse(
+    readFileSync(extractPacketPath(firstReview.stdout), "utf8"),
+  );
+  const firstResult = join(fixture.root, "first-result.json");
+  writeFileSync(
+    firstResult,
+    JSON.stringify(hardcodedAgentResult(firstPacket), null, 2),
+  );
+  expect(
+    runPaire(fixture, ["review", "--apply", firstResult, "--no-open"]).exitCode,
+  ).toBe(0);
+
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id, audited: true };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "audit create project");
+  const secondReview = runPaire(fixture, ["review"]);
+  const secondPacket = JSON.parse(
+    readFileSync(extractPacketPath(secondReview.stdout), "utf8"),
+  );
+  expect(
+    secondPacket.changedFiles.some(
+      (file: { path: string }) => file.path === "src/app.ts",
+    ),
+  ).toBe(true);
+  const incrementalDiff = readFileSync(
+    secondPacket.incrementalDiffArtifactPath,
+    "utf8",
+  );
+
+  expect(incrementalDiff).toContain("audited: true");
+  expect(incrementalDiff).toContain("throw new Error");
+  expect(incrementalDiff).not.toContain("export const value = 1");
+});
+
+test("oversized lockfile diffs are summarized with safe inspection commands", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "package-lock.json"),
+    JSON.stringify(
+      { lockfileVersion: 3, packages: makeLargeLockPackages() },
+      null,
+      2,
+    ),
+  );
+  commitAll(fixture.repo, "update lockfile");
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const lockFile = packet.changedFiles.find(
+    (file: { path: string }) => file.path === "package-lock.json",
+  );
+
+  expect(lockFile.summarized).toBe(true);
+  expect(packet.safeInspectionCommands.join("\n")).toContain(
+    "git diff --unified=40 -- 'package-lock.json'",
+  );
+  expect(JSON.stringify(packet.touchedSnippets)).not.toContain("package-499");
+});
+
+test("it aliases review and status/sync avoid push or commit suggestions", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change value to two");
+
+  const it = runPaire(fixture, ["it"]);
+  expect(it.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+
+  const status = runPaire(fixture, ["status"]);
+  expect(status.stdout).toContain("Paire status");
+  expect(status.stdout).not.toContain("git push");
+  expect(status.stdout).not.toContain("git commit");
+
+  const sync = runPaire(fixture, ["sync"]);
+  expect(sync.stdout).toContain("Cloud sync is not configured");
+  expect(sync.stdout).not.toContain("git push");
+  expect(sync.stdout).not.toContain("git commit");
+});
+
+test("compiled binary supports status in a fixture repo", () => {
+  const fixture = createFixtureRepo();
+  const binary = join(fixture.root, "paire-bin");
+  const build = Bun.spawnSync(
+    [
+      process.execPath,
+      "build",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--compile",
+      `--outfile=${binary}`,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(build.exitCode).toBe(0);
+
+  const result = Bun.spawnSync([binary, "status"], {
+    cwd: fixture.repo,
+    env: testEnv(fixture),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  expect(text(result.stdout)).toContain("No Paire session found");
+});
+
+function createFixtureRepo(): Fixture {
+  const root = mkdtempSync(join(tmpdir(), "paire-cli-"));
+  const repo = join(root, "repo");
+  const home = join(root, "home");
+  const browserCapture = join(root, "browser.txt");
+  const htmlCapture = join(root, "review.html");
+  run(["git", "init", "-b", "main", repo], root);
+  run(["git", "config", "user.email", "test@example.com"], repo);
+  run(["git", "config", "user.name", "Test User"], repo);
+  writeFileSync(join(repo, "package-lock.json"), "{}\n");
+  run(["mkdir", "-p", "src"], repo);
+  writeFileSync(join(repo, "src/app.ts"), "export const value = 1;\n");
+  run(["git", "add", "."], repo);
+  run(["git", "commit", "-m", "initial"], repo);
+  const fixture = { root, repo, home, browserCapture, htmlCapture };
+  fixtures.push(fixture);
+  return fixture;
+}
+
+function runPaire(fixture: Fixture, args: string[]) {
+  const result = Bun.spawnSync(
+    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), ...args],
+    {
+      cwd: fixture.repo,
+      env: testEnv(fixture),
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  return {
+    exitCode: result.exitCode,
+    stdout: text(result.stdout),
+    stderr: text(result.stderr),
+  };
+}
+
+function testEnv(fixture: Fixture) {
+  return {
+    ...process.env,
+    PAIRE_HOME: fixture.home,
+    PAIRE_BROWSER_CAPTURE: fixture.browserCapture,
+    PAIRE_BROWSER_HTML_CAPTURE: fixture.htmlCapture,
+  };
+}
+
+function run(args: string[], cwd: string) {
+  const result = Bun.spawnSync(args, { cwd, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) {
+    throw new Error(`${args.join(" ")} failed: ${text(result.stderr)}`);
+  }
+}
+
+function commitAll(repo: string, message: string) {
+  run(["git", "add", "."], repo);
+  run(["git", "commit", "-m", message], repo);
+}
+
+function text(value: Uint8Array) {
+  return new TextDecoder().decode(value);
+}
+
+function extractPacketPath(stdout: string) {
+  const lines = stdout.split("\n");
+  const marker = lines.findIndex(
+    (line) => line.trim() === "Analyze this packet:",
+  );
+  if (marker < 0 || !lines[marker + 1]) {
+    throw new Error(`Packet path missing from output:\n${stdout}`);
+  }
+  return lines[marker + 1]?.trim() ?? "";
+}
+
+function hardcodedAgentResult(packet: {
+  packetId: string;
+  sessionId: string;
+  revisionId: string;
+  currentFingerprint: string;
+}) {
+  return {
+    packetId: packet.packetId,
+    sessionId: packet.sessionId,
+    revisionId: packet.revisionId,
+    gitFingerprint: packet.currentFingerprint,
+    threads: [
+      {
+        id: "thread_workspace_validation",
+        title: "Workspace validation",
+        summary:
+          "Project creation now rejects missing users before creating data.",
+        status: "active",
+        claims: [
+          {
+            id: "claim_auth_before_create",
+            threadId: "thread_workspace_validation",
+            text: "Project creation rejects missing users before returning project data.",
+            agentStatus: "new",
+            humanStatus: "unreviewed",
+            evidences: [
+              {
+                filePath: "src/app.ts",
+                startLine: 1,
+                endLine: 6,
+                symbol: "createProject",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function sandboxAgentResult(
+  packet: {
+    packetId: string;
+    sessionId: string;
+    revisionId: string;
+    currentFingerprint: string;
+  },
+  workspaceStatus: "new" | "amended",
+) {
+  return {
+    packetId: packet.packetId,
+    sessionId: packet.sessionId,
+    revisionId: packet.revisionId,
+    gitFingerprint: packet.currentFingerprint,
+    threads: [
+      {
+        id: "thread_sandbox_auth_workspace",
+        title: "Auth and workspace validation",
+        summary:
+          workspaceStatus === "new"
+            ? "Project creation rejects missing users and workspace validation rejects missing names."
+            : "Workspace validation now exposes a validation version marker.",
+        status: "active",
+        claims: [
+          {
+            id: "claim_sandbox_auth_required",
+            threadId: "thread_sandbox_auth_workspace",
+            text: "Project creation rejects missing users before returning project data.",
+            agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
+            humanStatus: "unreviewed",
+            evidences: [
+              {
+                filePath: "src/app.ts",
+                startLine: 1,
+                endLine: 6,
+                symbol: "createProject",
+              },
+            ],
+          },
+          {
+            id: "claim_sandbox_workspace_required",
+            threadId: "thread_sandbox_auth_workspace",
+            text:
+              workspaceStatus === "new"
+                ? "Workspace validation rejects inputs without a workspace name."
+                : "Workspace validation rejects inputs without a workspace name and exposes a validation version marker.",
+            agentStatus: workspaceStatus,
+            humanStatus: "unreviewed",
+            evidences: [
+              {
+                filePath: "src/workspace.ts",
+                startLine: 1,
+                endLine: workspaceStatus === "new" ? 6 : 8,
+                symbol: "validateWorkspace",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function makeLargeLockPackages() {
+  return Object.fromEntries(
+    Array.from({ length: 500 }, (_, index) => [
+      `node_modules/package-${index}`,
+      { version: `1.0.${index}`, resolved: `https://example.com/${index}` },
+    ]),
+  );
+}
