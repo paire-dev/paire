@@ -30,8 +30,29 @@ export async function currentBranch(cwd: string): Promise<string> {
   return git(["branch", "--show-current"], cwd);
 }
 
-export async function diff(cwd: string): Promise<string> {
-  return git(["diff", "--stat", "--", "."], cwd);
+export async function baseBranch(cwd: string): Promise<string> {
+  // Use upstream only when it points to a different branch (e.g. origin/main),
+  // not when it mirrors the current branch on origin (e.g. origin/feat → feat).
+  try {
+    const current = await git(["branch", "--show-current"], cwd);
+    const upstream = await git(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd);
+    const upstreamShort = upstream.replace(/^[^/]+\//, "");
+    if (upstreamShort !== current) return upstream;
+  } catch {}
+  // Fall back to common base branch names
+  for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
+    try {
+      await git(["rev-parse", "--verify", candidate], cwd);
+      return candidate;
+    } catch {}
+  }
+  throw new CliError("could not determine base branch", ExitCode.GitStateError);
+}
+
+export async function diff(cwd: string, base?: string): Promise<string> {
+  const resolvedBase = base ?? await baseBranch(cwd);
+  // Three-dot notation diffs from the merge-base of resolvedBase and HEAD to HEAD
+  return git(["diff", "--stat", `${resolvedBase}...HEAD`], cwd);
 }
 
 export async function recentCommits(cwd: string, count = 5): Promise<string> {

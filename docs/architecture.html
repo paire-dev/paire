@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>paire-cli — Architecture</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"IBM Plex Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'],
+          },
+          colors: {
+            ink: { 950: '#0a0e14', 900: '#0f1419', 800: '#151b23', 700: '#1c2430', 600: '#2a3444' },
+            mint: { 400: '#6ee7b7', 500: '#34d399', 600: '#10b981' },
+            amber: { 400: '#fbbf24', 500: '#f59e0b' },
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        primaryColor: '#151b23',
+        primaryTextColor: '#e2e8f0',
+        primaryBorderColor: '#34d399',
+        lineColor: '#64748b',
+        secondaryColor: '#1c2430',
+        tertiaryColor: '#0f1419',
+        fontFamily: 'IBM Plex Sans, sans-serif',
+      },
+      flowchart: { curve: 'basis', padding: 16 },
+    });
+  </script>
+  <style>
+    .mermaid { background: transparent !important; }
+    .mermaid svg { max-width: 100%; height: auto; }
+    html { scroll-behavior: smooth; }
+    ::selection { background: #34d39933; color: #fff; }
+  </style>
+</head>
+<body class="bg-ink-950 text-slate-200 font-sans antialiased">
+
+  <!-- Hero -->
+  <header class="border-b border-ink-700 bg-gradient-to-b from-ink-900 to-ink-950">
+    <div class="max-w-5xl mx-auto px-6 py-16">
+      <p class="text-mint-500 font-mono text-sm tracking-widest uppercase mb-3">Agent-first CLI</p>
+      <h1 class="text-4xl md:text-5xl font-bold text-white tracking-tight mb-4">paire-cli</h1>
+      <p class="text-lg text-slate-400 max-w-2xl leading-relaxed">
+        A Bun-powered command-line tool that gathers Git context and produces structured output for AI coding agents — briefs for PRs, impact reviews, and hook automation.
+      </p>
+      <div class="flex flex-wrap gap-3 mt-8">
+        <span class="px-3 py-1 rounded-full bg-ink-800 border border-ink-600 text-xs font-mono text-mint-400">Bun runtime</span>
+        <span class="px-3 py-1 rounded-full bg-ink-800 border border-ink-600 text-xs font-mono text-mint-400">No LLM calls</span>
+        <span class="px-3 py-1 rounded-full bg-ink-800 border border-ink-600 text-xs font-mono text-mint-400">--json everywhere</span>
+        <span class="px-3 py-1 rounded-full bg-ink-800 border border-ink-600 text-xs font-mono text-mint-400">Stable exit codes</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="sticky top-0 z-50 border-b border-ink-700 bg-ink-950/90 backdrop-blur-md">
+    <div class="max-w-5xl mx-auto px-6 py-3 flex flex-wrap gap-x-5 gap-y-2 text-sm">
+      <a href="#overview" class="text-slate-400 hover:text-mint-400 transition">Overview</a>
+      <a href="#cli" class="text-slate-400 hover:text-mint-400 transition">CLI Router</a>
+      <a href="#impact" class="text-slate-400 hover:text-mint-400 transition">paire impact</a>
+      <a href="#brief" class="text-slate-400 hover:text-mint-400 transition">Brief pipeline</a>
+      <a href="#git" class="text-slate-400 hover:text-mint-400 transition">Git layer</a>
+      <a href="#config" class="text-slate-400 hover:text-mint-400 transition">Config</a>
+      <a href="#agent" class="text-slate-400 hover:text-mint-400 transition">Agent-first</a>
+    </div>
+  </nav>
+
+  <main class="max-w-5xl mx-auto px-6 py-12 space-y-20">
+
+    <!-- Overview -->
+    <section id="overview">
+      <h2 class="text-2xl font-bold text-white mb-2">What it does</h2>
+      <p class="text-slate-400 mb-8 max-w-3xl">
+        paire-cli sits between your Git repo and AI agents. It never calls an LLM itself — instead it collects diff context, formats prompts, and writes machine-readable artifacts agents consume.
+      </p>
+
+      <div class="grid md:grid-cols-3 gap-4">
+        <div class="rounded-xl border border-ink-700 bg-ink-900 p-5">
+          <div class="text-mint-500 font-mono text-xs mb-2">LOCAL</div>
+          <h3 class="font-semibold text-white mb-2">paire it</h3>
+          <p class="text-sm text-slate-400">Renders <code class="text-mint-400">.paire/brief.html</code> from branch diff + recent commits. Opens in browser on macOS/Linux.</p>
+        </div>
+        <div class="rounded-xl border border-ink-700 bg-ink-900 p-5">
+          <div class="text-amber-400 font-mono text-xs mb-2">PR</div>
+          <h3 class="font-semibold text-white mb-2">paire push</h3>
+          <p class="text-sm text-slate-400">Posts the same brief as Markdown to the current GitHub PR via <code class="text-mint-400">gh pr edit</code>.</p>
+        </div>
+        <div class="rounded-xl border border-ink-700 bg-ink-900 p-5 ring-1 ring-mint-500/30">
+          <div class="text-mint-400 font-mono text-xs mb-2">AGENT</div>
+          <h3 class="font-semibold text-white mb-2">paire impact</h3>
+          <p class="text-sm text-slate-400">Prints a self-contained prompt to stdout. The agent writes <code class="text-mint-400">.paire/impact.md</code> with product-impact cards.</p>
+        </div>
+      </div>
+
+      <div class="mt-10 rounded-xl border border-ink-700 bg-ink-900 p-6 overflow-x-auto">
+        <pre class="font-mono text-sm text-slate-300 leading-relaxed"><span class="text-slate-500">src/</span>
+├── <span class="text-mint-400">cli.ts</span>              <span class="text-slate-500"># entry: parse args → dispatch command → print result</span>
+├── commands/
+│   ├── init.ts           <span class="text-slate-500"># .paire/config.yml + git hooks + AGENTS.md</span>
+│   ├── it.ts             <span class="text-slate-500"># local brief → .paire/brief.html</span>
+│   ├── push.ts           <span class="text-slate-500"># brief → gh pr edit</span>
+│   ├── impact.ts         <span class="text-slate-500"># prompt → stdout (agent writes impact.md)</span>
+│   ├── doctor.ts         <span class="text-slate-500"># environment diagnostics</span>
+│   └── commit-msg.ts     <span class="text-slate-500"># stdin commit message helper</span>
+├── brief/
+│   ├── render.ts         <span class="text-slate-500"># createBrief + HTML/Markdown renderers</span>
+│   └── impact.ts         <span class="text-slate-500"># loadImpactContext + renderImpactPrompt</span>
+├── lib/
+│   ├── git.ts            <span class="text-slate-500"># Bun.$ git wrapper, base branch detection</span>
+│   ├── config.ts         <span class="text-slate-500"># .paire/config.yml read/write</span>
+│   ├── io.ts             <span class="text-slate-500"># JSON output, errors, stdin, answers file</span>
+│   └── exit-codes.ts     <span class="text-slate-500"># stable 0–4 exit codes</span>
+└── hooks/install.ts      <span class="text-slate-500"># pre-commit / pre-push shell hooks</span></pre>
+      </div>
+    </section>
+
+    <!-- CLI Router -->
+    <section id="cli">
+      <h2 class="text-2xl font-bold text-white mb-2">CLI router</h2>
+      <p class="text-slate-400 mb-8">
+        <code class="text-mint-400">src/cli.ts</code> is a thin dispatcher. Global flags are parsed first; the first non-flag argument becomes the command name.
+      </p>
+
+      <div class="rounded-xl border border-ink-700 bg-ink-800/50 p-6 mb-6">
+        <pre class="mermaid">
+flowchart TD
+  A["process.argv"] --> B{Global flags?}
+  B -->|--help / --version| C["Print & exit 0"]
+  B -->|otherwise| D["Resolve command name"]
+  D --> E{Known command?}
+  E -->|no| F["CliError → exit 2"]
+  E -->|yes| G["Build GlobalOptions\n--json, -y, --answers-file, cwd"]
+  G --> H["command.handler(args, options, answers)"]
+  H --> I["printResult(result, options)"]
+  I --> J{exit code}
+  J -->|0| K["Success"]
+  J -->|1–4| L["Typed failure"]
+
+  style A fill:#151b23,stroke:#34d399
+  style H fill:#151b23,stroke:#f59e0b
+  style K fill:#064e3b,stroke:#34d399
+  style F fill:#450a0a,stroke:#ef4444
+        </pre>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="rounded-lg border border-ink-700 p-4">
+          <h4 class="font-mono text-sm text-mint-400 mb-3">Commands registry</h4>
+          <table class="w-full text-sm">
+            <tbody class="text-slate-300">
+              <tr class="border-b border-ink-700"><td class="py-2 font-mono">init</td><td class="py-2 text-slate-400">Config + hooks + AGENTS.md</td></tr>
+              <tr class="border-b border-ink-700"><td class="py-2 font-mono">it</td><td class="py-2 text-slate-400">Local HTML/Markdown brief</td></tr>
+              <tr class="border-b border-ink-700"><td class="py-2 font-mono">push</td><td class="py-2 text-slate-400">Post brief to GitHub PR</td></tr>
+              <tr class="border-b border-ink-700"><td class="py-2 font-mono text-amber-400">impact</td><td class="py-2 text-slate-400">PR impact prompt for agents</td></tr>
+              <tr class="border-b border-ink-700"><td class="py-2 font-mono">doctor</td><td class="py-2 text-slate-400">Environment diagnostics</td></tr>
+              <tr><td class="py-2 font-mono">commit-msg</td><td class="py-2 text-slate-400">Stdin commit message</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="rounded-lg border border-ink-700 p-4">
+          <h4 class="font-mono text-sm text-mint-400 mb-3">Exit codes (stable)</h4>
+          <table class="w-full text-sm font-mono">
+            <tbody class="text-slate-300">
+              <tr class="border-b border-ink-700"><td class="py-2 text-mint-400">0</td><td class="py-2">success</td></tr>
+              <tr class="border-b border-ink-700"><td class="py-2">1</td><td class="py-2">generic error</td></tr>
+              <tr class="border-b border-ink-700"><td class="py-2">2</td><td class="py-2">user error (bad args)</td></tr>
+              <tr class="border-b border-ink-700"><td class="py-2">3</td><td class="py-2">agent/tool error (gh failed)</td></tr>
+              <tr><td class="py-2">4</td><td class="py-2">git state error</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Impact -->
+    <section id="impact">
+      <h2 class="text-2xl font-bold text-white mb-2">paire impact — the agent loop</h2>
+      <p class="text-slate-400 mb-8 max-w-3xl">
+        The CLI gathers PR context and emits a structured prompt. The AI agent (Cursor, Claude Code, Codex…) reads stdout, analyzes the embedded diffs, and writes <code class="text-mint-400">.paire/impact.md</code>. No shell commands needed after that.
+      </p>
+
+      <div class="rounded-xl border border-mint-500/20 bg-ink-900 p-6 mb-6">
+        <pre class="mermaid">
+flowchart LR
+  subgraph CLI["paire-cli (no LLM)"]
+    A1["ensureGitRepo"] --> A2["readConfig"]
+    A2 --> A3["loadImpactContext"]
+    A3 --> A4["renderImpactPrompt"]
+    A4 --> A5["stdout: full prompt"]
+  end
+
+  subgraph Agent["AI coding agent"]
+    B1["Read prompt from stdout"] --> B2["Analyze patches + instructions"]
+    B2 --> B3["Write .paire/impact.md"]
+  end
+
+  subgraph GitHub["GitHub render"]
+    C1["Markdown with &lt;details&gt; cards"]
+  end
+
+  A5 --> B1
+  B3 --> C1
+
+  style CLI fill:#0f1419,stroke:#34d399
+  style Agent fill:#0f1419,stroke:#f59e0b
+  style GitHub fill:#0f1419,stroke:#64748b
+        </pre>
+      </div>
+
+      <h3 class="text-lg font-semibold text-white mb-4">loadImpactContext — parallel Git queries</h3>
+      <div class="rounded-xl border border-ink-700 bg-ink-800/50 p-6 mb-6">
+        <pre class="mermaid">
+flowchart TD
+  START["loadImpactContext(cwd, baseOverride?)"] --> BR["currentBranch()"]
+  START --> BASE["baseOverride ?? detectBase()"]
+  BR --> PARALLEL
+  BASE --> PARALLEL
+
+  subgraph PARALLEL["Promise.all — 4 git calls"]
+    P1["diff --stat base...HEAD"]
+    P2["diff --numstat base...HEAD"]
+    P3["diff --name-status base...HEAD"]
+    P4["log base..HEAD --pretty=%s"]
+  end
+
+  PARALLEL --> PARSE["parseNumStat + parseNameStatus"]
+  PARSE --> SLICE["Take first 35 files (MAX_FILES)"]
+  SLICE --> PATCHES["Per file: git diff base...HEAD -- file"]
+  PATCHES --> TRUNC["Truncate patch to 5000 chars"]
+  TRUNC --> CTX["ImpactContext object"]
+
+  style START fill:#151b23,stroke:#34d399
+  style CTX fill:#064e3b,stroke:#34d399
+        </pre>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6">
+        <div>
+          <h4 class="font-semibold text-white mb-3">ImpactContext shape</h4>
+          <div class="rounded-lg border border-ink-700 bg-ink-900 p-4 font-mono text-xs text-slate-300 space-y-1">
+            <div><span class="text-mint-400">branch</span>: string</div>
+            <div><span class="text-mint-400">baseRef</span>: string</div>
+            <div><span class="text-mint-400">title</span>: first commit subject</div>
+            <div><span class="text-mint-400">commitSubjects</span>: string[]</div>
+            <div><span class="text-mint-400">diffStat</span>: string</div>
+            <div><span class="text-mint-400">files</span>: ImpactFile[]</div>
+            <div><span class="text-mint-400">truncatedFileCount</span>: number</div>
+          </div>
+        </div>
+        <div>
+          <h4 class="font-semibold text-white mb-3">Prompt structure (renderImpactPrompt)</h4>
+          <ol class="text-sm text-slate-400 space-y-2 list-decimal list-inside">
+            <li><strong class="text-slate-300">Task header</strong> — write to output path, stop</li>
+            <li><strong class="text-slate-300">Phase 1</strong> — identify impact areas (UX, API, …)</li>
+            <li><strong class="text-slate-300">Phase 2</strong> — 1–4 items per area with Before/After</li>
+            <li><strong class="text-slate-300">Confidence</strong> — observed / inferred / unknown</li>
+            <li><strong class="text-slate-300">Output template</strong> — <code>&lt;details&gt;</code> cards</li>
+            <li><strong class="text-slate-300">PR context</strong> — commits, stat, file manifest, patches</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="mt-8 rounded-xl border border-ink-700 overflow-hidden">
+        <div class="bg-ink-800 px-4 py-2 font-mono text-xs text-slate-400 border-b border-ink-700">impact.ts command flags</div>
+        <div class="p-4 font-mono text-sm text-slate-300 grid md:grid-cols-2 gap-3">
+          <div><span class="text-amber-400">--base=</span>branch <span class="text-slate-500">override diff base</span></div>
+          <div><span class="text-amber-400">--output=</span>path <span class="text-slate-500">where agent writes (default .paire/impact.md)</span></div>
+          <div><span class="text-amber-400">--prompt-out=</span>path <span class="text-slate-500">also persist prompt to disk</span></div>
+          <div><span class="text-amber-400">--json</span> <span class="text-slate-500">wrap metadata + message in JSON</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Brief pipeline -->
+    <section id="brief">
+      <h2 class="text-2xl font-bold text-white mb-2">Brief pipeline (it & push)</h2>
+      <p class="text-slate-400 mb-8">
+        <code class="text-mint-400">paire it</code> and <code class="text-mint-400">paire push</code> share <code class="text-mint-400">createBrief()</code> from <code class="text-mint-400">brief/render.ts</code>.
+      </p>
+
+      <div class="rounded-xl border border-ink-700 bg-ink-800/50 p-6 mb-6">
+        <pre class="mermaid">
+flowchart TD
+  subgraph shared["Shared: createBrief()"]
+    S1["currentBranch()"] 
+    S2["diff(cwd, baseBranch)"]
+    S3["recentCommits() — last 5"]
+    S1 & S2 & S3 --> S4["Brief object"]
+  end
+
+  subgraph it["paire it"]
+    I1["renderHtml or renderMarkdown"] --> I2["write .paire/brief.html|.md"]
+    I2 --> I3{TTY & not --no-open?}
+    I3 -->|yes| I4["open in browser"]
+  end
+
+  subgraph push["paire push"]
+    P1["renderMarkdown"] --> P2{--dry-run?}
+    P2 -->|yes| P3["print body to stdout"]
+    P2 -->|no| P4["gh pr edit --body"]
+  end
+
+  S4 --> I1
+  S4 --> P1
+
+  style shared fill:#0f1419,stroke:#64748b
+  style it fill:#0f1419,stroke:#34d399
+  style push fill:#0f1419,stroke:#f59e0b
+        </pre>
+      </div>
+
+      <div class="rounded-lg border border-ink-700 p-5">
+        <h4 class="font-semibold text-white mb-2">Brief object</h4>
+        <p class="text-sm text-slate-400 mb-3">Lightweight snapshot — title, branch, diff stat, recent commits, ISO timestamp. HTML wraps the Markdown in a styled <code>&lt;pre&gt;</code> block.</p>
+        <code class="block font-mono text-xs text-mint-400 bg-ink-900 p-3 rounded">git diff --stat ${baseRef}...HEAD</code>
+      </div>
+    </section>
+
+    <!-- Git layer -->
+    <section id="git">
+      <h2 class="text-2xl font-bold text-white mb-2">Git layer</h2>
+      <p class="text-slate-400 mb-8">
+        All Git operations go through <code class="text-mint-400">git(args, cwd)</code> using Bun's shell (<code class="text-mint-400">Bun.$</code>). Failures throw <code class="text-mint-400">CliError</code> with exit code 4.
+      </p>
+
+      <div class="rounded-xl border border-ink-700 bg-ink-800/50 p-6">
+        <pre class="mermaid">
+flowchart TD
+  START["baseBranch(cwd)"] --> UP{"Upstream exists &\ndiffers from current?"}
+  UP -->|yes| RET1["return upstream\n(e.g. origin/main)"]
+  UP -->|no| LOOP["Try candidates in order"]
+  LOOP --> C1["origin/main"]
+  C1 -->|missing| C2["origin/master"]
+  C2 -->|missing| C3["main"]
+  C3 -->|missing| C4["master"]
+  C4 -->|missing| ERR["CliError exit 4"]
+  C1 & C2 & C3 & C4 -->|found| RET2["return candidate"]
+
+  style START fill:#151b23,stroke:#34d399
+  style ERR fill:#450a0a,stroke:#ef4444
+        </pre>
+      </div>
+
+      <div class="mt-6 p-4 rounded-lg border border-ink-700 bg-ink-900">
+        <p class="text-sm text-slate-400">
+          <strong class="text-slate-200">Three-dot diff</strong> (<code>base...HEAD</code>) compares from the merge-base of base and HEAD to HEAD — the standard PR diff range. Config <code>baseBranch</code> overrides auto-detection for teams using non-standard bases like <code>develop</code>.
+        </p>
+      </div>
+    </section>
+
+    <!-- Config -->
+    <section id="config">
+      <h2 class="text-2xl font-bold text-white mb-2">Configuration & init</h2>
+      <p class="text-slate-400 mb-8">
+        <code class="text-mint-400">paire init -y --hooks=pre-commit,pre-push</code> bootstraps a repo for agent workflows.
+      </p>
+
+      <div class="rounded-xl border border-ink-700 bg-ink-800/50 p-6 mb-6">
+        <pre class="mermaid">
+flowchart LR
+  INIT["paire init"] --> CFG["write .paire/config.yml"]
+  INIT --> HOOKS["installHooks()"]
+  INIT --> AGENTS["append AGENTS.md rule"]
+
+  HOOKS --> H1["pre-commit → paire it --json --no-open"]
+  HOOKS --> H2["pre-push → paire push --json"]
+
+  style INIT fill:#151b23,stroke:#34d399
+        </pre>
+      </div>
+
+      <pre class="rounded-lg border border-ink-700 bg-ink-900 p-4 font-mono text-sm text-slate-300 overflow-x-auto">version: 1
+hooks:
+  - pre-commit
+  - pre-push
+baseBranch: main        <span class="text-slate-500"># optional — auto-detected when omitted</span>
+brief:
+  includeDiff: true
+  includeHistory: true</pre>
+    </section>
+
+    <!-- Agent-first -->
+    <section id="agent">
+      <h2 class="text-2xl font-bold text-white mb-2">Agent-first design principles</h2>
+      <p class="text-slate-400 mb-8">
+        Every command is built so CI pipelines and coding agents can invoke it without interactive prompts.
+      </p>
+
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="rounded-lg border border-ink-700 p-5">
+          <div class="text-2xl mb-2">📦</div>
+          <h4 class="font-semibold text-white mb-2">Machine-readable output</h4>
+          <p class="text-sm text-slate-400"><code>--json</code> on every command. <code>printResult()</code> wraps <code>{ ok, message, ...data }</code>.</p>
+        </div>
+        <div class="rounded-lg border border-ink-700 p-5">
+          <div class="text-2xl mb-2">📝</div>
+          <h4 class="font-semibold text-white mb-2">Bulk answers</h4>
+          <p class="text-sm text-slate-400"><code>--answers-file path.json</code> feeds prompt answers without TTY interaction.</p>
+        </div>
+        <div class="rounded-lg border border-ink-700 p-5">
+          <div class="text-2xl mb-2">🎨</div>
+          <h4 class="font-semibold text-white mb-2">TTY-aware</h4>
+          <p class="text-sm text-slate-400">Color disabled when stdout is not a TTY or <code>NO_COLOR</code> is set.</p>
+        </div>
+        <div class="rounded-lg border border-ink-700 p-5">
+          <div class="text-2xl mb-2">🔒</div>
+          <h4 class="font-semibold text-white mb-2">No env required</h4>
+          <p class="text-sm text-slate-400">Works on first run. <code>paire doctor</code> tolerates missing <code>$HOME</code>.</p>
+        </div>
+      </div>
+
+      <div class="mt-10 rounded-xl border border-amber-500/20 bg-amber-500/5 p-6">
+        <h4 class="font-semibold text-amber-400 mb-3">Typical agent workflow (AGENTS.md)</h4>
+        <ol class="text-sm text-slate-300 space-y-2 list-decimal list-inside">
+          <li>Before pushing → run <code class="text-mint-400">paire it</code> or <code class="text-mint-400">paire push</code></li>
+          <li>For PR impact review → run <code class="text-mint-400">paire impact</code></li>
+          <li>Read the stdout prompt — do not run other commands</li>
+          <li>Write the rendered Markdown to <code class="text-mint-400">.paire/impact.md</code></li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- End-to-end -->
+    <section>
+      <h2 class="text-2xl font-bold text-white mb-2">End-to-end data flow</h2>
+      <div class="rounded-xl border border-ink-700 bg-ink-800/50 p-6">
+        <pre class="mermaid">
+flowchart TB
+  REPO["Git repository\n(branch, commits, diffs)"]
+  CONFIG[".paire/config.yml\n(baseBranch, hooks)"]
+
+  REPO --> CLI["paire-cli"]
+  CONFIG --> CLI
+
+  CLI --> OUT1[".paire/brief.html\n(paire it)"]
+  CLI --> OUT2["GitHub PR body\n(paire push)"]
+  CLI --> OUT3["stdout prompt\n(paire impact)"]
+
+  OUT3 --> AGENT["AI agent"]
+  AGENT --> OUT4[".paire/impact.md\n&lt;details&gt; impact cards"]
+
+  HOOKS["Git hooks\npre-commit / pre-push"] --> CLI
+
+  style REPO fill:#151b23,stroke:#64748b
+  style CLI fill:#151b23,stroke:#34d399
+  style AGENT fill:#151b23,stroke:#f59e0b
+  style OUT4 fill:#064e3b,stroke:#34d399
+        </pre>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="border-t border-ink-700 mt-12">
+    <div class="max-w-5xl mx-auto px-6 py-8 flex flex-col sm:flex-row justify-between gap-4 text-sm text-slate-500">
+      <span>paire-cli v0.0.1 — open this file directly in a browser</span>
+      <span class="font-mono">docs/architecture.html</span>
+    </div>
+  </footer>
+
+</body>
+</html>

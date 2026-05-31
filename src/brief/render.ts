@@ -17,10 +17,10 @@ export type Brief = {
   generatedAt: string;
 };
 
-export async function createBrief(cwd: string): Promise<Brief> {
+export async function createBrief(cwd: string, baseBranch?: string): Promise<Brief> {
   const [branch, diffStat, commits] = await Promise.all([
     currentBranch(cwd),
-    diff(cwd).catch(() => ""),
+    diff(cwd, baseBranch).catch(() => ""),
     recentCommits(cwd).catch(() => ""),
   ]);
 

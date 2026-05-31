@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 export type PaireConfig = {
   version: 1;
   hooks: string[];
+  baseBranch?: string;
   brief: {
     includeDiff: boolean;
     includeHistory: boolean;
@@ -33,6 +34,7 @@ export function stringifyConfig(config: PaireConfig): string {
     `version: ${config.version}`,
     "hooks:",
     ...config.hooks.map((hook) => `  - ${hook}`),
+    ...(config.baseBranch ? [`baseBranch: ${config.baseBranch}`] : []),
     "brief:",
     `  includeDiff: ${config.brief.includeDiff}`,
     `  includeHistory: ${config.brief.includeHistory}`,
@@ -45,9 +47,11 @@ export function readConfig(cwd: string): PaireConfig {
   if (!existsSync(path)) return defaultConfig;
 
   const raw = readFileSync(path, "utf8");
+  const baseBranchMatch = raw.match(/^\s*baseBranch:\s*(\S+)\s*$/m);
   return {
     version: 1,
     hooks: Array.from(raw.matchAll(/^\s*-\s*(.+)$/gm), (match) => match[1]?.trim()).filter(Boolean) as string[],
+    baseBranch: baseBranchMatch?.[1],
     brief: {
       includeDiff: !/^\s*includeDiff:\s*false\s*$/m.test(raw),
       includeHistory: !/^\s*includeHistory:\s*false\s*$/m.test(raw),

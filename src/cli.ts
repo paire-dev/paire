@@ -4,6 +4,7 @@ import { itCommand } from "./commands/it";
 import { pushCommand } from "./commands/push";
 import { doctorCommand } from "./commands/doctor";
 import { commitMsgCommand } from "./commands/commit-msg";
+import { impactCommand } from "./commands/impact";
 import { ExitCode, exitCodeDescriptions } from "./lib/exit-codes";
 import { CliError, printResult, readAnswersFile, type CommandResult, type GlobalOptions, type JsonValue } from "./lib/io";
 
@@ -17,6 +18,7 @@ const commands: Record<string, { summary: string; handler: CommandHandler }> = {
   push: { summary: "Post the generated brief to the current GitHub PR via gh", handler: pushCommand },
   doctor: { summary: "Print environment diagnostics", handler: doctorCommand },
   "commit-msg": { summary: "Read or validate commit message text from stdin or flags", handler: commitMsgCommand },
+  impact: { summary: "Print a PR-impact prompt for an AI agent to fill into a Markdown file", handler: impactCommand },
 };
 
 async function main(argv: string[]): Promise<number> {
@@ -120,6 +122,12 @@ ${commandRows}
 
 Stable exit codes:
 ${exits}
+
+Configuration (.paire/config.yml):
+  baseBranch: <branch>           Branch to diff against (default: auto-detected)
+  hooks: [pre-commit, pre-push]  Git hooks installed by paire init
+  brief.includeDiff: true        Include diff stat in the brief
+  brief.includeHistory: true     Include recent commits in the brief
 `;
 }
 

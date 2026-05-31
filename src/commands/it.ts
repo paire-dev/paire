@@ -3,12 +3,14 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createBrief, renderHtml, renderMarkdown } from "../brief/render";
 import { ensureGitRepo } from "../lib/git";
+import { readConfig } from "../lib/config";
 import { type CommandResult, type GlobalOptions } from "../lib/io";
 import { ExitCode } from "../lib/exit-codes";
 
 export async function itCommand(args: string[], options: GlobalOptions): Promise<CommandResult> {
   await ensureGitRepo(options.cwd);
-  const brief = await createBrief(options.cwd);
+  const config = readConfig(options.cwd);
+  const brief = await createBrief(options.cwd, config.baseBranch);
   const format = getFlagValue(args, "format") ?? "html";
   const outDir = join(options.cwd, ".paire");
   mkdirSync(outDir, { recursive: true });
