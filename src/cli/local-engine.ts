@@ -1118,12 +1118,19 @@ function getGitState(cwd: string): GitState {
   return { repoRoot, branch, upstream, head, clean, fingerprint, status };
 }
 
+function gitDiffBaseRef(fingerprint: string) {
+  const dirtyMarker = ":dirty:";
+  const markerIndex = fingerprint.indexOf(dirtyMarker);
+  if (markerIndex >= 0) return fingerprint.slice(0, markerIndex);
+  return fingerprint;
+}
+
 function gitDiffForCurrentState(
   base: string,
   repoRoot: string,
   allowFail = false,
 ) {
-  return gitCommand(["diff", `${base}..HEAD`], repoRoot, {
+  return gitCommand(["diff", `${gitDiffBaseRef(base)}..HEAD`], repoRoot, {
     allowFail,
   });
 }
