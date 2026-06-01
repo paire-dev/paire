@@ -239,27 +239,27 @@ function FilterBar({
   onHumanStatusChange: (status: FilterValue) => void;
 }) {
   return (
-    <div className="mb-5 flex flex-col gap-3 rounded-lg border bg-card p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-medium">Filters</p>
+    <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <div className="flex items-center gap-2">
+        <p className="text-xs font-medium uppercase text-muted-foreground">
+          Filters
+        </p>
         <Badge variant="outline" className="text-muted-foreground">
           {filteredClaimCount} of {totalClaimCount} claims
         </Badge>
       </div>
-      <div className="grid gap-3 lg:grid-cols-2">
-        <FilterGroup
-          label="Claim status"
-          value={agentStatus}
-          options={agentStatusOptions}
-          onChange={onAgentStatusChange}
-        />
-        <FilterGroup
-          label="Human status"
-          value={humanStatus}
-          options={humanStatusOptions}
-          onChange={onHumanStatusChange}
-        />
-      </div>
+      <FilterGroup
+        label="Claim"
+        value={agentStatus}
+        options={agentStatusOptions}
+        onChange={onAgentStatusChange}
+      />
+      <FilterGroup
+        label="Human"
+        value={humanStatus}
+        options={humanStatusOptions}
+        onChange={onHumanStatusChange}
+      />
     </div>
   );
 }
@@ -276,11 +276,11 @@ function FilterGroup({
   onChange: (value: FilterValue) => void;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-2">
-      <p className="text-xs font-medium uppercase text-muted-foreground">
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+      <p className="mr-0.5 text-xs font-medium text-muted-foreground">
         {label}
       </p>
-      <div className="flex flex-wrap gap-2" role="group" aria-label={label}>
+      <div className="flex flex-wrap gap-1.5" role="group" aria-label={label}>
         <FilterButton active={value === "all"} onClick={() => onChange("all")}>
           All
         </FilterButton>
@@ -312,6 +312,7 @@ function FilterButton({
       type="button"
       size="sm"
       variant={active ? "default" : "outline"}
+      className="h-6 rounded-md px-2 text-xs"
       aria-pressed={active}
       onClick={onClick}
     >
