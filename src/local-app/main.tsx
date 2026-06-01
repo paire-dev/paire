@@ -7,7 +7,17 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { Check, ChevronDown, MessageSquare, ThumbsUp } from "lucide-react";
+import {
+  ArrowLeftFromLine,
+  ArrowRightFromLine,
+  Check,
+  ChevronDown,
+  MessageSquare,
+  Monitor,
+  Moon,
+  Sun,
+  ThumbsUp,
+} from "lucide-react";
 import * as React from "react";
 import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
@@ -28,6 +38,11 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "./components/ui/collapsible";
+import {
+  ThemeProvider,
+  useTheme,
+  type Theme,
+} from "./components/theme-provider";
 import { cn } from "./lib/utils";
 import "./styles.css";
 
@@ -98,9 +113,11 @@ async function fetchReview() {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <ReviewScreen />
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <ReviewScreen />
+      </QueryClientProvider>
+    </ThemeProvider>
   );
 }
 
@@ -112,7 +129,8 @@ function ReviewScreen() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["review"],
     queryFn: fetchReview,
-    refetchInterval: 2_500,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
   });
 
   if (isLoading) {
@@ -154,6 +172,7 @@ function ReviewScreen() {
         <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
           <Badge variant="outline">{data.git.branch}</Badge>
           <Badge variant="outline">{data.burden}</Badge>
+          <ModeToggle />
         </div>
       </header>
 
@@ -179,6 +198,69 @@ function ReviewScreen() {
         )}
       </section>
     </main>
+  );
+}
+
+function ModeToggle() {
+  const { theme, setTheme } = useTheme();
+
+  return (
+    <div className="inline-flex overflow-hidden rounded-md border bg-background">
+      <ThemeButton
+        theme="light"
+        active={theme === "light"}
+        label="Light"
+        onClick={() => setTheme("light")}
+      >
+        <Sun data-icon="inline-start" />
+      </ThemeButton>
+      <ThemeButton
+        theme="dark"
+        active={theme === "dark"}
+        label="Dark"
+        onClick={() => setTheme("dark")}
+      >
+        <Moon data-icon="inline-start" />
+      </ThemeButton>
+      <ThemeButton
+        theme="system"
+        active={theme === "system"}
+        label="System"
+        onClick={() => setTheme("system")}
+      >
+        <Monitor data-icon="inline-start" />
+      </ThemeButton>
+    </div>
+  );
+}
+
+function ThemeButton({
+  active,
+  children,
+  label,
+  onClick,
+  theme,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  theme: Theme;
+}) {
+  return (
+    <Button
+      type="button"
+      size="icon"
+      variant={active ? "default" : "ghost"}
+      className="size-7 rounded-none border-0 shadow-none"
+      aria-label={`${label} theme`}
+      aria-pressed={active}
+      title={`${label} theme`}
+      data-theme={theme}
+      onClick={onClick}
+    >
+      {children}
+    </Button>
   );
 }
 
@@ -456,8 +538,15 @@ function InfoPanel({
   return (
     <div className="min-h-22 rounded-lg bg-muted p-4">
       <div className="text-sm leading-relaxed text-muted-foreground">
-        <span aria-hidden="true" className="mr-2 text-foreground">
-          {direction === "left" ? "<-" : "->"}
+        <span
+          aria-hidden="true"
+          className="mr-2 inline-flex items-center text-foreground"
+        >
+          {direction === "left" ? (
+            <ArrowLeftFromLine className="size-4" />
+          ) : (
+            <ArrowRightFromLine className="size-4" />
+          )}
         </span>
         <strong>{label}:</strong> <AiText source={text} inline />
       </div>
@@ -485,6 +574,9 @@ function AiText({
 function EvidenceDiff({ evidence }: { evidence: Evidence }) {
   const [open, setOpen] = React.useState(false);
   const panelRef = React.useRef<HTMLDivElement>(null);
+  const { resolvedTheme } = useTheme();
+  const diffTheme =
+    resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
 
   const selectedLines = React.useMemo(
     () => ({
@@ -552,10 +644,12 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
         keepMounted
       >
         <PatchDiff
+          key={diffTheme}
           patch={evidence.diff}
           disableWorkerPool
           selectedLines={selectedLines}
           options={{
+            theme: diffTheme,
             diffStyle: "unified",
             overflow: "wrap",
             diffIndicators: "classic",
