@@ -180,12 +180,7 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
           <AiText source={claim.description} />
         </div>
       ) : null}
-      {thread.summary ? (
-        <div className="summary">
-          <AiText source={thread.summary} />
-        </div>
-      ) : null}
-
+      
       <div className="before-after">
         {evidence?.before && (
           <InfoPanel label="Before" direction="left" text={evidence?.before} />
@@ -194,6 +189,13 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
           <InfoPanel label="After" direction="right" text={evidence?.after} />
         )}
       </div>
+      
+      {thread.summary ? (
+        <div className="summary">
+          <AiText source={thread.summary} />
+        </div>
+      ) : null}
+
 
       {evidence ? <EvidenceDiff evidence={evidence} /> : null}
 

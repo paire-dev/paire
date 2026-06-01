@@ -350,6 +350,10 @@ async function reviewCommand(args: string[], ctx: Context) {
   }
 
   const packet = await createPendingPacket(ctx, session, git, lastApplied);
+  const diffFrom = lastApplied?.gitFingerprint ?? session.baseCommit;
+  const diffFromLabel = lastApplied
+    ? `last applied commit ${diffFrom}`
+    : `base commit ${diffFrom}`;
   ctx.stdout(
     [
       "Action required",
@@ -357,6 +361,9 @@ async function reviewCommand(args: string[], ctx: Context) {
       "Follow this steps:",
       "",
       `Since there were changes since the last applied revision (${lastApplied?.id ?? "none"}).`,
+      `Spot the difference in git (${diffFromLabel}..HEAD):`,
+      `git diff ${diffFrom}..HEAD`,
+      "",
       "Analyze this packet:",
       "Then run:",
       `paire review --apply ${packet.resultPath}`,
@@ -605,6 +612,7 @@ async function resetCommand(ctx: Context) {
     },
   );
   reset(session.id, baseCommit, now);
+  clearProjectReviewExports(ctx, session);
   ctx.stdout(
     `Reset Paire session for branch ${git.branch}. Review baseline set to ${baseCommit}.`,
   );
@@ -751,12 +759,24 @@ function insertArtifactRef(db: Database, kind: string, path: string) {
   return id;
 }
 
+function projectExportDirectory(ctx: Context, session: SessionRow) {
+  return join(ctx.projectsDir, session.projectKey);
+}
+
+function clearProjectReviewExports(ctx: Context, session: SessionRow) {
+  const directory = projectExportDirectory(ctx, session);
+  for (const filename of ["agent-result.json", "current-packet.json"]) {
+    const path = join(directory, filename);
+    if (existsSync(path)) unlinkSync(path);
+  }
+}
+
 async function writeCurrentPacketExport(
   ctx: Context,
   session: SessionRow,
   packetJson: string,
 ) {
-  const directory = join(ctx.projectsDir, session.projectKey);
+  const directory = projectExportDirectory(ctx, session);
   mkdirSync(directory, { recursive: true });
   const path = join(directory, "current-packet.json");
   await Bun.write(path, packetJson);

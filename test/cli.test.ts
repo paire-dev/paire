@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 type Fixture = {
   root: string;
@@ -395,6 +395,25 @@ test("reset clears review state on the current branch and re-baselines to baseCo
     .get();
   expect(featureClaims?.count).toBe(0);
   db.close();
+});
+
+test("reset removes exported agent-result and current-packet", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change value to two");
+
+  const review = runPaire(fixture, ["review"]);
+  const packetPath = extractPacketPath(review.stdout);
+  const exportDir = dirname(packetPath);
+  const agentResultPath = join(exportDir, "agent-result.json");
+  writeFileSync(agentResultPath, JSON.stringify({ stale: true }, null, 2));
+  expect(existsSync(packetPath)).toBe(true);
+  expect(existsSync(agentResultPath)).toBe(true);
+
+  expect(runPaire(fixture, ["reset"]).exitCode).toBe(0);
+  expect(existsSync(agentResultPath)).toBe(false);
+  expect(existsSync(packetPath)).toBe(false);
 });
 
 test("reset re-baselines review so the next packet covers branch changes since baseCommit", () => {
