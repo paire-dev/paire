@@ -1,6 +1,12 @@
 import { parsePatchFiles } from "@pierre/diffs";
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -142,6 +148,16 @@ const MAX_INLINE_SNIPPET_CHARS = 4_000;
 const MAX_TOTAL_SNIPPET_CHARS = 18_000;
 const MAX_PACKET_PREVIEW_CHARS = 16_000;
 const REVIEW_PORT = 0;
+const REVIEW_SERVER_START_TIMEOUT_MS = 5_000;
+
+type ReviewServerState = {
+  pid: number;
+  port: number;
+  url: string;
+  sessionId: string;
+  repoRoot: string;
+  startedAt: number;
+};
 const VALID_AGENT_STATUSES = new Set([
   "new",
   "unchanged",
@@ -180,6 +196,12 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
       case "sync":
         await syncCommand(ctx);
         return 0;
+      case "_review-serve": {
+        const sessionId = rest[0];
+        if (!sessionId) throw new Error("Missing session id.");
+        await reviewServeCommand(sessionId, ctx);
+        return 0;
+      }
       case "help":
       case "--help":
       case "-h":
@@ -799,14 +821,52 @@ async function printStatusAndOpen(
   await openReviewUi(ctx, session, git);
 }
 
-async function openReviewUi(ctx: Context, session: SessionRow, git: GitState) {
+async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
   if (ctx.env.PAIRE_BROWSER_HTML_CAPTURE) {
     await Bun.write(
       ctx.env.PAIRE_BROWSER_HTML_CAPTURE,
       await Bun.file(join(import.meta.dir, "../local-app/index.html")).text(),
     );
   }
-  const server = Bun.serve({
+
+  if (ctx.env.PAIRE_BROWSER_CAPTURE) {
+    const server = createReviewServer(session, ctx);
+    const url = reviewUiUrl(server.port);
+    await ctx.openBrowser(url);
+    ctx.stdout(reviewUiMessage(url));
+    server.stop();
+    return;
+  }
+
+  const statePath = reviewServerStatePath(ctx, session.id);
+  const existing = readReviewServerState(statePath);
+  if (existing?.pid && isProcessRunning(existing.pid)) {
+    await ctx.openBrowser(existing.url);
+    ctx.stdout(reviewUiMessage(existing.url));
+    return;
+  }
+
+  if (existing) {
+    unlinkSync(statePath);
+  }
+
+  const cliPath = join(import.meta.dir, "../cli.ts");
+  Bun.spawn([process.execPath, cliPath, "_review-serve", session.id], {
+    cwd: session.repoRoot,
+    env: { ...ctx.env, PAIRE_HOME: ctx.paireHome },
+    stdout: "ignore",
+    stderr: "ignore",
+    stdin: "ignore",
+    detached: true,
+  }).unref();
+
+  const state = await waitForReviewServerState(statePath);
+  await ctx.openBrowser(state.url);
+  ctx.stdout(reviewUiMessage(state.url));
+}
+
+function createReviewServer(session: SessionRow, ctx: Context) {
+  return Bun.serve({
     hostname: "127.0.0.1",
     port: REVIEW_PORT,
     routes: {
@@ -819,20 +879,95 @@ async function openReviewUi(ctx: Context, session: SessionRow, git: GitState) {
         handleCommentRequest(request, session, ctx),
     },
   });
-  const url = `http://127.0.0.1:${server.port}/`;
-  await ctx.openBrowser(url);
-  ctx.stdout(
-    [
-      `Review UI: ${url}`,
-      `Open this URL in the browser: ${url}`,
-      "Press Ctrl+C to stop.",
-    ].join("\n"),
-  );
-  if (ctx.env.PAIRE_BROWSER_CAPTURE) {
-    server.stop();
-    return;
+}
+
+async function reviewServeCommand(sessionId: string, ctx: Context) {
+  const session = ctx.db
+    .query<SessionRow, [string]>("select * from sessions where id = ?")
+    .get(sessionId);
+  if (!session) {
+    throw new Error(`Session not found: ${sessionId}`);
   }
+
+  const statePath = reviewServerStatePath(ctx, sessionId);
+  mkdirSync(dirname(statePath), { recursive: true });
+
+  const server = createReviewServer(session, ctx);
+  const port = server.port;
+  if (port == null) {
+    throw new Error("Review UI server did not bind to a port.");
+  }
+  const url = reviewUiUrl(port);
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      pid: process.pid,
+      port,
+      url,
+      sessionId,
+      repoRoot: session.repoRoot,
+      startedAt: Date.now(),
+    } satisfies ReviewServerState),
+  );
+
+  const shutdown = () => {
+    server.stop();
+    try {
+      unlinkSync(statePath);
+    } catch {
+      // ignore missing state file
+    }
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
   await new Promise(() => undefined);
+}
+
+function reviewServerStatePath(ctx: Context, sessionId: string) {
+  return join(ctx.paireHome, "review-servers", `${sessionId}.json`);
+}
+
+function readReviewServerState(path: string) {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as ReviewServerState;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForReviewServerState(path: string) {
+  const deadline = Date.now() + REVIEW_SERVER_START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const state = readReviewServerState(path);
+    if (state?.url) return state;
+    await Bun.sleep(50);
+  }
+  throw new Error("Review UI server failed to start.");
+}
+
+function isProcessRunning(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function reviewUiUrl(port: number | undefined) {
+  if (port == null) {
+    throw new Error("Review UI server did not bind to a port.");
+  }
+  return `http://127.0.0.1:${port}/`;
+}
+
+function reviewUiMessage(url: string) {
+  return [`Review UI: ${url}`, `Open this URL in the browser: ${url}`].join(
+    "\n",
+  );
 }
 
 async function handleReviewRequest(
