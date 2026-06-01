@@ -141,19 +141,12 @@ type ChangedFile = {
   summarized: boolean;
 };
 
-type TouchedSnippetLine = {
-  kind: "added" | "removed" | "unchanged";
-  oldLine: number | null;
-  newLine: number | null;
-};
-
 type TouchedSnippet = {
   filePath: string;
   startLine: number;
   endLine: number;
   hunkHeader?: string;
   text: string;
-  changedLines?: TouchedSnippetLine[];
   addedRanges?: Array<{ startLine: number; endLine: number }>;
   summarized: boolean;
 };
@@ -854,11 +847,12 @@ function dirtyWorktreeMessage(git: GitState) {
     `Current HEAD: ${git.head}`,
     "",
     "Safe inspection:",
-    "git status --short",
-    "git diff --stat",
+    "`git status --short`",
+    "`git diff --stat`",
     "",
     "Commit or discard the worktree changes, then run:",
-    "paire review",
+    "`paire review`",
+    "then follow the instructions to apply the review changes",
   ].join("\n");
 }
 
@@ -1742,13 +1736,6 @@ function touchedSnippets(diff: string): TouchedSnippet[] {
           ),
           hunkHeader: hunk.hunkSpecs,
           text,
-          changedLines: summarize
-            ? undefined
-            : annotated!.lines.map(({ kind, oldLine, newLine }) => ({
-                kind,
-                oldLine,
-                newLine,
-              })),
           addedRanges: summarize
             ? undefined
             : addedLineRanges(annotated!.lines),

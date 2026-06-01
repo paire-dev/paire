@@ -194,6 +194,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
     "validateWorkspace",
   );
   expect(firstPacket.touchedSnippets[0]?.text).toMatch(/\d+\|\+/);
+  expect(firstPacket.touchedSnippets[0]?.changedLines).toBeUndefined();
 
   const firstResult = join(fixture.root, "sandbox-agent-result.json");
   writeFileSync(
@@ -247,6 +248,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   expect(secondPacket.touchedSnippets[0]?.addedRanges).toEqual([
     { startLine: 7, endLine: 8 },
   ]);
+  expect(secondPacket.touchedSnippets[0]?.changedLines).toBeUndefined();
   expect(secondPacket.touchedSnippets[0]?.text).toContain(
     "8|+export const workspaceValidationVersion = 2;",
   );

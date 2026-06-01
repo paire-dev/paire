@@ -470,8 +470,6 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
 }
 
 function ClaimCard({ claim }: { claim: Claim }) {
-  const evidence = claim.evidences[0];
-
   return (
     <Card>
       <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -493,37 +491,71 @@ function ClaimCard({ claim }: { claim: Claim }) {
           </CardDescription>
         ) : null}
 
-        {(evidence?.before || evidence?.after) && (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {evidence?.before && (
-              <InfoPanel
-                label="Before"
-                direction="left"
-                text={evidence?.before}
+        {claim.evidences.length > 0 ? (
+          <div className="flex flex-col gap-4">
+            {claim.evidences.map((evidence, index) => (
+              <EvidenceBlock
+                key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
+                evidence={evidence}
+                index={index}
+                total={claim.evidences.length}
               />
-            )}
-            {evidence?.after && (
-              <InfoPanel
-                label="After"
-                direction="right"
-                text={evidence?.after}
-              />
-            )}
+            ))}
           </div>
-        )}
-
-        {evidence ? <EvidenceDiff evidence={evidence} /> : null}
+        ) : null}
       </CardContent>
 
       <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
         <code className="font-mono text-sm text-muted-foreground">
-          {evidence
-            ? `${evidence.filePath}:${evidence.startLine}-${evidence.endLine}`
-            : "No evidence span"}
+          {claim.evidences.length === 0
+            ? "No evidence span"
+            : `${claim.evidences.length} evidence ${claim.evidences.length === 1 ? "span" : "spans"}`}
         </code>
         <ClaimActions claim={claim} />
       </CardFooter>
     </Card>
+  );
+}
+
+function EvidenceBlock({
+  evidence,
+  index,
+  total,
+}: {
+  evidence: Evidence;
+  index: number;
+  total: number;
+}) {
+  return (
+    <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <code className="font-mono text-sm text-muted-foreground">
+          {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
+        </code>
+        {total > 1 ? (
+          <Badge variant="outline" className="text-muted-foreground">
+            Evidence {index + 1} of {total}
+          </Badge>
+        ) : null}
+      </div>
+
+      {(evidence.before || evidence.after) && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {evidence.before && (
+            <InfoPanel
+              label="Before"
+              direction="left"
+              text={evidence.before}
+            />
+          )}
+          {evidence.after && (
+            <InfoPanel label="After" direction="right" text={evidence.after} />
+          )}
+        </div>
+      )}
+
+      <EvidenceDiff evidence={evidence} />
+    </div>
   );
 }
 
