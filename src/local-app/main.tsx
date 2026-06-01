@@ -219,21 +219,74 @@ function AiText({ source, inline = false }: { source: string; inline?: boolean }
 }
 
 function EvidenceDiff({ evidence }: { evidence: Evidence }) {
+  const [open, setOpen] = React.useState(false);
+  const panelRef = React.useRef<HTMLDivElement>(null);
+
+  const selectedLines = React.useMemo(
+    () => ({
+      start: evidence.startLine,
+      end: evidence.endLine,
+      side: "additions" as const,
+      endSide: "additions" as const,
+    }),
+    [evidence.endLine, evidence.startLine],
+  );
+
+  React.useEffect(() => {
+    if (!open) return;
+
+    let frame = 0;
+    let attempts = 0;
+    const scrollToSelectedLine = () => {
+      attempts += 1;
+      const panel = panelRef.current;
+      const diffRoot = panel?.querySelector("diffs-container");
+      const target = diffRoot?.shadowRoot?.querySelector<HTMLElement>(
+        '[data-selected-line="first"], [data-selected-line="single"], [data-selected-line]',
+      );
+
+      if (!panel || !target) {
+        if (attempts < 12) frame = window.requestAnimationFrame(scrollToSelectedLine);
+        return;
+      }
+
+      const panelRect = panel.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      panel.scrollTo({
+        top:
+          panel.scrollTop +
+          targetRect.top -
+          panelRect.top -
+          panel.clientHeight * 0.35,
+        behavior: "smooth",
+      });
+    };
+
+    frame = window.requestAnimationFrame(scrollToSelectedLine);
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, evidence.diff, selectedLines]);
+
   if (!evidence.diff) return null;
 
   return (
-    <Collapsible className="diff-collapsible" defaultOpen={false}>
+    <Collapsible
+      className="diff-collapsible"
+      open={open}
+      onOpenChange={setOpen}
+    >
       <CollapsibleTrigger className="diff-trigger">
         <span>Code diff</span>
         <ChevronDown size={18} aria-hidden="true" />
       </CollapsibleTrigger>
-      <CollapsibleContent className="diff-panel" keepMounted>
+      <CollapsibleContent ref={panelRef} className="diff-panel" keepMounted>
         <PatchDiff
           patch={evidence.diff}
           disableWorkerPool
+          selectedLines={selectedLines}
           options={{
             diffStyle: "unified",
             overflow: "wrap",
+            diffIndicators: "classic",
             disableLineNumbers: false,
             disableFileHeader: false,
           }}
