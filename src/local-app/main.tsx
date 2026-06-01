@@ -32,6 +32,7 @@ import { cn } from "./lib/utils";
 import "./styles.css";
 
 type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
+type FilterValue = "all" | string;
 
 type Evidence = {
   filePath: string;
@@ -82,6 +83,12 @@ const queryClient = new QueryClient({
 const pageClassName = "mx-auto w-full max-w-5xl px-3 py-5 sm:px-5 sm:py-6";
 const proseClassName =
   "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
+const humanStatusOptions: Array<HumanStatus> = [
+  "unreviewed",
+  "accepted",
+  "concern",
+  "irrelevant",
+];
 
 async function fetchReview() {
   const response = await fetch("/api/review", { cache: "no-store" });
@@ -98,6 +105,10 @@ function App() {
 }
 
 function ReviewScreen() {
+  const [agentStatusFilter, setAgentStatusFilter] =
+    React.useState<FilterValue>("all");
+  const [humanStatusFilter, setHumanStatusFilter] =
+    React.useState<FilterValue>("all");
   const { data, isLoading, isError } = useQuery({
     queryKey: ["review"],
     queryFn: fetchReview,
@@ -120,6 +131,15 @@ function ReviewScreen() {
     );
   }
 
+  const agentStatusOptions = getAgentStatusOptions(data.threads);
+  const filteredThreads = filterThreads(
+    data.threads,
+    agentStatusFilter,
+    humanStatusFilter,
+  );
+  const totalClaimCount = countClaims(data.threads);
+  const filteredClaimCount = countClaims(filteredThreads);
+
   return (
     <main className={pageClassName}>
       <header className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -137,18 +157,203 @@ function ReviewScreen() {
         </div>
       </header>
 
+      <FilterBar
+        agentStatus={agentStatusFilter}
+        humanStatus={humanStatusFilter}
+        agentStatusOptions={agentStatusOptions}
+        totalClaimCount={totalClaimCount}
+        filteredClaimCount={filteredClaimCount}
+        onAgentStatusChange={setAgentStatusFilter}
+        onHumanStatusChange={setHumanStatusFilter}
+      />
+
       <section className="grid gap-3.5">
         {data.threads.length === 0 ? (
           <EmptyState>No review claims have been applied yet.</EmptyState>
+        ) : filteredThreads.length === 0 ? (
+          <EmptyState>No claims match the current filters.</EmptyState>
         ) : (
-          data.threads.map((thread) =>
-            thread.claims.map((claim) => (
-              <ClaimCard key={claim.id} thread={thread} claim={claim} />
-            )),
-          )
+          filteredThreads.map((thread) => (
+            <ThreadGroup key={thread.id} thread={thread} />
+          ))
         )}
       </section>
     </main>
+  );
+}
+
+function getAgentStatusOptions(threads: Thread[]) {
+  const statuses = new Set<string>();
+  for (const thread of threads) {
+    for (const claim of thread.claims) {
+      statuses.add(claim.agentStatus);
+    }
+  }
+  return [...statuses].sort((a, b) =>
+    statusLabel(a).localeCompare(statusLabel(b)),
+  );
+}
+
+function filterThreads(
+  threads: Thread[],
+  agentStatus: FilterValue,
+  humanStatus: FilterValue,
+) {
+  return threads
+    .map((thread) => ({
+      ...thread,
+      claims: thread.claims.filter((claim) => {
+        const agentMatches =
+          agentStatus === "all" || claim.agentStatus === agentStatus;
+        const humanMatches =
+          humanStatus === "all" || claim.humanStatus === humanStatus;
+        return agentMatches && humanMatches;
+      }),
+    }))
+    .filter((thread) => thread.claims.length > 0);
+}
+
+function countClaims(threads: Thread[]) {
+  return threads.reduce((total, thread) => total + thread.claims.length, 0);
+}
+
+function statusLabel(status: string) {
+  return status.replaceAll("_", " ");
+}
+
+function FilterBar({
+  agentStatus,
+  humanStatus,
+  agentStatusOptions,
+  totalClaimCount,
+  filteredClaimCount,
+  onAgentStatusChange,
+  onHumanStatusChange,
+}: {
+  agentStatus: FilterValue;
+  humanStatus: FilterValue;
+  agentStatusOptions: string[];
+  totalClaimCount: number;
+  filteredClaimCount: number;
+  onAgentStatusChange: (status: FilterValue) => void;
+  onHumanStatusChange: (status: FilterValue) => void;
+}) {
+  return (
+    <div className="mb-5 flex flex-col gap-3 rounded-lg border bg-card p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-medium">Filters</p>
+        <Badge variant="outline" className="text-muted-foreground">
+          {filteredClaimCount} of {totalClaimCount} claims
+        </Badge>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <FilterGroup
+          label="Claim status"
+          value={agentStatus}
+          options={agentStatusOptions}
+          onChange={onAgentStatusChange}
+        />
+        <FilterGroup
+          label="Human status"
+          value={humanStatus}
+          options={humanStatusOptions}
+          onChange={onHumanStatusChange}
+        />
+      </div>
+    </div>
+  );
+}
+
+function FilterGroup({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: FilterValue;
+  options: string[];
+  onChange: (value: FilterValue) => void;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <p className="text-xs font-medium uppercase text-muted-foreground">
+        {label}
+      </p>
+      <div className="flex flex-wrap gap-2" role="group" aria-label={label}>
+        <FilterButton active={value === "all"} onClick={() => onChange("all")}>
+          All
+        </FilterButton>
+        {options.map((option) => (
+          <FilterButton
+            key={option}
+            active={value === option}
+            onClick={() => onChange(option)}
+          >
+            {statusLabel(option)}
+          </FilterButton>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FilterButton({
+  active,
+  children,
+  onClick,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant={active ? "default" : "outline"}
+      aria-pressed={active}
+      onClick={onClick}
+    >
+      {children}
+    </Button>
+  );
+}
+
+function ThreadGroup({ thread }: { thread: Thread }) {
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2 rounded-lg border bg-background p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold leading-snug">
+              <AiText source={thread.title || "Behavior"} inline />
+            </h2>
+            {thread.summary ? (
+              <div className="mt-1 text-sm leading-relaxed text-muted-foreground">
+                <AiText source={thread.summary} />
+              </div>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant="secondary">
+              {thread.claims.length}{" "}
+              {thread.claims.length === 1 ? "claim" : "claims"}
+            </Badge>
+            {thread.status ? (
+              <Badge variant="outline" className="text-muted-foreground">
+                {statusLabel(thread.status)}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      <div className="grid gap-3">
+        {thread.claims.map((claim) => (
+          <ClaimCard key={claim.id} claim={claim} />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -180,31 +385,27 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
   );
 }
 
-function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
+function ClaimCard({ claim }: { claim: Claim }) {
   const evidence = claim.evidences[0];
-  const statusLabel = claim.agentStatus.replaceAll("_", " ");
 
   return (
     <Card>
       <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <Badge variant="secondary" className="px-2.5 py-1 text-sm">
-          <AiText source={thread.title || "Behavior"} inline />
-        </Badge>
+        <CardTitle className="text-xl font-medium leading-snug">
+          <AiText source={claim.title} />
+        </CardTitle>
         <CardAction className="flex flex-wrap items-center gap-2">
           {claim.updatedAt ? (
             <ClaimTimeAgo updatedAt={claim.updatedAt} />
           ) : null}
-          <Badge variant="destructive">{statusLabel}</Badge>
+          <Badge variant="destructive">{statusLabel(claim.agentStatus)}</Badge>
           <Badge variant="outline" className="text-muted-foreground">
-            {claim.humanStatus === "accepted" ? "accepted" : "observed"}
+            {statusLabel(claim.humanStatus)}
           </Badge>
         </CardAction>
       </CardHeader>
 
       <CardContent className="flex flex-col gap-4">
-        <CardTitle className="text-xl font-medium leading-snug">
-          <AiText source={claim.title} />
-        </CardTitle>
         {claim.description ? (
           <CardDescription className="text-base leading-relaxed">
             <AiText source={claim.description} />
@@ -229,12 +430,6 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
             )}
           </div>
         )}
-
-        {thread.summary ? (
-          <CardDescription className="text-base leading-relaxed">
-            <AiText source={thread.summary} />
-          </CardDescription>
-        ) : null}
 
         {evidence ? <EvidenceDiff evidence={evidence} /> : null}
       </CardContent>
