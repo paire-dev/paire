@@ -9,6 +9,7 @@ import {
 import { Check, ChevronDown, MessageSquare, ThumbsUp } from "lucide-react";
 import * as React from "react";
 import { createRoot } from "react-dom/client";
+import { Streamdown } from "streamdown";
 
 import { Button } from "./components/ui/button";
 import {
@@ -136,7 +137,9 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
   return (
     <article className="claim-card">
       <div className="claim-header">
-        <span className="category-pill">{thread.title || "Behavior"}</span>
+        <div className="category-pill">
+          <AiText source={thread.title || "Behavior"} />
+        </div>
         <div className="status-group">
           <span className="severity-pill">{statusLabel}</span>
           <span className="observed">
@@ -145,8 +148,14 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
         </div>
       </div>
 
-      <h2>{claim.text}</h2>
-      {thread.summary ? <p className="summary">{thread.summary}</p> : null}
+      <div className="claim-title">
+        <AiText source={claim.text} />
+      </div>
+      {thread.summary ? (
+        <div className="summary">
+          <AiText source={thread.summary} />
+        </div>
+      ) : null}
 
       <div className="before-after">
         <InfoPanel
@@ -189,11 +198,22 @@ function InfoPanel({
 }) {
   return (
     <div className="info-panel">
-      <p>
+      <div className="info-copy">
         <span aria-hidden="true">{direction === "left" ? "<-" : "->"}</span>
-        <strong>{label}:</strong> {text}
-      </p>
+        <strong>{label}:</strong> <AiText source={text} inline />
+      </div>
     </div>
+  );
+}
+
+function AiText({ source, inline = false }: { source: string; inline?: boolean }) {
+  return (
+    <Streamdown
+      className={inline ? "ai-text ai-text-inline" : "ai-text"}
+      parseIncompleteMarkdown={false}
+    >
+      {source}
+    </Streamdown>
   );
 }
 

@@ -172,6 +172,42 @@ p {
   margin: 0;
 }
 
+.ai-text,
+.ai-text > :first-child {
+  margin-top: 0;
+}
+
+.ai-text,
+.ai-text > :last-child {
+  margin-bottom: 0;
+}
+
+.ai-text p {
+  margin: 0;
+}
+
+.ai-text ul,
+.ai-text ol {
+  margin: 0;
+  padding-left: 1.25em;
+}
+
+.ai-text code {
+  border-radius: 4px;
+  background: color-mix(in oklch, var(--muted), black 3%);
+  padding: 0.1em 0.25em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.ai-text-inline {
+  display: inline;
+}
+
+.ai-text-inline > * {
+  display: inline;
+}
+
 h1 {
   font-size: 28px;
   line-height: 1.15;
@@ -241,7 +277,7 @@ h1 {
   color: oklch(0.62 0.006 326);
 }
 
-.claim-card h2 {
+.claim-title {
   margin-top: 28px;
   font-size: 30px;
   line-height: 1.2;
@@ -270,18 +306,18 @@ h1 {
   padding: 24px 22px;
 }
 
-.info-panel p {
+.info-copy {
   color: oklch(0.4 0.012 326);
   font-size: 22px;
   line-height: 1.38;
 }
 
-.info-panel span {
+.info-copy span {
   margin-right: 8px;
   color: oklch(0.34 0.01 326);
 }
 
-.info-panel strong {
+.info-copy strong {
   color: oklch(0.36 0.012 326);
 }
 
@@ -386,12 +422,12 @@ h1 {
     padding: 18px;
   }
 
-  .claim-card h2 {
+  .claim-title {
     font-size: 24px;
   }
 
   .summary,
-  .info-panel p,
+  .info-copy,
   .claim-footer code,
   .segment {
     font-size: 17px;
