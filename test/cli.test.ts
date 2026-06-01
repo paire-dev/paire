@@ -300,6 +300,58 @@ test("project keys use a GitHub owner repo prefix with an isolated packet export
   expect(packet.projectKey).toMatch(/^github\/acme\/widgets\//);
 });
 
+test("claim ids are scoped per session when repositories share PAIRE_HOME", () => {
+  const first = createFixtureRepo();
+  const second = createFixtureRepo();
+  second.home = first.home;
+
+  for (const fixture of [first, second]) {
+    expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+    writeFileSync(
+      join(fixture.repo, "src/app.ts"),
+      "export const value = 2;\n",
+    );
+    commitAll(fixture.repo, "change value to two");
+
+    const review = runPaire(fixture, ["review"]);
+    const packet = JSON.parse(
+      readFileSync(extractPacketPath(review.stdout), "utf8"),
+    );
+    const resultPath = join(fixture.root, "result.json");
+    writeFileSync(
+      resultPath,
+      JSON.stringify(hardcodedAgentResult(packet), null, 2),
+    );
+    expect(
+      runPaire(fixture, ["review", "--apply", resultPath, "--no-open"])
+        .exitCode,
+    ).toBe(0);
+  }
+
+  const db = new Database(join(first.home, "paire.db"));
+  const sessions = db
+    .query<{ id: string }, []>("select id from sessions order by createdAt")
+    .all();
+  expect(sessions).toHaveLength(2);
+  for (const session of sessions) {
+    const claims = db
+      .query<{ count: number }, [string]>(
+        "select count(*) as count from claims where sessionId = ?",
+      )
+      .get(session.id);
+    expect(claims?.count).toBe(1);
+  }
+  const claimIds = db
+    .query<{ id: string }, []>("select id from claims order by id")
+    .all()
+    .map((row) => row.id);
+  expect(new Set(claimIds).size).toBe(2);
+  expect(claimIds.every((id) => id.includes(":claim_auth_before_create"))).toBe(
+    true,
+  );
+  db.close();
+});
+
 test("stale apply is rejected without mutating claims or opening browser", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -12,18 +12,18 @@ const cliPath = resolve(import.meta.dirname, "../src/cli.ts");
 run(["git", "init", "-b", "main", repo], root);
 run(["git", "config", "user.email", "smoke@example.com"], repo);
 run(["git", "config", "user.name", "Paire Smoke"], repo);
-write(join(repo, "src/app.ts"), [
+await write(join(repo, "src/app.ts"), [
   "export function createProject(name: string) {",
   "  return { name };",
   "}",
   "",
 ]);
-writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}\n');
+await Bun.write(join(repo, "package-lock.json"), '{"lockfileVersion":3}\n');
 run(["git", "add", "."], repo);
 run(["git", "commit", "-m", "initial"], repo);
 
 runPaire(["start", "--base", "main", "--goal", "CLI smoke workflow"]);
-write(join(repo, "src/app.ts"), [
+await write(join(repo, "src/app.ts"), [
   "export function createProject(user: { id: string } | null, name: string) {",
   "  if (!user) {",
   "    throw new Error('Unauthorized');",
@@ -32,7 +32,7 @@ write(join(repo, "src/app.ts"), [
   "}",
   "",
 ]);
-write(join(repo, "src/workspace.ts"), [
+await write(join(repo, "src/workspace.ts"), [
   "export function validateWorkspace(input: { name?: string }) {",
   "  if (!input.name) {",
   "    throw new Error('Missing workspace name');",
@@ -60,12 +60,12 @@ await Bun.write(
 );
 runPaire(["review", "--apply", firstResultPath]);
 
-writeFileSync(browserCapture, "");
+await Bun.write(browserCapture, "");
 const reopen = runPaire(["review"]);
 assert(!reopen.includes("PAIRE_AGENT_ACTION_REQUIRED"));
-assert(readFileSync(browserCapture, "utf8").includes("http://127.0.0.1:"));
+assert((await Bun.file(browserCapture).text()).includes("http://127.0.0.1:"));
 
-write(join(repo, "src/workspace.ts"), [
+await write(join(repo, "src/workspace.ts"), [
   "export function validateWorkspace(input: { name?: string }) {",
   "  if (!input.name) {",
   "    throw new Error('Missing workspace name');",
@@ -77,10 +77,10 @@ write(join(repo, "src/workspace.ts"), [
   "",
 ]);
 commitAll("add workspace validation version");
-writeFileSync(browserCapture, "");
+await Bun.write(browserCapture, "");
 const secondReview = runPaire(["review"]);
 assert(secondReview.includes("PAIRE_AGENT_ACTION_REQUIRED"));
-assert(readFileSync(browserCapture, "utf8") === "");
+assert((await Bun.file(browserCapture).text()) === "");
 const secondPacketPath = extractPacketPath(secondReview);
 const secondPacket = await Bun.file(secondPacketPath).json();
 assert(
@@ -95,9 +95,9 @@ await Bun.write(
 );
 runPaire(["review", "--apply", secondResultPath]);
 
-writeFileSync(browserCapture, "");
+await Bun.write(browserCapture, "");
 runPaire(["review"]);
-assert(readFileSync(browserCapture, "utf8").includes("http://127.0.0.1:"));
+assert((await Bun.file(browserCapture).text()).includes("http://127.0.0.1:"));
 
 console.log(`Sandbox: ${root}`);
 console.log(`Repo: ${repo}`);
@@ -142,9 +142,9 @@ function commitAll(message: string) {
   run(["git", "commit", "-m", message], repo);
 }
 
-function write(path: string, lines: string[]) {
+async function write(path: string, lines: string[]) {
   run(["mkdir", "-p", dirname(path)], root);
-  writeFileSync(path, lines.join("\n"), "utf8");
+  await Bun.write(path, lines.join("\n"));
 }
 
 function text(value: Uint8Array) {

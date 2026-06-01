@@ -1,6 +1,6 @@
 import { parsePatchFiles } from "@pierre/diffs";
 import { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import React from "react";
@@ -330,7 +330,7 @@ async function reviewCommand(args: string[], ctx: Context) {
     return;
   }
 
-  const packet = createPendingPacket(ctx, session, git, lastApplied);
+  const packet = await createPendingPacket(ctx, session, git, lastApplied);
   ctx.stdout(
     [
       "PAIRE_AGENT_ACTION_REQUIRED",
@@ -356,10 +356,9 @@ async function applyReviewCommand(
 ) {
   const raw = useStdin
     ? await new Response(Bun.stdin).text()
-    : readFileSync(
+    : await Bun.file(
         resolveRequiredPath(applyPath, "Missing --apply file."),
-        "utf8",
-      );
+      ).text();
   const payload = validateApplyPayload(JSON.parse(raw));
   const session = ctx.db
     .query<SessionRow, [string]>("select * from sessions where id = ?")
@@ -394,6 +393,7 @@ async function applyReviewCommand(
 
   const apply = ctx.db.transaction((value: AgentApplyPayload) => {
     for (const thread of value.threads) {
+      const threadDbId = scopedDbId(session.id, thread.id);
       ctx.db
         .prepare(
           `insert into change_threads (id, sessionId, title, summary, status, updatedAt)
@@ -401,7 +401,7 @@ async function applyReviewCommand(
            on conflict(id) do update set title = excluded.title, summary = excluded.summary, status = excluded.status, updatedAt = excluded.updatedAt`,
         )
         .run(
-          thread.id,
+          threadDbId,
           session.id,
           thread.title,
           thread.summary ?? "",
@@ -409,11 +409,12 @@ async function applyReviewCommand(
           Date.now(),
         );
       for (const claim of thread.claims) {
+        const claimDbId = scopedDbId(session.id, claim.id);
         const existingClaim = ctx.db
           .query<{ humanStatus: HumanStatus }, [string, string]>(
             "select humanStatus from claims where id = ? and sessionId = ?",
           )
-          .get(claim.id, session.id);
+          .get(claimDbId, session.id);
         ctx.db
           .prepare(
             `insert into claims (id, threadId, sessionId, text, agentStatus, humanStatus, updatedAt)
@@ -422,8 +423,8 @@ async function applyReviewCommand(
                agentStatus = excluded.agentStatus, updatedAt = excluded.updatedAt`,
           )
           .run(
-            claim.id,
-            thread.id,
+            claimDbId,
+            threadDbId,
             session.id,
             claim.text,
             claim.agentStatus,
@@ -432,7 +433,7 @@ async function applyReviewCommand(
           );
         ctx.db
           .prepare("delete from claim_evidences where claimId = ?")
-          .run(claim.id);
+          .run(claimDbId);
         for (const evidence of claim.evidences) {
           ctx.db
             .prepare(
@@ -441,7 +442,7 @@ async function applyReviewCommand(
             )
             .run(
               `ev_${crypto.randomUUID()}`,
-              claim.id,
+              claimDbId,
               revision.id,
               evidence.filePath,
               evidence.startLine,
@@ -492,7 +493,7 @@ async function syncCommand(ctx: Context) {
   );
 }
 
-function createPendingPacket(
+async function createPendingPacket(
   ctx: Context,
   session: SessionRow,
   git: GitState,
@@ -514,13 +515,13 @@ function createPendingPacket(
     ? gitDiffForCurrentState(lastApplied.gitFingerprint, session.repoRoot)
     : totalDiff;
   const packetId = `pkt_${revisionId}`;
-  const totalDiffArtifactPath = writeArtifact(
+  const totalDiffArtifactPath = await writeArtifact(
     ctx,
     "total-diff",
     `${packetId}.total.diff`,
     totalDiff,
   );
-  const incrementalDiffArtifactPath = writeArtifact(
+  const incrementalDiffArtifactPath = await writeArtifact(
     ctx,
     "incremental-diff",
     `${packetId}.incremental.diff`,
@@ -573,7 +574,7 @@ function createPendingPacket(
     ],
   };
   const packetJson = JSON.stringify(packet, null, 2);
-  const packetPath = writeCurrentPacketExport(ctx, session, packetJson);
+  const packetPath = await writeCurrentPacketExport(ctx, session, packetJson);
   const resultPath = join(dirname(packetPath), "agent-result.json");
   if (!existing) {
     ctx.db
@@ -602,7 +603,7 @@ function createPendingPacket(
   return { path: packetPath, resultPath, preview: packetPreview(packetJson) };
 }
 
-function writeArtifact(
+async function writeArtifact(
   ctx: Context,
   kind: string,
   filename: string,
@@ -611,7 +612,7 @@ function writeArtifact(
   const directory = join(ctx.artifactsDir, kind);
   mkdirSync(directory, { recursive: true });
   const path = join(directory, filename);
-  writeFileSync(path, contents, "utf8");
+  await Bun.write(path, contents);
   return path;
 }
 
@@ -623,7 +624,7 @@ function insertArtifactRef(db: Database, kind: string, path: string) {
   return id;
 }
 
-function writeCurrentPacketExport(
+async function writeCurrentPacketExport(
   ctx: Context,
   session: SessionRow,
   packetJson: string,
@@ -631,7 +632,7 @@ function writeCurrentPacketExport(
   const directory = join(ctx.projectsDir, session.projectKey);
   mkdirSync(directory, { recursive: true });
   const path = join(directory, "current-packet.json");
-  writeFileSync(path, packetJson, "utf8");
+  await Bun.write(path, packetJson);
   return path;
 }
 
@@ -713,7 +714,7 @@ async function openReviewUi(ctx: Context, session: SessionRow, git: GitState) {
   const data = buildReviewData(ctx.db, session, git);
   const html = renderReviewHtml(data);
   if (ctx.env.PAIRE_BROWSER_HTML_CAPTURE) {
-    writeFileSync(ctx.env.PAIRE_BROWSER_HTML_CAPTURE, html, "utf8");
+    await Bun.write(ctx.env.PAIRE_BROWSER_HTML_CAPTURE, html);
   }
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -745,6 +746,7 @@ async function handleReviewRequest(
   );
   if (request.method === "POST" && statusMatch) {
     const claimId = decodeURIComponent(statusMatch[1] ?? "");
+    const claimDbId = scopedDbId(data.session.id, claimId);
     const payload = (await request.json()) as { humanStatus?: unknown };
     if (
       typeof payload.humanStatus !== "string" ||
@@ -756,7 +758,7 @@ async function handleReviewRequest(
       .prepare(
         "update claims set humanStatus = ?, updatedAt = ? where id = ? and sessionId = ?",
       )
-      .run(payload.humanStatus, Date.now(), claimId, data.session.id);
+      .run(payload.humanStatus, Date.now(), claimDbId, data.session.id);
     if (update.changes === 0) {
       return Response.json({ error: "Claim not found." }, { status: 404 });
     }
@@ -766,7 +768,7 @@ async function handleReviewRequest(
       )
       .run(
         `mark_${crypto.randomUUID()}`,
-        claimId,
+        claimDbId,
         payload.humanStatus,
         Date.now(),
       );
@@ -788,7 +790,8 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
     .all(session.id)
     .map((thread) => ({
       ...thread,
-      claims: getClaimsForThread(db, thread.id),
+      id: publicDbId(session.id, thread.id),
+      claims: getClaimsForThread(db, session.id, thread.id),
     }));
   return {
     session,
@@ -798,14 +801,20 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
   };
 }
 
-function getClaimsForThread(db: Database, threadId: string) {
+function getClaimsForThread(
+  db: Database,
+  sessionId: string,
+  threadDbId: string,
+) {
   return db
     .query<AgentClaim, [string]>(
       "select id, threadId, text, agentStatus, humanStatus from claims where threadId = ? order by updatedAt desc",
     )
-    .all(threadId)
+    .all(threadDbId)
     .map((claim) => ({
       ...claim,
+      id: publicDbId(sessionId, claim.id),
+      threadId: publicDbId(sessionId, claim.threadId),
       evidences: db
         .query<
         AgentEvidence & { revisionId: string },
@@ -962,7 +971,9 @@ async function openBrowser(
   env: Record<string, string | undefined>,
 ) {
   if (env.PAIRE_BROWSER_CAPTURE) {
-    writeFileSync(env.PAIRE_BROWSER_CAPTURE, `${url}\n`, { flag: "a" });
+    const captureFile = Bun.file(env.PAIRE_BROWSER_CAPTURE);
+    const existing = await captureFile.exists() ? await captureFile.text() : "";
+    await Bun.write(env.PAIRE_BROWSER_CAPTURE, `${existing}${url}\n`);
     return;
   }
   const platform = process.platform;
@@ -1049,6 +1060,7 @@ function migrate(db: Database) {
   addNullableColumn(db, "revisions", "packetExportPath", "text");
   addNullableColumn(db, "revisions", "resultPath", "text");
   addNullableColumn(db, "revisions", "totalDiffArtifactId", "text");
+  scopeReviewIds(db);
 }
 
 function addNullableColumn(
@@ -1062,6 +1074,48 @@ function addNullableColumn(
   } catch {
     // SQLite throws when the column already exists.
   }
+}
+
+function scopeReviewIds(db: Database) {
+  db.exec(`
+    update claim_evidences
+       set claimId = (
+         select claims.sessionId || ':' || claim_evidences.claimId
+           from claims
+          where claims.id = claim_evidences.claimId
+       )
+     where exists (
+         select 1
+           from claims
+          where claims.id = claim_evidences.claimId
+            and instr(claims.id, claims.sessionId || ':') != 1
+       );
+
+    update human_review_marks
+       set claimId = (
+         select claims.sessionId || ':' || human_review_marks.claimId
+           from claims
+          where claims.id = human_review_marks.claimId
+       )
+     where exists (
+         select 1
+           from claims
+          where claims.id = human_review_marks.claimId
+            and instr(claims.id, claims.sessionId || ':') != 1
+       );
+
+    update claims
+       set threadId = sessionId || ':' || threadId
+     where instr(threadId, sessionId || ':') != 1;
+
+    update claims
+       set id = sessionId || ':' || id
+     where instr(id, sessionId || ':') != 1;
+
+    update change_threads
+       set id = sessionId || ':' || id
+     where instr(id, sessionId || ':') != 1;
+  `);
 }
 
 function getSession(db: Database, repoRoot: string) {
@@ -1120,6 +1174,8 @@ function getActiveClaims(db: Database, sessionId: string) {
     .all(sessionId);
   return rows.map((claim) => ({
     ...claim,
+    id: publicDbId(sessionId, claim.id),
+    threadId: publicDbId(sessionId, claim.threadId),
     evidences: db
       .query<
       AgentEvidence & { revisionId: string },
@@ -1127,6 +1183,15 @@ function getActiveClaims(db: Database, sessionId: string) {
     >("select filePath, startLine, endLine, symbol, fingerprint, revisionId from claim_evidences where claimId = ? order by filePath, startLine")
       .all(claim.id),
   }));
+}
+
+function scopedDbId(sessionId: string, publicId: string) {
+  return `${sessionId}:${publicId}`;
+}
+
+function publicDbId(sessionId: string, dbId: string) {
+  const prefix = `${sessionId}:`;
+  return dbId.startsWith(prefix) ? dbId.slice(prefix.length) : dbId;
 }
 
 function validateApplyPayload(value: unknown): AgentApplyPayload {
