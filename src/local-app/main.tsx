@@ -50,6 +50,7 @@ type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
 type FilterValue = "all" | string;
 
 type Evidence = {
+  claimId: string;
   filePath: string;
   startLine: number;
   endLine: number;
@@ -573,10 +574,39 @@ function AiText({
 
 function EvidenceDiff({ evidence }: { evidence: Evidence }) {
   const [open, setOpen] = React.useState(false);
+  const [diff, setDiff] = React.useState(evidence.diff ?? "");
+  const [diffError, setDiffError] = React.useState(false);
   const panelRef = React.useRef<HTMLDivElement>(null);
   const { resolvedTheme } = useTheme();
   const diffTheme =
     resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
+
+  React.useEffect(() => {
+    setDiff(evidence.diff ?? "");
+    setDiffError(false);
+  }, [evidence.diff, evidence.filePath]);
+
+  React.useEffect(() => {
+    if (!open || diff || diffError) return;
+
+    const controller = new AbortController();
+    fetch(
+      `/api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
+      { cache: "no-store", signal: controller.signal },
+    )
+      .then((response) => {
+        if (!response.ok) throw new Error("Failed to load evidence diff.");
+        return response.json() as Promise<{ diff?: string }>;
+      })
+      .then((payload) => {
+        setDiff(payload.diff ?? "");
+      })
+      .catch((error) => {
+        if ((error as Error).name !== "AbortError") setDiffError(true);
+      });
+
+    return () => controller.abort();
+  }, [diff, diffError, evidence.claimId, evidence.filePath, open]);
 
   const selectedLines = React.useMemo(
     () => ({
@@ -589,7 +619,7 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
   );
 
   React.useEffect(() => {
-    if (!open) return;
+    if (!open || !diff) return;
 
     let frame = 0;
     let attempts = 0;
@@ -621,9 +651,7 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
 
     frame = window.requestAnimationFrame(scrollToSelectedLine);
     return () => window.cancelAnimationFrame(frame);
-  }, [open, evidence.diff, selectedLines]);
-
-  if (!evidence.diff) return null;
+  }, [open, diff, selectedLines]);
 
   return (
     <Collapsible
@@ -641,22 +669,27 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
       <CollapsibleContent
         ref={panelRef}
         className="max-h-[520px] overflow-auto [&_code]:font-mono [&_pre]:font-mono"
-        keepMounted
       >
-        <PatchDiff
-          key={diffTheme}
-          patch={evidence.diff}
-          disableWorkerPool
-          selectedLines={selectedLines}
-          options={{
-            theme: diffTheme,
-            diffStyle: "unified",
-            overflow: "wrap",
-            diffIndicators: "classic",
-            disableLineNumbers: false,
-            disableFileHeader: false,
-          }}
-        />
+        {diff ? (
+          <PatchDiff
+            key={diffTheme}
+            patch={diff}
+            disableWorkerPool
+            selectedLines={selectedLines}
+            options={{
+              theme: diffTheme,
+              diffStyle: "unified",
+              overflow: "wrap",
+              diffIndicators: "classic",
+              disableLineNumbers: false,
+              disableFileHeader: false,
+            }}
+          />
+        ) : (
+          <div className="p-3 text-sm text-muted-foreground">
+            {diffError ? "Unable to load code diff." : "Loading code diff..."}
+          </div>
+        )}
       </CollapsibleContent>
     </Collapsible>
   );

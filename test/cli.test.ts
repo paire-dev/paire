@@ -287,6 +287,74 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   db.close();
 });
 
+test("review API loads without embedding raw diffs and serves evidence diffs on demand", async () => {
+  const fixture = createFixtureRepo();
+
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add workspace validation");
+
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "result.json");
+  writeFileSync(
+    resultPath,
+    JSON.stringify(hardcodedAgentResult(packet), null, 2),
+  );
+  expect(
+    runPaire(fixture, ["review", "--apply", resultPath, "--no-open"]).exitCode,
+  ).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const server = Bun.spawn(
+    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
+    {
+      cwd: fixture.repo,
+      env: { ...process.env, PAIRE_HOME: fixture.home },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const state = await waitForServerState(fixture.home, session!.id);
+    const reviewResponse = await fetch(`${state.url}api/review`);
+    expect(reviewResponse.ok).toBe(true);
+    const reviewText = await reviewResponse.text();
+    expect(reviewText).not.toContain('"diff":"diff --git');
+    const reviewData = JSON.parse(reviewText);
+    const evidence = reviewData.threads[0].claims[0].evidences[0];
+    expect(evidence.claimId).toBe("claim_auth_before_create");
+
+    const diffResponse = await fetch(
+      `${state.url}api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
+    );
+    expect(diffResponse.ok).toBe(true);
+    const diffPayload = await diffResponse.json();
+    expect(diffPayload.diff).toContain("diff --git a/src/app.ts b/src/app.ts");
+    expect(diffPayload.diff).toContain("throw new Error('Unauthorized')");
+  } finally {
+    server.kill();
+    await server.exited;
+  }
+});
+
 test("dirty worktree asks for committed changes instead of creating a packet", () => {
   const fixture = createFixtureRepo();
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
@@ -833,6 +901,18 @@ function extractPacketPath(stdout: string) {
     }
   }
   throw new Error(`Packet path missing from output:\n${stdout}`);
+}
+
+async function waitForServerState(home: string, sessionId: string) {
+  const path = join(home, "review-servers", `${sessionId}.json`);
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, "utf8")) as { url: string };
+    }
+    await Bun.sleep(50);
+  }
+  throw new Error("Review server did not start.");
 }
 
 function hardcodedAgentResult(packet: {

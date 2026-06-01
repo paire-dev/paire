@@ -59,6 +59,7 @@ type ClaimStatus =
 type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
 
 type AgentEvidence = {
+  claimId?: string;
   filePath: string;
   startLine: number;
   endLine: number;
@@ -909,6 +910,8 @@ function createReviewServer(session: SessionRow, ctx: Context) {
       "/": reviewApp,
       "/api/review": (request: Request) =>
         handleReviewRequest(request, session, ctx),
+      "/api/claims/:claimId/evidence-diff": (request: Request) =>
+        handleEvidenceDiffRequest(request, session, ctx),
       "/api/claims/:claimId/human-status": (request: Request) =>
         handleHumanStatusRequest(request, session, ctx),
       "/api/claims/:claimId/comment": (request: Request) =>
@@ -1064,6 +1067,45 @@ async function handleHumanStatusRequest(
   return Response.json({ ok: true });
 }
 
+async function handleEvidenceDiffRequest(
+  request: Request,
+  session: SessionRow,
+  ctx: Context,
+) {
+  if (request.method !== "GET") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  const claimId = (request as Request & { params: { claimId: string } }).params
+    .claimId;
+  const filePath = new URL(request.url).searchParams.get("filePath");
+  if (!filePath) {
+    return Response.json({ error: "Missing filePath." }, { status: 400 });
+  }
+
+  const claimDbId = scopedDbId(session.id, claimId);
+  const evidence = ctx.db
+    .query<{ filePath: string }, [string, string, string]>(
+      `select claim_evidences.filePath
+         from claim_evidences
+         join claims on claims.id = claim_evidences.claimId
+        where claims.id = ?
+          and claims.sessionId = ?
+          and claim_evidences.filePath = ?
+        limit 1`,
+    )
+    .get(claimDbId, session.id, filePath);
+  if (!evidence) {
+    return Response.json({ error: "Evidence not found." }, { status: 404 });
+  }
+
+  const totalDiff = gitDiffForCurrentState(
+    session.baseCommit,
+    session.repoRoot,
+    true,
+  );
+  return Response.json({ diff: fileToRawDiff(totalDiff, evidence.filePath) });
+}
+
 async function handleCommentRequest(
   request: Request,
   session: SessionRow,
@@ -1102,11 +1144,6 @@ async function handleCommentRequest(
 }
 
 function buildReviewData(db: Database, session: SessionRow, git: GitState) {
-  const totalDiff = gitDiffForCurrentState(
-    session.baseCommit,
-    session.repoRoot,
-    true,
-  );
   const threads = db
     .query<
       { id: string; title: string; summary: string; status: string },
@@ -1118,7 +1155,7 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
     .map((thread) => ({
       ...thread,
       id: publicDbId(session.id, thread.id),
-      claims: getClaimsForThread(db, session.id, thread.id, totalDiff),
+      claims: getClaimsForThread(db, session.id, thread.id),
     }));
   return {
     session,
@@ -1133,7 +1170,6 @@ function getClaimsForThread(
   db: Database,
   sessionId: string,
   threadDbId: string,
-  totalDiff: string,
 ) {
   return db
     .query<AgentClaim, [string]>(
@@ -1153,7 +1189,7 @@ function getClaimsForThread(
         .all(claim.id)
         .map((evidence) => ({
           ...evidence,
-          diff: fileToRawDiff(totalDiff, evidence.filePath),
+          claimId: publicDbId(sessionId, claim.id),
         })),
     }));
 }
