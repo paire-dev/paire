@@ -235,11 +235,41 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   const secondResult = join(fixture.root, "sandbox-agent-result-2.json");
   writeFileSync(
     secondResult,
-    JSON.stringify(sandboxAgentResult(secondPacket, "amended"), null, 2),
+    JSON.stringify(
+      sandboxAgentResult(secondPacket, "amended", {
+        authThreadTitle: "The model tried to rewrite an unchanged area",
+        authThreadSummary:
+          "The model tried to rewrite a summary for an unchanged area.",
+        authClaimText:
+          "The model tried to rewrite an unchanged claim even though the status is unchanged.",
+      }),
+      null,
+      2,
+    ),
   );
   const secondApply = runPaire(fixture, ["review", "--apply", secondResult]);
   expect(secondApply.exitCode).toBe(0);
   expect(secondApply.stdout).toContain("Review burden: 1 amended, 1 unchanged");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const unchangedThread = db
+    .query<{ title: string; summary: string }, []>(
+      "select title, summary from change_threads where id like '%:thread_sandbox_auth'",
+    )
+    .get();
+  const unchangedClaim = db
+    .query<{ text: string }, []>(
+      "select text from claims where id like '%:claim_sandbox_auth_required'",
+    )
+    .get();
+  expect(unchangedThread?.title).toBe("Auth validation");
+  expect(unchangedThread?.summary).toBe(
+    "Project creation rejects missing users before creating data.",
+  );
+  expect(unchangedClaim?.text).toBe(
+    "Project creation rejects missing users before returning project data.",
+  );
+  db.close();
 });
 
 test("dirty worktree asks for committed changes instead of creating a packet", () => {
@@ -666,6 +696,11 @@ function sandboxAgentResult(
     currentFingerprint: string;
   },
   workspaceStatus: "new" | "amended",
+  overrides: {
+    authThreadTitle?: string;
+    authThreadSummary?: string;
+    authClaimText?: string;
+  } = {},
 ) {
   return {
     packetId: packet.packetId,
@@ -674,18 +709,19 @@ function sandboxAgentResult(
     gitFingerprint: packet.currentFingerprint,
     threads: [
       {
-        id: "thread_sandbox_auth_workspace",
-        title: "Auth and workspace validation",
+        id: "thread_sandbox_auth",
+        title: overrides.authThreadTitle ?? "Auth validation",
         summary:
-          workspaceStatus === "new"
-            ? "Project creation rejects missing users and workspace validation rejects missing names."
-            : "Workspace validation now exposes a validation version marker.",
+          overrides.authThreadSummary ??
+          "Project creation rejects missing users before creating data.",
         status: "active",
         claims: [
           {
             id: "claim_sandbox_auth_required",
-            threadId: "thread_sandbox_auth_workspace",
-            text: "Project creation rejects missing users before returning project data.",
+            threadId: "thread_sandbox_auth",
+            text:
+              overrides.authClaimText ??
+              "Project creation rejects missing users before returning project data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
             humanStatus: "unreviewed",
             evidences: [
@@ -697,9 +733,20 @@ function sandboxAgentResult(
               },
             ],
           },
+        ],
+      },
+      {
+        id: "thread_sandbox_workspace",
+        title: "Workspace validation",
+        summary:
+          workspaceStatus === "new"
+            ? "Workspace validation rejects missing names."
+            : "Workspace validation now exposes a validation version marker.",
+        status: "active",
+        claims: [
           {
             id: "claim_sandbox_workspace_required",
-            threadId: "thread_sandbox_auth_workspace",
+            threadId: "thread_sandbox_workspace",
             text:
               workspaceStatus === "new"
                 ? "Workspace validation rejects inputs without a workspace name."

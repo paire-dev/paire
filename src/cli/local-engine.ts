@@ -401,6 +401,21 @@ async function applyReviewCommand(
   const apply = ctx.db.transaction((value: AgentApplyPayload) => {
     for (const thread of value.threads) {
       const threadDbId = scopedDbId(session.id, thread.id);
+      const existingThread = ctx.db
+        .query<
+          { title: string; summary: string; status: string },
+          [string, string]
+        >(
+          "select title, summary, status from change_threads where id = ? and sessionId = ?",
+        )
+        .get(threadDbId, session.id);
+      const preserveExistingThreadCopy =
+        !!existingThread &&
+        thread.claims.length > 0 &&
+        thread.claims.every((claim) =>
+          claim.agentStatus === "unchanged" ||
+          claim.agentStatus === "evidence_moved"
+        );
       ctx.db
         .prepare(
           `insert into change_threads (id, sessionId, title, summary, status, updatedAt)
@@ -410,18 +425,26 @@ async function applyReviewCommand(
         .run(
           threadDbId,
           session.id,
-          thread.title,
-          thread.summary ?? "",
-          thread.status ?? "active",
+          preserveExistingThreadCopy ? existingThread.title : thread.title,
+          preserveExistingThreadCopy
+            ? existingThread.summary
+            : (thread.summary ?? ""),
+          preserveExistingThreadCopy
+            ? existingThread.status
+            : (thread.status ?? "active"),
           Date.now(),
         );
       for (const claim of thread.claims) {
         const claimDbId = scopedDbId(session.id, claim.id);
         const existingClaim = ctx.db
-          .query<{ humanStatus: HumanStatus }, [string, string]>(
-            "select humanStatus from claims where id = ? and sessionId = ?",
+          .query<{ text: string; humanStatus: HumanStatus }, [string, string]>(
+            "select text, humanStatus from claims where id = ? and sessionId = ?",
           )
           .get(claimDbId, session.id);
+        const claimText =
+          existingClaim && claim.agentStatus === "unchanged"
+            ? existingClaim.text
+            : claim.text;
         ctx.db
           .prepare(
             `insert into claims (id, threadId, sessionId, text, agentStatus, humanStatus, updatedAt)
@@ -433,7 +456,7 @@ async function applyReviewCommand(
             claimDbId,
             threadDbId,
             session.id,
-            claim.text,
+            claimText,
             claim.agentStatus,
             existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed",
             Date.now(),
@@ -574,9 +597,14 @@ async function createPendingPacket(
         "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, text, agentStatus, humanStatus?, evidences[] }> }>",
     },
     rules: [
+      "Group related claims into area threads. Treat each thread as one review area with a short area title, not as a single diff line or file.",
+      "Order areas and claims for review, not alphabetically: start with the main behavior or core contract, then supporting helpers, then consumers/usages, then tests, generated files, config, and lockfiles.",
+      "Use the first area for the most important files or behavior a reviewer needs to understand before the rest of the change makes sense.",
+      "When updating an existing thread, keep its thread id stable. Only create a new thread when the claim does not fit an existing area.",
       "Update existing claims before creating new ones.",
       "Do not create new claims for line movement, formatting, renames, or helper extraction unless meaning changed.",
       "Set agentStatus to one of: new, unchanged, evidence_moved, amended, invalidated, superseded.",
+      "For unchanged claims, keep the existing title, claim text, and summary byte-for-byte. Only update evidence spans if the code moved.",
       "Put every evidence span under the claim that depends on it.",
       "Format human-facing title, summary, and claim text with Markdown.",
       "Keep titles short and direct.",
