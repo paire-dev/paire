@@ -1,5 +1,7 @@
 import { parsePatchFiles } from "@pierre/diffs";
 import { Database } from "bun:sqlite";
+
+import { addedLineRanges, annotateHunkText } from "./diff-line-numbers";
 import {
   existsSync,
   mkdirSync,
@@ -139,12 +141,20 @@ type ChangedFile = {
   summarized: boolean;
 };
 
+type TouchedSnippetLine = {
+  kind: "added" | "removed" | "unchanged";
+  oldLine: number | null;
+  newLine: number | null;
+};
+
 type TouchedSnippet = {
   filePath: string;
   startLine: number;
   endLine: number;
   hunkHeader?: string;
   text: string;
+  changedLines?: TouchedSnippetLine[];
+  addedRanges?: Array<{ startLine: number; endLine: number }>;
   summarized: boolean;
 };
 
@@ -702,6 +712,9 @@ async function createPendingPacket(
       "Set agentStatus to one of: new, unchanged, evidence_moved, amended, invalidated, superseded.",
       "For unchanged claims, keep the existing thread title, thread summary, claim title, and claim description byte-for-byte. Only update evidence spans if the code moved.",
       "Put every evidence span under the claim that depends on it. Use multiple files and ranges to cover the entire change.",
+      "Evidence startLine/endLine are 1-based line numbers in the post-change file (HEAD). Copy them from the N| prefixes in touchedSnippets.text.",
+      "Prefer multiple narrow evidence spans over one hunk-wide span when a claim depends on distinct changed regions. Use touchedSnippets.addedRanges as a guide for contiguous added-line groups.",
+      "When a claim spans non-contiguous line ranges or files, add separate evidence objects under the same claim rather than one oversized range.",
       "Format human-facing thread title, thread summary, claim title, and claim description with Markdown.",
       "Keep claim titles short and direct.",
       "Use claim description only to add detail that complements the title; do not restate the same point.",
@@ -1708,12 +1721,17 @@ function touchedSnippets(diff: string): TouchedSnippet[] {
       const summarize = shouldSummarizeFile(file.name, raw);
       for (const hunk of file.hunks) {
         if (total > MAX_TOTAL_SNIPPET_CHARS) break;
+        const rawHunk = rawHunkText(raw, hunk.hunkSpecs ?? "");
+        const annotated = summarize
+          ? null
+          : annotateHunkText(
+              rawHunk,
+              hunk.additionStart,
+              hunk.deletionStart,
+            );
         const text = summarize
           ? `[summarized: ${file.name} is too large or generated; inspect the artifact diff path instead]`
-          : rawHunkText(raw, hunk.hunkSpecs ?? "").slice(
-              0,
-              MAX_INLINE_SNIPPET_CHARS,
-            );
+          : annotated!.annotatedText.slice(0, MAX_INLINE_SNIPPET_CHARS);
         total += text.length;
         snippets.push({
           filePath: file.name,
@@ -1724,6 +1742,16 @@ function touchedSnippets(diff: string): TouchedSnippet[] {
           ),
           hunkHeader: hunk.hunkSpecs,
           text,
+          changedLines: summarize
+            ? undefined
+            : annotated!.lines.map(({ kind, oldLine, newLine }) => ({
+                kind,
+                oldLine,
+                newLine,
+              })),
+          addedRanges: summarize
+            ? undefined
+            : addedLineRanges(annotated!.lines),
           summarized: summarize,
         });
       }
