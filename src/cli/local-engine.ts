@@ -336,12 +336,16 @@ async function reviewCommand(args: string[], ctx: Context) {
   const packet = await createPendingPacket(ctx, session, git, lastApplied);
   ctx.stdout(
     [
-      "PAIRE_AGENT_ACTION_REQUIRED",
+      "Action required",
       "",
-      "Follow-up prompt for AI:",
+      "Follow this steps:",
       "",
-      `Paire detected committed changes since revision ${lastApplied?.id ?? "none"}.`,
+      `Since there were changes since the last applied revision (${lastApplied?.id ?? "none"}).`,
       "Analyze this packet:",
+      "Then run:",
+      `paire review --apply ${packet.resultPath}`,
+      "",
+      "After any `paire review` command prints a Review UI URL, and open that URL in the browser.",
       packet.path,
       "",
       "Packet preview:",
@@ -350,10 +354,6 @@ async function reviewCommand(args: string[], ctx: Context) {
       "Write the review update JSON to:",
       packet.resultPath,
       "",
-      "Then run:",
-      `paire review --apply ${packet.resultPath}`,
-      "",
-      "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
     ].join("\n"),
   );
 }

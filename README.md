@@ -56,7 +56,7 @@ Paire reviews committed code only. If the worktree is dirty, `paire review` prin
 If `HEAD` changed since the last applied Paire revision and the worktree is clean, `paire review` prints:
 
 ```txt
-PAIRE_AGENT_ACTION_REQUIRED
+Action required
 
 Paire detected changes since revision <id>.
 Analyze the current canonical packet exported at:

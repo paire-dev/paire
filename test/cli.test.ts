@@ -60,10 +60,10 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
 
   const review = runPaire(fixture, ["review"]);
   expect(review.exitCode).toBe(0);
-  expect(review.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
-  expect(review.stdout).toContain("Follow-up prompt for AI:");
+  expect(review.stdout).toContain("Action required");
+  expect(review.stdout).toContain("Follow this steps:");
   expect(review.stdout).toContain(
-    "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
+    "After any `paire review` command prints a Review UI URL, and open that URL in the browser.",
   );
   expect(existsSync(fixture.browserCapture)).toBe(false);
 
@@ -123,7 +123,7 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   writeFileSync(fixture.browserCapture, "");
   const reviewAgain = runPaire(fixture, ["review"]);
   expect(reviewAgain.exitCode).toBe(0);
-  expect(reviewAgain.stdout).not.toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(reviewAgain.stdout).not.toContain("Action required");
   expect(reviewAgain.stdout).toContain("Open this URL in the browser:");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
@@ -170,7 +170,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
 
   const firstReview = runPaire(fixture, ["review"]);
   expect(firstReview.exitCode).toBe(0);
-  expect(firstReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(firstReview.stdout).toContain("Action required");
   expect(existsSync(fixture.browserCapture)).toBe(false);
   const firstPacket = JSON.parse(
     readFileSync(extractPacketPath(firstReview.stdout), "utf8"),
@@ -197,7 +197,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   writeFileSync(fixture.browserCapture, "");
   const reopen = runPaire(fixture, ["review"]);
   expect(reopen.exitCode).toBe(0);
-  expect(reopen.stdout).not.toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(reopen.stdout).not.toContain("Action required");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
   );
@@ -220,7 +220,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   writeFileSync(fixture.browserCapture, "");
   const staleReview = runPaire(fixture, ["review"]);
   expect(staleReview.exitCode).toBe(0);
-  expect(staleReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(staleReview.stdout).toContain("Action required");
   expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
   const secondPacket = JSON.parse(
     readFileSync(extractPacketPath(staleReview.stdout), "utf8"),
@@ -387,7 +387,7 @@ test("committed files that started untracked are included in review packets", ()
   commitAll(fixture.repo, "add workspace validator");
 
   const review = runPaire(fixture, ["review"]);
-  expect(review.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(review.stdout).toContain("Action required");
   const packet = JSON.parse(
     readFileSync(extractPacketPath(review.stdout), "utf8"),
   );
@@ -524,7 +524,7 @@ test("new git changes after apply require a fresh packet and do not open browser
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 4;\n");
   commitAll(fixture.repo, "change value to four");
   const staleReview = runPaire(fixture, ["review"]);
-  expect(staleReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(staleReview.stdout).toContain("Action required");
   expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
 });
 
@@ -621,7 +621,7 @@ test("it aliases review and status/sync avoid push or commit suggestions", () =>
   commitAll(fixture.repo, "change value to two");
 
   const it = runPaire(fixture, ["it"]);
-  expect(it.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(it.stdout).toContain("Action required");
 
   const status = runPaire(fixture, ["status"]);
   expect(status.stdout).toContain("Paire status");
@@ -727,10 +727,24 @@ function extractPacketPath(stdout: string) {
       line.trim() === "Analyze this packet:" ||
       line.trim() === "Analyze the current canonical packet exported at:",
   );
-  if (marker < 0 || !lines[marker + 1]) {
+  if (marker < 0) {
     throw new Error(`Packet path missing from output:\n${stdout}`);
   }
-  return lines[marker + 1]?.trim() ?? "";
+  const nextLine = lines[marker + 1]?.trim() ?? "";
+  if (nextLine && nextLine !== "Then run:") {
+    return nextLine;
+  }
+  for (let i = marker + 1; i < lines.length; i++) {
+    const line = lines[i]?.trim() ?? "";
+    if (
+      line.startsWith("/") &&
+      line.endsWith(".json") &&
+      !line.includes("--apply")
+    ) {
+      return line;
+    }
+  }
+  throw new Error(`Packet path missing from output:\n${stdout}`);
 }
 
 function hardcodedAgentResult(packet: {

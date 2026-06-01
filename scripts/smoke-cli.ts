@@ -44,7 +44,7 @@ await write(join(repo, "src/workspace.ts"), [
 commitAll("add auth and workspace validation");
 
 const firstReview = runPaire(["review"]);
-assert(firstReview.includes("PAIRE_AGENT_ACTION_REQUIRED"));
+assert(firstReview.includes("Action required"));
 assert(!existsSync(browserCapture));
 const firstPacketPath = extractPacketPath(firstReview);
 const firstPacket = await Bun.file(firstPacketPath).json();
@@ -62,7 +62,7 @@ runPaire(["review", "--apply", firstResultPath]);
 
 await Bun.write(browserCapture, "");
 const reopen = runPaire(["review"]);
-assert(!reopen.includes("PAIRE_AGENT_ACTION_REQUIRED"));
+assert(!reopen.includes("Action required"));
 assert((await Bun.file(browserCapture).text()).includes("http://127.0.0.1:"));
 
 await write(join(repo, "src/workspace.ts"), [
@@ -79,7 +79,7 @@ await write(join(repo, "src/workspace.ts"), [
 commitAll("add workspace validation version");
 await Bun.write(browserCapture, "");
 const secondReview = runPaire(["review"]);
-assert(secondReview.includes("PAIRE_AGENT_ACTION_REQUIRED"));
+assert(secondReview.includes("Action required"));
 assert((await Bun.file(browserCapture).text()) === "");
 const secondPacketPath = extractPacketPath(secondReview);
 const secondPacket = await Bun.file(secondPacketPath).json();
@@ -158,10 +158,24 @@ function extractPacketPath(stdout: string) {
       line.trim() === "Analyze this packet:" ||
       line.trim() === "Analyze the current canonical packet exported at:",
   );
-  if (marker < 0 || !lines[marker + 1]) {
+  if (marker < 0) {
     throw new Error(`Packet path missing from output:\n${stdout}`);
   }
-  return lines[marker + 1]?.trim() ?? "";
+  const nextLine = lines[marker + 1]?.trim() ?? "";
+  if (nextLine && nextLine !== "Then run:") {
+    return nextLine;
+  }
+  for (let i = marker + 1; i < lines.length; i++) {
+    const line = lines[i]?.trim() ?? "";
+    if (
+      line.startsWith("/") &&
+      line.endsWith(".json") &&
+      !line.includes("--apply")
+    ) {
+      return line;
+    }
+  }
+  throw new Error(`Packet path missing from output:\n${stdout}`);
 }
 
 function agentResult(
