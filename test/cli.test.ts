@@ -118,6 +118,18 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
     .get();
   expect(claims?.count).toBe(1);
   expect(evidences?.count).toBe(1);
+  const evidence = db
+    .query<
+      { beforeText: string | null; afterText: string | null },
+      []
+    >("select beforeText, afterText from claim_evidences limit 1")
+    .get();
+  expect(evidence?.beforeText).toBe(
+    "Project creation accepted any user input.",
+  );
+  expect(evidence?.afterText).toBe(
+    "Project creation rejects missing users before returning data.",
+  );
   db.close();
 
   writeFileSync(fixture.browserCapture, "");
@@ -778,6 +790,9 @@ function hardcodedAgentResult(packet: {
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
+                before: "Project creation accepted any user input.",
+                after:
+                  "Project creation rejects missing users before returning data.",
               },
             ],
           },
@@ -829,6 +844,9 @@ function sandboxAgentResult(
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
+                before: "Project creation accepted any user input.",
+                after:
+                  "Project creation rejects missing users before returning data.",
               },
             ],
           },
@@ -858,6 +876,14 @@ function sandboxAgentResult(
                 startLine: 1,
                 endLine: workspaceStatus === "new" ? 6 : 8,
                 symbol: "validateWorkspace",
+                before:
+                  workspaceStatus === "new"
+                    ? "Workspace inputs were accepted without a name check."
+                    : "Workspace validation rejected missing names only.",
+                after:
+                  workspaceStatus === "new"
+                    ? "Workspace validation rejects inputs without a workspace name."
+                    : "Workspace validation rejects missing names and exposes a version marker.",
               },
             ],
           },

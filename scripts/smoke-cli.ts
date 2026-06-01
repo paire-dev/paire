@@ -214,6 +214,9 @@ function agentResult(
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
+                before: "Project creation accepted any user input.",
+                after:
+                  "Project creation rejects missing users before returning data.",
               },
             ],
           },
@@ -232,6 +235,14 @@ function agentResult(
                 startLine: 1,
                 endLine: workspaceStatus === "new" ? 6 : 8,
                 symbol: "validateWorkspace",
+                before:
+                  workspaceStatus === "new"
+                    ? "Workspace inputs were accepted without a name check."
+                    : "Workspace validation rejected missing names only.",
+                after:
+                  workspaceStatus === "new"
+                    ? "Workspace validation rejects inputs without a workspace name."
+                    : "Workspace validation rejects missing names and exposes a version marker.",
               },
             ],
           },

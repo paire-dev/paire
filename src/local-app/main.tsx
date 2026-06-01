@@ -159,19 +159,12 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
       ) : null}
 
       <div className="before-after">
-        <InfoPanel
-          label="Before"
-          direction="left"
-          text={
-            evidence?.before ||
-            "Previous behavior was not captured for this claim."
-          }
-        />
-        <InfoPanel
-          label="After"
-          direction="right"
-          text={evidence?.after || claim.text}
-        />
+        {evidence?.before && (
+          <InfoPanel label="Before" direction="left" text={evidence?.before} />
+        )}
+        {evidence?.after && (
+          <InfoPanel label="After" direction="right" text={evidence?.after} />
+        )}
       </div>
 
       {evidence ? <EvidenceDiff evidence={evidence} /> : null}
@@ -207,7 +200,13 @@ function InfoPanel({
   );
 }
 
-function AiText({ source, inline = false }: { source: string; inline?: boolean }) {
+function AiText({
+  source,
+  inline = false,
+}: {
+  source: string;
+  inline?: boolean;
+}) {
   return (
     <Streamdown
       className={inline ? "ai-text ai-text-inline" : "ai-text"}
@@ -246,7 +245,8 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
       );
 
       if (!panel || !target) {
-        if (attempts < 12) frame = window.requestAnimationFrame(scrollToSelectedLine);
+        if (attempts < 12)
+          frame = window.requestAnimationFrame(scrollToSelectedLine);
         return;
       }
 

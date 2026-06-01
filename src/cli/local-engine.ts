@@ -59,6 +59,8 @@ type AgentEvidence = {
   symbol?: string;
   fingerprint?: string;
   revisionId?: string;
+  before?: string;
+  after?: string;
 };
 
 type AgentClaim = {
@@ -478,8 +480,8 @@ async function applyReviewCommand(
         for (const evidence of claim.evidences) {
           ctx.db
             .prepare(
-              `insert into claim_evidences (id, claimId, revisionId, filePath, startLine, endLine, symbol, fingerprint)
-               values (?, ?, ?, ?, ?, ?, ?, ?)`,
+              `insert into claim_evidences (id, claimId, revisionId, filePath, startLine, endLine, symbol, fingerprint, beforeText, afterText)
+               values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               `ev_${crypto.randomUUID()}`,
@@ -490,6 +492,8 @@ async function applyReviewCommand(
               evidence.endLine,
               evidence.symbol ?? null,
               evidence.fingerprint ?? null,
+              evidence.before ?? null,
+              evidence.after ?? null,
             );
         }
       }
@@ -639,7 +643,7 @@ async function createPendingPacket(
       revisionId: "string",
       gitFingerprint: "string",
       threads:
-        "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, text, agentStatus, humanStatus?, evidences[] }> }>",
+        "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, text, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, before?, after? }> }> }>",
     },
     rules: [
       "Group related claims into area threads. Treat each thread as one review area with a short area title, not as a single diff line or file.",
@@ -655,7 +659,7 @@ async function createPendingPacket(
       "Keep titles short and direct.",
       "Use summary/description only to add detail that complements the title; do not restate the same point.",
       "Aim for clarity with progressive disclosure: each new detail should build on the previous one and avoid repetition.",
-      "Describe before/after impact at a high level in short, lower-detail language; do not mention code locations or line numbers in before/after wording.",
+      "On each evidence span, set before and after to short high-level descriptions of the behavior impact; do not mention code locations or line numbers.",
     ],
   };
   const packetJson = JSON.stringify(packet, null, 2);
@@ -973,22 +977,13 @@ function getClaimsForThread(
         .query<
         AgentEvidence & { revisionId: string },
         [string]
-      >("select filePath, startLine, endLine, symbol, fingerprint, revisionId from claim_evidences where claimId = ? order by filePath, startLine")
+      >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, beforeText as before, afterText as after from claim_evidences where claimId = ? order by filePath, startLine")
         .all(claim.id)
         .map((evidence) => ({
           ...evidence,
-          ...diffPreviewForEvidence(totalDiff, evidence),
+          diff: fileToRawDiff(totalDiff, evidence.filePath),
         })),
     }));
-}
-
-function diffPreviewForEvidence(totalDiff: string, evidence: AgentEvidence) {
-  const diff = fileToRawDiff(totalDiff, evidence.filePath);
-  return {
-    diff,
-    before: "The behavior was missing, stale, or incomplete.",
-    after: "The behavior is now updated by this change.",
-  };
 }
 
 async function openBrowser(
@@ -1086,6 +1081,8 @@ function migrate(db: Database) {
   addNullableColumn(db, "revisions", "packetExportPath", "text");
   addNullableColumn(db, "revisions", "resultPath", "text");
   addNullableColumn(db, "revisions", "totalDiffArtifactId", "text");
+  addNullableColumn(db, "claim_evidences", "beforeText", "text");
+  addNullableColumn(db, "claim_evidences", "afterText", "text");
   migrateSessionsToBranchScope(db);
   scopeReviewIds(db);
 }
@@ -1241,7 +1238,7 @@ function getActiveClaims(db: Database, sessionId: string) {
       .query<
       AgentEvidence & { revisionId: string },
       [string]
-    >("select filePath, startLine, endLine, symbol, fingerprint, revisionId from claim_evidences where claimId = ? order by filePath, startLine")
+    >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, beforeText as before, afterText as after from claim_evidences where claimId = ? order by filePath, startLine")
       .all(claim.id),
   }));
 }
@@ -1289,6 +1286,12 @@ function validateApplyPayload(value: unknown): AgentApplyPayload {
           throw new Error(
             "Each evidence needs filePath, startLine, and endLine.",
           );
+        }
+        if (evidence.before != null && typeof evidence.before !== "string") {
+          throw new Error("Evidence before must be a string when provided.");
+        }
+        if (evidence.after != null && typeof evidence.after !== "string") {
+          throw new Error("Evidence after must be a string when provided.");
         }
       }
     }
