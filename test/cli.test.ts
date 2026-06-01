@@ -286,6 +286,91 @@ test("dirty worktree asks for committed changes instead of creating a packet", (
   expect(existsSync(fixture.browserCapture)).toBe(false);
 });
 
+test("sessions are scoped to the current git branch", () => {
+  const fixture = createFixtureRepo();
+
+  const mainStart = runPaire(fixture, [
+    "start",
+    "--base",
+    "main",
+    "--goal",
+    "Main review",
+  ]);
+  expect(mainStart.exitCode).toBe(0);
+  const mainSession = mainStart.stdout.match(/Session ID: (.+)/)?.[1];
+
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  const featureStart = runPaire(fixture, [
+    "start",
+    "--base",
+    "main",
+    "--goal",
+    "Feature review",
+  ]);
+  expect(featureStart.exitCode).toBe(0);
+  const featureSession = featureStart.stdout.match(/Session ID: (.+)/)?.[1];
+  expect(featureSession).toBeTruthy();
+  expect(featureSession).not.toBe(mainSession);
+
+  const featureRestart = runPaire(fixture, ["start", "--base", "main"]);
+  expect(featureRestart.stdout).toContain(`Session ID: ${featureSession}`);
+
+  run(["git", "checkout", "main"], fixture.repo);
+  const mainStatus = runPaire(fixture, ["status"]);
+  expect(mainStatus.stdout).toContain(`Session: ${mainSession}`);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const sessions = db
+    .query<{ branch: string }, []>("select branch from sessions order by branch")
+    .all();
+  expect(sessions.map((session) => session.branch)).toEqual([
+    "feature",
+    "main",
+  ]);
+  db.close();
+});
+
+test("paire it creates a branch session when missing", () => {
+  const fixture = createFixtureRepo();
+
+  const result = runPaire(fixture, ["it", "--base", "main"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("Paire session ready.");
+  expect(result.stdout).toContain("Open this URL in the browser:");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db
+    .query<{ branch: string }, []>("select branch from sessions")
+    .get();
+  expect(session?.branch).toBe("main");
+  db.close();
+});
+
+test("reset removes only the current branch session", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const reset = runPaire(fixture, ["reset"]);
+  expect(reset.exitCode).toBe(0);
+  expect(reset.stdout).toContain("Reset Paire session for branch feature.");
+
+  const featureStatus = runPaire(fixture, ["status"]);
+  expect(featureStatus.stdout).toContain("No Paire session found");
+
+  run(["git", "checkout", "main"], fixture.repo);
+  const mainStatus = runPaire(fixture, ["status"]);
+  expect(mainStatus.stdout).toContain("Session:");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const sessions = db
+    .query<{ branch: string }, []>("select branch from sessions")
+    .all();
+  expect(sessions.map((session) => session.branch)).toEqual(["main"]);
+  db.close();
+});
+
 test("committed files that started untracked are included in review packets", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);

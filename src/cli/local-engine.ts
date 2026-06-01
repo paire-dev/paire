@@ -167,7 +167,10 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         await reviewCommand(rest, ctx);
         return 0;
       case "it":
-        await reviewCommand(rest, ctx);
+        await itCommand(rest, ctx);
+        return 0;
+      case "reset":
+        await resetCommand(ctx);
         return 0;
       case "status":
         await statusCommand(ctx);
@@ -227,7 +230,7 @@ async function startCommand(args: string[], ctx: Context) {
       allowFail: true,
     }).trim() || git.head;
   const goal = stringFlag(parsed, "goal") ?? null;
-  const existing = getSession(ctx.db, git.repoRoot);
+  const existing = getSession(ctx.db, git.repoRoot, git.branch);
   const now = Date.now();
   const sessionId = existing?.id ?? `ses_${crypto.randomUUID()}`;
 
@@ -314,7 +317,7 @@ async function reviewCommand(args: string[], ctx: Context) {
   }
 
   const git = getGitState(ctx.cwd);
-  const session = getSession(ctx.db, git.repoRoot);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
   if (!session) {
     const base = detectBaseRef(git.repoRoot);
     ctx.stdout(`No Paire session found.\nRun:\npaire start --base ${base}`);
@@ -353,6 +356,14 @@ async function reviewCommand(args: string[], ctx: Context) {
       "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
     ].join("\n"),
   );
+}
+
+async function itCommand(args: string[], ctx: Context) {
+  const git = getGitState(ctx.cwd);
+  if (!getSession(ctx.db, git.repoRoot, git.branch)) {
+    await startCommand(args, ctx);
+  }
+  await reviewCommand([], ctx);
 }
 
 async function applyReviewCommand(
@@ -504,7 +515,7 @@ async function applyReviewCommand(
 
 async function statusCommand(ctx: Context) {
   const git = getGitState(ctx.cwd);
-  const session = getSession(ctx.db, git.repoRoot);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
   ctx.stdout(
     session
       ? formatStatus(ctx.db, session, git)
@@ -514,13 +525,47 @@ async function statusCommand(ctx: Context) {
 
 async function syncCommand(ctx: Context) {
   const git = getGitState(ctx.cwd);
-  const session = getSession(ctx.db, git.repoRoot);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
   const status = session
     ? formatStatus(ctx.db, session, git)
     : `No Paire session found.\nRun:\npaire start --base ${detectBaseRef(git.repoRoot)}`;
   ctx.stdout(
     `${status}\n\nCloud sync is not configured in this local build. Run paire review to update or open the local review.`,
   );
+}
+
+async function resetCommand(ctx: Context) {
+  const git = getGitState(ctx.cwd);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
+  if (!session) {
+    ctx.stdout(
+      `No Paire session found for branch ${git.branch}.\nRun:\npaire start --base ${detectBaseRef(git.repoRoot)}`,
+    );
+    return;
+  }
+
+  const reset = ctx.db.transaction((sessionId: string) => {
+    ctx.db
+      .prepare(
+        `delete from human_review_marks
+          where claimId in (select id from claims where sessionId = ?)`,
+      )
+      .run(sessionId);
+    ctx.db
+      .prepare(
+        `delete from claim_evidences
+          where claimId in (select id from claims where sessionId = ?)`,
+      )
+      .run(sessionId);
+    ctx.db.prepare("delete from claims where sessionId = ?").run(sessionId);
+    ctx.db
+      .prepare("delete from change_threads where sessionId = ?")
+      .run(sessionId);
+    ctx.db.prepare("delete from revisions where sessionId = ?").run(sessionId);
+    ctx.db.prepare("delete from sessions where id = ?").run(sessionId);
+  });
+  reset(session.id);
+  ctx.stdout(`Reset Paire session for branch ${git.branch}.`);
 }
 
 async function createPendingPacket(
@@ -970,7 +1015,7 @@ function migrate(db: Database) {
   db.exec(`
     create table if not exists sessions (
       id text primary key,
-      repoRoot text not null unique,
+      repoRoot text not null,
       projectKey text not null,
       goal text,
       baseRef text not null,
@@ -978,7 +1023,8 @@ function migrate(db: Database) {
       branch text not null,
       upstream text,
       createdAt integer not null,
-      updatedAt integer not null
+      updatedAt integer not null,
+      unique(repoRoot, branch)
     );
     create table if not exists revisions (
       id text primary key,
@@ -1040,7 +1086,40 @@ function migrate(db: Database) {
   addNullableColumn(db, "revisions", "packetExportPath", "text");
   addNullableColumn(db, "revisions", "resultPath", "text");
   addNullableColumn(db, "revisions", "totalDiffArtifactId", "text");
+  migrateSessionsToBranchScope(db);
   scopeReviewIds(db);
+}
+
+function migrateSessionsToBranchScope(db: Database) {
+  const table = db
+    .query<{ sql: string }, []>(
+      "select sql from sqlite_master where type = 'table' and name = 'sessions'",
+    )
+    .get();
+  if (!/\brepoRoot\s+text\s+not\s+null\s+unique\b/i.test(table?.sql ?? "")) {
+    return;
+  }
+
+  db.exec(`
+    create table sessions_next (
+      id text primary key,
+      repoRoot text not null,
+      projectKey text not null,
+      goal text,
+      baseRef text not null,
+      baseCommit text not null,
+      branch text not null,
+      upstream text,
+      createdAt integer not null,
+      updatedAt integer not null,
+      unique(repoRoot, branch)
+    );
+    insert into sessions_next (id, repoRoot, projectKey, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt)
+      select id, repoRoot, projectKey, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt
+        from sessions;
+    drop table sessions;
+    alter table sessions_next rename to sessions;
+  `);
 }
 
 function addNullableColumn(
@@ -1098,10 +1177,12 @@ function scopeReviewIds(db: Database) {
   `);
 }
 
-function getSession(db: Database, repoRoot: string) {
+function getSession(db: Database, repoRoot: string, branch: string) {
   return db
-    .query<SessionRow, [string]>("select * from sessions where repoRoot = ?")
-    .get(repoRoot);
+    .query<SessionRow, [string, string]>(
+      "select * from sessions where repoRoot = ? and branch = ?",
+    )
+    .get(repoRoot, branch);
 }
 
 function getLastAppliedRevision(db: Database, sessionId: string) {
@@ -1485,5 +1566,6 @@ function helpText() {
     "  it",
     "  status",
     "  sync",
+    "  reset",
   ].join("\n");
 }
