@@ -59,14 +59,22 @@ If `HEAD` changed since the last applied Paire revision and the worktree is clea
 PAIRE_AGENT_ACTION_REQUIRED
 
 Paire detected changes since revision <id>.
-Analyze this packet:
+Analyze the current canonical packet exported at:
 <absolute packet path>
+
+Packet preview:
+{
+  "packetId": "...",
+  ...
+}
 
 Then write the review update JSON and run:
 paire review --apply <absolute result path>
 ```
 
-The coding agent should read the packet, write the result JSON, then run:
+The packet JSON is canonical in SQLite. The exported packet path is a stable per-project read handle for the current pending packet, not historical packet storage. `paire review` also prints a generous inline preview and truncates it with a message when the packet is large.
+
+The coding agent should read the current exported packet or use the inline preview, write the result JSON, then run:
 
 ```sh
 paire review --apply /path/to/agent-result.json
@@ -93,6 +101,7 @@ Default locations:
 ```txt
 ~/.paire/paire.db
 ~/.paire/artifacts/
+~/.paire/projects/<project-key>/current-packet.json
 ```
 
 Use `PAIRE_HOME` to isolate state:
@@ -102,6 +111,20 @@ PAIRE_HOME="$(mktemp -d)" paire start --base main
 ```
 
 Paire does not write review state into the target repository by default. Paire revisions are tied to commit SHAs, so it does not snapshot dirty worktree files.
+
+Project state is isolated by a project key. GitHub remotes use:
+
+```txt
+github/<owner>/<repo>/<repo-root-hash>
+```
+
+Local repos without a GitHub remote use:
+
+```txt
+local/<folder-name>/<repo-root-hash>
+```
+
+The hash suffix avoids collisions between multiple local clones of the same repository.
 
 ## Build
 

@@ -64,7 +64,10 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   expect(existsSync(fixture.browserCapture)).toBe(false);
 
   const packetPath = extractPacketPath(review.stdout);
+  expect(packetPath).toContain(`${fixture.home}/projects/`);
   const packet = JSON.parse(readFileSync(packetPath, "utf8"));
+  expect(review.stdout).toContain('"packetId"');
+  expect(review.stdout).toContain(packet.currentFingerprint);
   const agentResultPath = join(fixture.root, "agent-result.json");
   writeFileSync(
     agentResultPath,
@@ -84,6 +87,21 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   expect(html).not.toContain("cdn.tailwindcss.com");
 
   const db = new Database(join(fixture.home, "paire.db"));
+  const pending = db
+    .query<
+      {
+        packetJson: string | null;
+        packetExportPath: string | null;
+        packetArtifactId: string | null;
+      },
+      [string]
+    >(
+      "select packetJson, packetExportPath, packetArtifactId from revisions where id = ?",
+    )
+    .get(packet.revisionId);
+  expect(pending?.packetJson).toContain(packet.packetId);
+  expect(pending?.packetExportPath).toBe(packetPath);
+  expect(pending?.packetArtifactId).toBe(null);
   const claims = db
     .query<{ count: number }, []>("select count(*) as count from claims")
     .get();
@@ -260,6 +278,26 @@ test("committed files that started untracked are included in review packets", ()
   expect(readFileSync(packet.incrementalDiffArtifactPath, "utf8")).toContain(
     "new file mode 100644",
   );
+});
+
+test("project keys use a GitHub owner repo prefix with an isolated packet export", () => {
+  const fixture = createFixtureRepo();
+  run(
+    ["git", "remote", "add", "origin", "git@github.com:acme/widgets.git"],
+    fixture.repo,
+  );
+
+  const start = runPaire(fixture, ["start", "--base", "main"]);
+  expect(start.stdout).toContain("Project key: github/acme/widgets/");
+
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 42;\n");
+  commitAll(fixture.repo, "change value");
+
+  const review = runPaire(fixture, ["review"]);
+  const packetPath = extractPacketPath(review.stdout);
+  expect(packetPath).toContain("/projects/github/acme/widgets/");
+  const packet = JSON.parse(readFileSync(packetPath, "utf8"));
+  expect(packet.projectKey).toMatch(/^github\/acme\/widgets\//);
 });
 
 test("stale apply is rejected without mutating claims or opening browser", () => {
@@ -512,7 +550,9 @@ function text(value: Uint8Array) {
 function extractPacketPath(stdout: string) {
   const lines = stdout.split("\n");
   const marker = lines.findIndex(
-    (line) => line.trim() === "Analyze this packet:",
+    (line) =>
+      line.trim() === "Analyze this packet:" ||
+      line.trim() === "Analyze the current canonical packet exported at:",
   );
   if (marker < 0 || !lines[marker + 1]) {
     throw new Error(`Packet path missing from output:\n${stdout}`);

@@ -154,7 +154,9 @@ function text(value: Uint8Array) {
 function extractPacketPath(stdout: string) {
   const lines = stdout.split("\n");
   const marker = lines.findIndex(
-    (line) => line.trim() === "Analyze this packet:",
+    (line) =>
+      line.trim() === "Analyze this packet:" ||
+      line.trim() === "Analyze the current canonical packet exported at:",
   );
   if (marker < 0 || !lines[marker + 1]) {
     throw new Error(`Packet path missing from output:\n${stdout}`);

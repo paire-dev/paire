@@ -17,6 +17,7 @@ export type CliOptions = {
 type SessionRow = {
   id: string;
   repoRoot: string;
+  projectKey: string;
   goal: string | null;
   baseRef: string;
   baseCommit: string;
@@ -33,6 +34,9 @@ type RevisionRow = {
   state: "pending_agent" | "applied" | "superseded";
   gitFingerprint: string;
   packetArtifactId: string | null;
+  packetJson: string | null;
+  packetExportPath: string | null;
+  resultPath: string | null;
   totalDiffArtifactId: string | null;
   createdAt: number;
   appliedAt: number | null;
@@ -95,6 +99,7 @@ type GitState = {
 type Packet = {
   packetId: string;
   sessionId: string;
+  projectKey: string;
   revisionId: string;
   revisionNumber: number;
   goal: string | null;
@@ -133,6 +138,7 @@ type TouchedSnippet = {
 const LARGE_DIFF_BYTES = 30_000;
 const MAX_INLINE_SNIPPET_CHARS = 4_000;
 const MAX_TOTAL_SNIPPET_CHARS = 18_000;
+const MAX_PACKET_PREVIEW_CHARS = 16_000;
 const REVIEW_PORT = 0;
 const VALID_AGENT_STATUSES = new Set([
   "new",
@@ -200,6 +206,7 @@ function makeContext(options: CliOptions) {
     env,
     paireHome,
     artifactsDir: join(paireHome, "artifacts"),
+    projectsDir: join(paireHome, "projects"),
     db,
     stdout,
     stderr,
@@ -213,6 +220,7 @@ type Context = ReturnType<typeof makeContext>;
 async function startCommand(args: string[], ctx: Context) {
   const parsed = parseFlags(args);
   const git = getGitState(ctx.cwd);
+  const projectKey = detectProjectKey(git.repoRoot);
   const baseRef = stringFlag(parsed, "base") ?? detectBaseRef(git.repoRoot);
   const baseCommit =
     gitCommand(["merge-base", "HEAD", baseRef], git.repoRoot, {
@@ -237,15 +245,21 @@ async function startCommand(args: string[], ctx: Context) {
         now,
         existing.id,
       );
+    if (existing.projectKey !== projectKey) {
+      ctx.db
+        .prepare("update sessions set projectKey = ? where id = ?")
+        .run(projectKey, existing.id);
+    }
   } else {
     ctx.db
       .prepare(
-        `insert into sessions (id, repoRoot, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `insert into sessions (id, repoRoot, projectKey, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         sessionId,
         git.repoRoot,
+        projectKey,
         goal,
         baseRef,
         baseCommit,
@@ -259,8 +273,8 @@ async function startCommand(args: string[], ctx: Context) {
   if (!getLastAppliedRevision(ctx.db, sessionId)) {
     ctx.db
       .prepare(
-        `insert into revisions (id, sessionId, number, state, gitFingerprint, packetArtifactId, totalDiffArtifactId, createdAt, appliedAt)
-         values (?, ?, ?, 'applied', ?, null, null, ?, ?)`,
+        `insert into revisions (id, sessionId, number, state, gitFingerprint, packetArtifactId, packetJson, packetExportPath, resultPath, totalDiffArtifactId, createdAt, appliedAt)
+         values (?, ?, ?, 'applied', ?, null, null, null, null, null, ?, ?)`,
       )
       .run(
         `rev_${crypto.randomUUID()}`,
@@ -279,6 +293,7 @@ async function startCommand(args: string[], ctx: Context) {
       `Base branch/ref: ${baseRef}`,
       `Base commit: ${baseCommit}`,
       `Current branch: ${git.branch}`,
+      `Project key: ${projectKey}`,
       `Current git fingerprint: ${git.fingerprint}`,
       "Next: paire review",
     ].join("\n"),
@@ -321,8 +336,11 @@ async function reviewCommand(args: string[], ctx: Context) {
       "PAIRE_AGENT_ACTION_REQUIRED",
       "",
       `Paire detected changes since revision ${lastApplied?.id ?? "none"}.`,
-      "Analyze this packet:",
+      "Analyze the current canonical packet exported at:",
       packet.path,
+      "",
+      "Packet preview:",
+      packet.preview,
       "",
       "Then write the review update JSON and run:",
       `paire review --apply ${packet.resultPath}`,
@@ -369,6 +387,10 @@ async function applyReviewCommand(
       "Apply payload does not match the pending revision fingerprint.",
     );
   }
+  const packet = parseStoredPacket(revision);
+  if (!packet || packet.packetId !== payload.packetId) {
+    throw new Error("Apply payload does not match the canonical pending packet.");
+  }
 
   const apply = ctx.db.transaction((value: AgentApplyPayload) => {
     for (const thread of value.threads) {
@@ -387,12 +409,17 @@ async function applyReviewCommand(
           Date.now(),
         );
       for (const claim of thread.claims) {
+        const existingClaim = ctx.db
+          .query<{ humanStatus: HumanStatus }, [string, string]>(
+            "select humanStatus from claims where id = ? and sessionId = ?",
+          )
+          .get(claim.id, session.id);
         ctx.db
           .prepare(
             `insert into claims (id, threadId, sessionId, text, agentStatus, humanStatus, updatedAt)
              values (?, ?, ?, ?, ?, ?, ?)
              on conflict(id) do update set threadId = excluded.threadId, text = excluded.text,
-               agentStatus = excluded.agentStatus, humanStatus = excluded.humanStatus, updatedAt = excluded.updatedAt`,
+               agentStatus = excluded.agentStatus, updatedAt = excluded.updatedAt`,
           )
           .run(
             claim.id,
@@ -400,7 +427,7 @@ async function applyReviewCommand(
             session.id,
             claim.text,
             claim.agentStatus,
-            claim.humanStatus ?? "unreviewed",
+            existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed",
             Date.now(),
           );
         ctx.db
@@ -486,7 +513,7 @@ function createPendingPacket(
   const incrementalDiff = lastApplied
     ? gitDiffForCurrentState(lastApplied.gitFingerprint, session.repoRoot)
     : totalDiff;
-  const packetId = `pkt_${crypto.randomUUID()}`;
+  const packetId = `pkt_${revisionId}`;
   const totalDiffArtifactPath = writeArtifact(
     ctx,
     "total-diff",
@@ -514,6 +541,7 @@ function createPendingPacket(
   const packet: Packet = {
     packetId,
     sessionId: session.id,
+    projectKey: session.projectKey,
     revisionId,
     revisionNumber: number,
     goal: session.goal,
@@ -544,36 +572,34 @@ function createPendingPacket(
       "Put every evidence span under the claim that depends on it.",
     ],
   };
-  const packetPath = writeArtifact(
-    ctx,
-    "packet",
-    `${packetId}.packet.json`,
-    JSON.stringify(packet, null, 2),
-  );
-  const resultPath = join(dirname(packetPath), `${packetId}.agent-result.json`);
+  const packetJson = JSON.stringify(packet, null, 2);
+  const packetPath = writeCurrentPacketExport(ctx, session, packetJson);
+  const resultPath = join(dirname(packetPath), "agent-result.json");
   if (!existing) {
-    const packetArtifactId = `art_${crypto.randomUUID()}`;
     ctx.db
       .prepare(
-        "insert into artifact_refs (id, kind, path, createdAt) values (?, 'packet', ?, ?)",
-      )
-      .run(packetArtifactId, packetPath, Date.now());
-    ctx.db
-      .prepare(
-        `insert into revisions (id, sessionId, number, state, gitFingerprint, packetArtifactId, totalDiffArtifactId, createdAt, appliedAt)
-         values (?, ?, ?, 'pending_agent', ?, ?, ?, ?, null)`,
+        `insert into revisions (id, sessionId, number, state, gitFingerprint, packetArtifactId, packetJson, packetExportPath, resultPath, totalDiffArtifactId, createdAt, appliedAt)
+         values (?, ?, ?, 'pending_agent', ?, null, ?, ?, ?, ?, ?, null)`,
       )
       .run(
         revisionId,
         session.id,
         number,
         git.fingerprint,
-        packetArtifactId,
+        packetJson,
+        packetPath,
+        resultPath,
         totalDiffArtifactId,
         Date.now(),
       );
+  } else {
+    ctx.db
+      .prepare(
+        "update revisions set packetJson = ?, packetExportPath = ?, resultPath = ?, totalDiffArtifactId = ? where id = ?",
+      )
+      .run(packetJson, packetPath, resultPath, totalDiffArtifactId, revisionId);
   }
-  return { path: packetPath, resultPath };
+  return { path: packetPath, resultPath, preview: packetPreview(packetJson) };
 }
 
 function writeArtifact(
@@ -597,13 +623,41 @@ function insertArtifactRef(db: Database, kind: string, path: string) {
   return id;
 }
 
+function writeCurrentPacketExport(
+  ctx: Context,
+  session: SessionRow,
+  packetJson: string,
+) {
+  const directory = join(ctx.projectsDir, session.projectKey);
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, "current-packet.json");
+  writeFileSync(path, packetJson, "utf8");
+  return path;
+}
+
+function packetPreview(packetJson: string) {
+  if (packetJson.length <= MAX_PACKET_PREVIEW_CHARS) return packetJson;
+  const truncated = packetJson.slice(0, MAX_PACKET_PREVIEW_CHARS);
+  return [
+    truncated,
+    "",
+    `... truncated packet preview at ${MAX_PACKET_PREVIEW_CHARS} characters. Read the exported packet path above for the complete current packet.`,
+  ].join("\n");
+}
+
+function parseStoredPacket(revision: RevisionRow) {
+  if (!revision.packetJson) return null;
+  return JSON.parse(revision.packetJson) as Packet;
+}
+
 function formatStatus(db: Database, session: SessionRow, git: GitState) {
   const lastApplied = getLastAppliedRevision(db, session.id);
   const pending = getPendingRevision(db, session.id);
   const burden = reviewBurden(db, session.id);
-  return [
+  const lines = [
     "Paire status",
     `Session: ${session.id}`,
+    `Project: ${session.projectKey}`,
     `Base: ${session.baseRef} @ ${session.baseCommit}`,
     `Branch/upstream: ${git.branch}${git.upstream ? ` / ${git.upstream}` : " / (none)"}`,
     `Current git fingerprint: ${git.fingerprint}`,
@@ -613,7 +667,18 @@ function formatStatus(db: Database, session: SessionRow, git: GitState) {
     git.clean
       ? "Suggested inspection: git diff --stat"
       : "Review blocked: Paire reviews committed code only. Commit or discard worktree changes before running paire review.",
-  ].join("\n");
+  ];
+  if (pending?.packetJson) {
+    lines.push(
+      "",
+      "Current pending packet export:",
+      pending.packetExportPath ?? "(not exported)",
+      "",
+      "Packet preview:",
+      packetPreview(pending.packetJson),
+    );
+  }
+  return lines.join("\n");
 }
 
 function dirtyWorktreeMessage(git: GitState) {
@@ -915,6 +980,7 @@ function migrate(db: Database) {
     create table if not exists sessions (
       id text primary key,
       repoRoot text not null unique,
+      projectKey text not null,
       goal text,
       baseRef text not null,
       baseCommit text not null,
@@ -930,6 +996,9 @@ function migrate(db: Database) {
       state text not null,
       gitFingerprint text not null,
       packetArtifactId text,
+      packetJson text,
+      packetExportPath text,
+      resultPath text,
       totalDiffArtifactId text,
       createdAt integer not null,
       appliedAt integer
@@ -975,6 +1044,10 @@ function migrate(db: Database) {
       createdAt integer not null
     );
   `);
+  addNullableColumn(db, "sessions", "projectKey", "text");
+  addNullableColumn(db, "revisions", "packetJson", "text");
+  addNullableColumn(db, "revisions", "packetExportPath", "text");
+  addNullableColumn(db, "revisions", "resultPath", "text");
   addNullableColumn(db, "revisions", "totalDiffArtifactId", "text");
 }
 
@@ -1116,6 +1189,44 @@ function getGitState(cwd: string): GitState {
   const clean = status.trim().length === 0;
   const fingerprint = head;
   return { repoRoot, branch, upstream, head, clean, fingerprint, status };
+}
+
+function detectProjectKey(repoRoot: string) {
+  const origin = gitCommand(["config", "--get", "remote.origin.url"], repoRoot, {
+    allowFail: true,
+  }).trim();
+  const github = parseGitHubRemote(origin);
+  const rootHash = hashForPath(repoRoot);
+  if (github) {
+    return ["github", sanitizePathPart(github.owner), sanitizePathPart(github.repo), rootHash].join(
+      "/",
+    );
+  }
+  return ["local", sanitizePathPart(repoRoot.split(/[\\/]/).filter(Boolean).pop() ?? "repo"), rootHash].join(
+    "/",
+  );
+}
+
+function parseGitHubRemote(remote: string) {
+  if (!remote) return null;
+  const https = /^https:\/\/github\.com\/([^/]+)\/([^/.]+)(?:\.git)?$/.exec(
+    remote,
+  );
+  if (https) return { owner: https[1] ?? "", repo: https[2] ?? "" };
+  const ssh = /^git@github\.com:([^/]+)\/([^/.]+)(?:\.git)?$/.exec(remote);
+  if (ssh) return { owner: ssh[1] ?? "", repo: ssh[2] ?? "" };
+  return null;
+}
+
+function sanitizePathPart(value: string) {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80) || "unknown";
+}
+
+function hashForPath(value: string) {
+  return new Bun.CryptoHasher("sha256")
+    .update(value)
+    .digest("hex")
+    .slice(0, 12);
 }
 
 function gitDiffBaseRef(fingerprint: string) {
