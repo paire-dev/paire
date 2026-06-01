@@ -75,6 +75,7 @@ type AgentClaim = {
   text: string;
   agentStatus: ClaimStatus;
   humanStatus?: HumanStatus;
+  updatedAt?: number;
   evidences: AgentEvidence[];
 };
 
@@ -1101,7 +1102,7 @@ function getClaimsForThread(
 ) {
   return db
     .query<AgentClaim, [string]>(
-      "select id, threadId, text, agentStatus, humanStatus from claims where threadId = ? order by updatedAt desc",
+      "select id, threadId, text, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc",
     )
     .all(threadDbId)
     .map((claim) => ({

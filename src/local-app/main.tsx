@@ -1,3 +1,4 @@
+import { formatDistanceToNow } from "date-fns";
 import { PatchDiff } from "@pierre/diffs/react";
 import {
   QueryClient,
@@ -37,6 +38,7 @@ type Claim = {
   text: string;
   agentStatus: string;
   humanStatus: HumanStatus;
+  updatedAt?: number;
   evidences: Evidence[];
 };
 
@@ -131,6 +133,23 @@ function ReviewScreen() {
   );
 }
 
+function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
+  const [, setTick] = React.useState(0);
+
+  React.useEffect(() => {
+    const interval = window.setInterval(() => {
+      setTick((value) => value + 1);
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  return (
+    <time className="claim-time" dateTime={new Date(updatedAt).toISOString()}>
+      {formatDistanceToNow(updatedAt, { addSuffix: true })}
+    </time>
+  );
+}
+
 function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
   const evidence = claim.evidences[0];
   const statusLabel = claim.agentStatus.replaceAll("_", " ");
@@ -142,6 +161,9 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
           <AiText source={thread.title || "Behavior"} />
         </Badge>
         <div className="status-group">
+          {claim.updatedAt ? (
+            <ClaimTimeAgo updatedAt={claim.updatedAt} />
+          ) : null}
           <Badge variant="destructive">{statusLabel}</Badge>
           <Badge variant="outline" className="observed">
             {claim.humanStatus === "accepted" ? "accepted" : "observed"}
