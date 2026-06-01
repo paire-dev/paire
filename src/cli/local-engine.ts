@@ -3,8 +3,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+
+import reviewApp from "../local-app/index.html";
 
 export type CliOptions = {
   cwd?: string;
@@ -711,15 +711,24 @@ async function printStatusAndOpen(
 }
 
 async function openReviewUi(ctx: Context, session: SessionRow, git: GitState) {
-  const data = buildReviewData(ctx.db, session, git);
-  const html = renderReviewHtml(data);
   if (ctx.env.PAIRE_BROWSER_HTML_CAPTURE) {
-    await Bun.write(ctx.env.PAIRE_BROWSER_HTML_CAPTURE, html);
+    await Bun.write(
+      ctx.env.PAIRE_BROWSER_HTML_CAPTURE,
+      await Bun.file(join(import.meta.dir, "../local-app/index.html")).text(),
+    );
   }
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: REVIEW_PORT,
-    fetch: (request: Request) => handleReviewRequest(request, html, data, ctx),
+    routes: {
+      "/": reviewApp,
+      "/api/review": (request: Request) =>
+        handleReviewRequest(request, session, ctx),
+      "/api/claims/:claimId/human-status": (request: Request) =>
+        handleHumanStatusRequest(request, session, ctx),
+      "/api/claims/:claimId/comment": (request: Request) =>
+        handleCommentRequest(request, session, ctx),
+    },
   });
   const url = `http://127.0.0.1:${server.port}/`;
   await ctx.openBrowser(url);
@@ -733,53 +742,105 @@ async function openReviewUi(ctx: Context, session: SessionRow, git: GitState) {
 
 async function handleReviewRequest(
   request: Request,
-  html: string,
-  data: ReturnType<typeof buildReviewData>,
+  session: SessionRow,
   ctx: Context,
 ) {
-  const url = new URL(request.url);
-  if (url.pathname === "/api/review") {
-    return Response.json(data);
+  if (request.method !== "GET") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
   }
-  const statusMatch = /^\/api\/claims\/([^/]+)\/human-status$/.exec(
-    url.pathname,
+  const freshSession = ctx.db
+    .query<SessionRow, [string]>("select * from sessions where id = ?")
+    .get(session.id);
+  if (!freshSession) {
+    return Response.json({ error: "Session not found." }, { status: 404 });
+  }
+  return Response.json(
+    buildReviewData(ctx.db, freshSession, getGitState(freshSession.repoRoot)),
   );
-  if (request.method === "POST" && statusMatch) {
-    const claimId = decodeURIComponent(statusMatch[1] ?? "");
-    const claimDbId = scopedDbId(data.session.id, claimId);
-    const payload = (await request.json()) as { humanStatus?: unknown };
-    if (
-      typeof payload.humanStatus !== "string" ||
-      !VALID_HUMAN_STATUSES.has(payload.humanStatus)
-    ) {
-      return Response.json({ error: "Invalid humanStatus." }, { status: 400 });
-    }
-    const update = ctx.db
-      .prepare(
-        "update claims set humanStatus = ?, updatedAt = ? where id = ? and sessionId = ?",
-      )
-      .run(payload.humanStatus, Date.now(), claimDbId, data.session.id);
-    if (update.changes === 0) {
-      return Response.json({ error: "Claim not found." }, { status: 404 });
-    }
-    ctx.db
-      .prepare(
-        "insert into human_review_marks (id, claimId, humanStatus, note, updatedAt) values (?, ?, ?, null, ?)",
-      )
-      .run(
-        `mark_${crypto.randomUUID()}`,
-        claimDbId,
-        payload.humanStatus,
-        Date.now(),
-      );
-    return Response.json({ ok: true });
+}
+
+async function handleHumanStatusRequest(
+  request: Request,
+  session: SessionRow,
+  ctx: Context,
+) {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
   }
-  return new Response(html, {
-    headers: { "Content-Type": "text/html; charset=utf-8" },
-  });
+  const claimId = (request as Request & { params: { claimId: string } }).params
+    .claimId;
+  const claimDbId = scopedDbId(session.id, claimId);
+  const payload = (await request.json()) as { humanStatus?: unknown };
+  if (
+    typeof payload.humanStatus !== "string" ||
+    !VALID_HUMAN_STATUSES.has(payload.humanStatus)
+  ) {
+    return Response.json({ error: "Invalid humanStatus." }, { status: 400 });
+  }
+  const update = ctx.db
+    .prepare(
+      "update claims set humanStatus = ?, updatedAt = ? where id = ? and sessionId = ?",
+    )
+    .run(payload.humanStatus, Date.now(), claimDbId, session.id);
+  if (update.changes === 0) {
+    return Response.json({ error: "Claim not found." }, { status: 404 });
+  }
+  ctx.db
+    .prepare(
+      "insert into human_review_marks (id, claimId, humanStatus, note, updatedAt) values (?, ?, ?, null, ?)",
+    )
+    .run(
+      `mark_${crypto.randomUUID()}`,
+      claimDbId,
+      payload.humanStatus,
+      Date.now(),
+    );
+  return Response.json({ ok: true });
+}
+
+async function handleCommentRequest(
+  request: Request,
+  session: SessionRow,
+  ctx: Context,
+) {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  const claimId = (request as Request & { params: { claimId: string } }).params
+    .claimId;
+  const claimDbId = scopedDbId(session.id, claimId);
+  const payload = (await request.json()) as { note?: unknown };
+  if (typeof payload.note !== "string" || !payload.note.trim()) {
+    return Response.json({ error: "Invalid comment." }, { status: 400 });
+  }
+  const claim = ctx.db
+    .query<{ humanStatus: HumanStatus }, [string, string]>(
+      "select humanStatus from claims where id = ? and sessionId = ?",
+    )
+    .get(claimDbId, session.id);
+  if (!claim) {
+    return Response.json({ error: "Claim not found." }, { status: 404 });
+  }
+  ctx.db
+    .prepare(
+      "insert into human_review_marks (id, claimId, humanStatus, note, updatedAt) values (?, ?, ?, ?, ?)",
+    )
+    .run(
+      `mark_${crypto.randomUUID()}`,
+      claimDbId,
+      claim.humanStatus,
+      payload.note.trim(),
+      Date.now(),
+    );
+  return Response.json({ ok: true });
 }
 
 function buildReviewData(db: Database, session: SessionRow, git: GitState) {
+  const totalDiff = gitDiffForCurrentState(
+    session.baseCommit,
+    session.repoRoot,
+    true,
+  );
   const threads = db
     .query<
       { id: string; title: string; summary: string; status: string },
@@ -791,12 +852,13 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
     .map((thread) => ({
       ...thread,
       id: publicDbId(session.id, thread.id),
-      claims: getClaimsForThread(db, session.id, thread.id),
+      claims: getClaimsForThread(db, session.id, thread.id, totalDiff),
     }));
   return {
     session,
     git,
     burden: reviewBurden(db, session.id),
+    generatedAt: Date.now(),
     threads,
   };
 }
@@ -805,6 +867,7 @@ function getClaimsForThread(
   db: Database,
   sessionId: string,
   threadDbId: string,
+  totalDiff: string,
 ) {
   return db
     .query<AgentClaim, [string]>(
@@ -820,150 +883,60 @@ function getClaimsForThread(
         AgentEvidence & { revisionId: string },
         [string]
       >("select filePath, startLine, endLine, symbol, fingerprint, revisionId from claim_evidences where claimId = ? order by filePath, startLine")
-        .all(claim.id),
+        .all(claim.id)
+        .map((evidence) => ({
+          ...evidence,
+          ...diffPreviewForEvidence(totalDiff, evidence),
+        })),
     }));
 }
 
-function renderReviewHtml(data: ReturnType<typeof buildReviewData>) {
-  const body = renderToStaticMarkup(
-    React.createElement(
-      "main",
-      { className: "mx-auto max-w-5xl px-6 py-8 font-sans text-slate-950" },
-      React.createElement(
-        "h1",
-        { className: "text-2xl font-semibold" },
-        "Paire Review",
-      ),
-      React.createElement(
-        "p",
-        { className: "mt-1 text-sm text-slate-500" },
-        data.session.goal ?? "No goal set",
-      ),
-      React.createElement(
-        "section",
-        { className: "mt-6 rounded-lg border border-slate-200 bg-white p-4" },
-        React.createElement(
-          "h2",
-          {
-            className:
-              "text-sm font-medium uppercase tracking-wide text-slate-500",
-          },
-          "Review burden",
-        ),
-        React.createElement("p", { className: "mt-2 text-lg" }, data.burden),
-      ),
-      ...data.threads.map((thread) =>
-        React.createElement(
-          "section",
-          {
-            key: thread.id,
-            className: "mt-4 rounded-lg border border-slate-200 bg-white p-4",
-          },
-          React.createElement(
-            "h2",
-            { className: "text-lg font-semibold" },
-            thread.title,
-          ),
-          React.createElement(
-            "p",
-            { className: "mt-1 text-sm text-slate-600" },
-            thread.summary,
-          ),
-          ...thread.claims.map((claim) =>
-            React.createElement(
-              "article",
-              { key: claim.id, className: "mt-3 rounded-md bg-slate-50 p-3" },
-              React.createElement(
-                "div",
-                { className: "text-sm font-medium" },
-                claim.text,
-              ),
-              React.createElement(
-                "div",
-                { className: "mt-1 text-xs text-slate-500" },
-                `${claim.agentStatus} / ${claim.humanStatus ?? "unreviewed"}`,
-              ),
-              React.createElement(
-                "ul",
-                {
-                  className: "mt-2 grid gap-1 text-xs font-mono text-slate-600",
-                },
-                ...claim.evidences.map((evidence) =>
-                  React.createElement(
-                    "li",
-                    {
-                      key: `${evidence.filePath}:${evidence.startLine}-${evidence.endLine}`,
-                    },
-                    `${evidence.filePath}:${evidence.startLine}-${evidence.endLine}${evidence.symbol ? ` (${evidence.symbol})` : ""}`,
-                  ),
-                ),
-              ),
-              React.createElement(
-                "div",
-                { className: "mt-3 flex flex-wrap gap-2" },
-                ...(["accepted", "concern", "irrelevant"] as const).map(
-                  (status) =>
-                    React.createElement(
-                      "button",
-                      {
-                        key: status,
-                        type: "button",
-                        "data-claim-id": claim.id,
-                        "data-human-status": status,
-                        className:
-                          "rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100",
-                      },
-                      status,
-                    ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Paire Review</title><style>${reviewCss()}</style></head><body class="bg-slate-100">${body}<script>
-window.__PAIRE_REACT_PREVIEW__=true;
-document.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-claim-id][data-human-status]");
-  if (!button) return;
-  const claimId = button.getAttribute("data-claim-id");
-  const humanStatus = button.getAttribute("data-human-status");
-  const response = await fetch("/api/claims/" + encodeURIComponent(claimId) + "/human-status", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ humanStatus })
-  });
-  if (response.ok) {
-    button.parentElement.querySelectorAll("button").forEach((node) => node.classList.remove("bg-slate-900", "text-white"));
-    button.classList.add("bg-slate-900", "text-white");
-  }
-});
-</script></body></html>`;
+function diffPreviewForEvidence(totalDiff: string, evidence: AgentEvidence) {
+  const diff = fileToRawDiff(totalDiff, evidence.filePath);
+  const hunk = rawHunkForLine(diff, evidence.startLine) || diff;
+  const before = summarizeDiffSide(hunk, "-");
+  const after = summarizeDiffSide(hunk, "+");
+  return {
+    diff,
+    before: before || "No removed lines in the matched diff hunk.",
+    after: after || "No added lines in the matched diff hunk.",
+  };
 }
 
-function reviewCss() {
-  return `
-*{box-sizing:border-box}
-body{margin:0;background:#f1f5f9;color:#020617}
-.font-sans{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.font-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
-.mx-auto{margin-left:auto;margin-right:auto}
-.max-w-5xl{max-width:64rem}
-.px-6{padding-left:1.5rem;padding-right:1.5rem}.py-8{padding-top:2rem;padding-bottom:2rem}
-.p-4{padding:1rem}.p-3{padding:.75rem}.px-2{padding-left:.5rem;padding-right:.5rem}.py-1{padding-top:.25rem;padding-bottom:.25rem}
-.mt-1{margin-top:.25rem}.mt-2{margin-top:.5rem}.mt-3{margin-top:.75rem}.mt-4{margin-top:1rem}.mt-6{margin-top:1.5rem}
-.text-2xl{font-size:1.5rem;line-height:2rem}.text-lg{font-size:1.125rem;line-height:1.75rem}.text-sm{font-size:.875rem;line-height:1.25rem}.text-xs{font-size:.75rem;line-height:1rem}
-.font-semibold{font-weight:600}.font-medium{font-weight:500}.uppercase{text-transform:uppercase}.tracking-wide{letter-spacing:.025em}
-.text-slate-950{color:#020617}.text-slate-700{color:#334155}.text-slate-600{color:#475569}.text-slate-500{color:#64748b}.text-white{color:#fff}
-.bg-slate-100{background:#f1f5f9}.bg-white{background:#fff}.bg-slate-50{background:#f8fafc}.bg-slate-900{background:#0f172a}
-.border{border:1px solid}.border-slate-200{border-color:#e2e8f0}.border-slate-300{border-color:#cbd5e1}
-.rounded-lg{border-radius:.5rem}.rounded-md{border-radius:.375rem}
-.grid{display:grid}.gap-1{gap:.25rem}.gap-2{gap:.5rem}.flex{display:flex}.flex-wrap{flex-wrap:wrap}
-button{cursor:pointer}.hover\\:bg-slate-100:hover{background:#f1f5f9}
-ul{padding-left:1rem}
-`;
+function rawHunkForLine(raw: string, line: number) {
+  if (!raw) return "";
+  const starts = [
+    ...raw.matchAll(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,(\d+))? @@.*$/gm),
+  ];
+  for (let index = 0; index < starts.length; index += 1) {
+    const match = starts[index];
+    if (!match || match.index === undefined) continue;
+    const additionStart = Number(match[2] ?? "0");
+    const additionCount = Number(match[3] ?? "1");
+    const additionEnd = Math.max(
+      additionStart,
+      additionStart + additionCount - 1,
+    );
+    if (line < additionStart || line > additionEnd) continue;
+    const next = starts[index + 1]?.index;
+    const fileHeader = raw
+      .slice(0, match.index)
+      .split("\n")
+      .slice(0, 4)
+      .join("\n");
+    return [fileHeader, raw.slice(match.index, next)].filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+function summarizeDiffSide(hunk: string, prefix: "+" | "-") {
+  return hunk
+    .split("\n")
+    .filter((line) => line.startsWith(prefix) && !line.startsWith(`${prefix}${prefix}${prefix}`))
+    .map((line) => line.slice(1).trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .join(" ");
 }
 
 async function openBrowser(

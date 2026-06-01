@@ -81,9 +81,9 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
     "http://127.0.0.1:",
   );
   const html = readFileSync(fixture.htmlCapture, "utf8");
-  expect(html).toContain('data-human-status="accepted"');
-  expect(html).toContain('data-human-status="concern"');
-  expect(html).toContain('data-human-status="irrelevant"');
+  expect(html).toContain('src="./main.tsx"');
+  expect(html).not.toContain('data-human-status="concern"');
+  expect(html).not.toContain('data-human-status="irrelevant"');
   expect(html).not.toContain("cdn.tailwindcss.com");
 
   const db = new Database(join(fixture.home, "paire.db"));

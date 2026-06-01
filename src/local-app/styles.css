@@ -1,0 +1,411 @@
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0.008 326);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0.008 326);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0.008 326);
+  --primary: oklch(0.841 0.238 128.85);
+  --primary-foreground: oklch(0.405 0.101 131.063);
+  --secondary: oklch(0.967 0.001 286.375);
+  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --muted: oklch(0.96 0.003 325.6);
+  --muted-foreground: oklch(0.542 0.034 322.5);
+  --accent: oklch(0.96 0.003 325.6);
+  --accent-foreground: oklch(0.212 0.019 322.12);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0.005 325.62);
+  --input: oklch(0.922 0.005 325.62);
+  --ring: oklch(0.711 0.019 323.02);
+  --chart-1: oklch(0.865 0.012 325.68);
+  --chart-2: oklch(0.542 0.034 322.5);
+  --chart-3: oklch(0.435 0.029 321.78);
+  --chart-4: oklch(0.364 0.029 323.89);
+  --chart-5: oklch(0.263 0.024 320.12);
+  --radius: 0.45rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0.008 326);
+  --sidebar-primary: oklch(0.648 0.2 131.684);
+  --sidebar-primary-foreground: oklch(0.986 0.031 120.757);
+  --sidebar-accent: oklch(0.96 0.003 325.6);
+  --sidebar-accent-foreground: oklch(0.212 0.019 322.12);
+  --sidebar-border: oklch(0.922 0.005 325.62);
+  --sidebar-ring: oklch(0.711 0.019 323.02);
+}
+
+.dark {
+  --background: oklch(0.145 0.008 326);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.212 0.019 322.12);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.212 0.019 322.12);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.768 0.233 130.85);
+  --primary-foreground: oklch(0.405 0.101 131.063);
+  --secondary: oklch(0.274 0.006 286.033);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.263 0.024 320.12);
+  --muted-foreground: oklch(0.711 0.019 323.02);
+  --accent: oklch(0.263 0.024 320.12);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.542 0.034 322.5);
+  --chart-1: oklch(0.865 0.012 325.68);
+  --chart-2: oklch(0.542 0.034 322.5);
+  --chart-3: oklch(0.435 0.029 321.78);
+  --chart-4: oklch(0.364 0.029 323.89);
+  --chart-5: oklch(0.263 0.024 320.12);
+  --sidebar: oklch(0.212 0.019 322.12);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.768 0.233 130.85);
+  --sidebar-primary-foreground: oklch(0.274 0.072 132.109);
+  --sidebar-accent: oklch(0.263 0.024 320.12);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.542 0.034 322.5);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: oklch(0.95 0.006 95);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 650;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.ui-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.ui-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.ui-button-default {
+  border-color: color-mix(in oklch, var(--primary), black 12%);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.ui-button-outline {
+  border-color: var(--input);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.ui-button-ghost {
+  background: transparent;
+  color: var(--foreground);
+}
+
+.ui-button-size-default {
+  height: 40px;
+  padding: 0 16px;
+}
+
+.ui-button-size-sm {
+  height: 36px;
+  padding: 0 12px;
+}
+
+.ui-button-size-icon {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+}
+
+.shell {
+  width: min(100%, 1240px);
+  margin: 0 auto;
+  padding: 34px 24px;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 650;
+}
+
+.repo-state {
+  display: flex;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+
+.repo-state span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--background);
+  padding: 7px 10px;
+}
+
+.review-list {
+  display: grid;
+  gap: 18px;
+}
+
+.claim-card {
+  border: 1px solid color-mix(in oklch, var(--border), black 6%);
+  border-radius: 28px;
+  background: var(--card);
+  padding: 28px;
+  box-shadow: 0 1px 1px oklch(0 0 0 / 4%);
+}
+
+.claim-header,
+.claim-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.category-pill {
+  border-radius: 22px;
+  background: oklch(0.94 0.005 95);
+  padding: 12px 20px;
+  color: oklch(0.24 0.008 326);
+  font-size: 22px;
+  font-weight: 650;
+}
+
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 20px;
+}
+
+.severity-pill {
+  border-radius: 8px;
+  background: oklch(0.95 0.028 25);
+  color: oklch(0.47 0.17 25);
+  padding: 6px 12px;
+  font-weight: 650;
+}
+
+.observed {
+  color: oklch(0.62 0.006 326);
+}
+
+.claim-card h2 {
+  margin-top: 28px;
+  font-size: 30px;
+  line-height: 1.2;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.summary {
+  margin-top: 18px;
+  color: oklch(0.42 0.012 326);
+  font-size: 22px;
+  line-height: 1.6;
+}
+
+.before-after {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 28px;
+}
+
+.info-panel {
+  min-height: 136px;
+  border-radius: 18px;
+  background: oklch(0.975 0.002 326);
+  padding: 24px 22px;
+}
+
+.info-panel p {
+  color: oklch(0.4 0.012 326);
+  font-size: 22px;
+  line-height: 1.38;
+}
+
+.info-panel span {
+  margin-right: 8px;
+  color: oklch(0.34 0.01 326);
+}
+
+.info-panel strong {
+  color: oklch(0.36 0.012 326);
+}
+
+.diff-collapsible {
+  margin-top: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--background);
+}
+
+.diff-trigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  background: var(--muted);
+  color: var(--foreground);
+  cursor: pointer;
+  padding: 11px 14px;
+  font-weight: 650;
+}
+
+.diff-trigger svg {
+  transition: transform 160ms ease;
+}
+
+.diff-trigger[data-panel-open] svg,
+.diff-trigger[data-open] svg {
+  transform: rotate(180deg);
+}
+
+.diff-panel {
+  max-height: 520px;
+  overflow: auto;
+}
+
+.claim-footer {
+  margin-top: 20px;
+}
+
+.claim-footer code {
+  color: oklch(0.56 0.006 326);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 20px;
+}
+
+.segmented-actions {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--background);
+}
+
+.segment {
+  height: 52px;
+  border: 0;
+  border-radius: 0;
+  padding: 0 20px;
+  color: var(--foreground);
+  font-size: 22px;
+  font-weight: 650;
+}
+
+.segment + .segment {
+  border-left: 1px solid var(--border);
+}
+
+.segment.accept {
+  min-width: 112px;
+}
+
+.empty {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--card);
+  padding: 32px;
+  color: var(--muted-foreground);
+}
+
+.diff-panel pre,
+.diff-panel code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@media (max-width: 780px) {
+  .shell {
+    padding: 18px 12px;
+  }
+
+  .topbar,
+  .claim-header,
+  .claim-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .claim-card {
+    border-radius: 18px;
+    padding: 18px;
+  }
+
+  .claim-card h2 {
+    font-size: 24px;
+  }
+
+  .summary,
+  .info-panel p,
+  .claim-footer code,
+  .segment {
+    font-size: 17px;
+  }
+
+  .before-after {
+    grid-template-columns: 1fr;
+  }
+
+  .segmented-actions {
+    width: 100%;
+  }
+
+  .segment {
+    flex: 1;
+  }
+}
