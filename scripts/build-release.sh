@@ -49,7 +49,7 @@ ARCH="$(detect_arch)"
 ASSET="paire-${OS}-${ARCH}"
 
 mkdir -p "$OUT_DIR"
-bun build src/cli.ts --compile --outfile="${OUT_DIR}/${ASSET}"
+bun scripts/build.ts --outfile="${OUT_DIR}/${ASSET}"
 chmod 0755 "${OUT_DIR}/${ASSET}"
 
 (

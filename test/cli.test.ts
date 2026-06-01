@@ -729,14 +729,13 @@ test("compiled binary supports status in a fixture repo", () => {
   const build = Bun.spawnSync(
     [
       process.execPath,
-      "build",
-      resolve(import.meta.dir, "../src/cli.ts"),
-      "--compile",
+      resolve(import.meta.dir, "../scripts/build.ts"),
       `--outfile=${binary}`,
     ],
     { stdout: "pipe", stderr: "pipe" },
   );
   expect(build.exitCode).toBe(0);
+  expect(text(build.stderr)).not.toContain("invalid @ rule");
 
   const result = Bun.spawnSync([binary, "status"], {
     cwd: fixture.repo,

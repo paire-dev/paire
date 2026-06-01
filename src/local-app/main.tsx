@@ -15,10 +15,20 @@ import { Streamdown } from "streamdown";
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
 import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "./components/ui/card";
+import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "./components/ui/collapsible";
+import { cn } from "./lib/utils";
 import "./styles.css";
 
 type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
@@ -69,6 +79,10 @@ const queryClient = new QueryClient({
   },
 });
 
+const pageClassName = "mx-auto w-full max-w-5xl px-3 py-5 sm:px-5 sm:py-6";
+const proseClassName =
+  "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
+
 async function fetchReview() {
   const response = await fetch("/api/review", { cache: "no-store" });
   if (!response.ok) throw new Error("Failed to load review data.");
@@ -92,36 +106,40 @@ function ReviewScreen() {
 
   if (isLoading) {
     return (
-      <main className="shell">
-        <div className="empty">Loading review...</div>
+      <main className={pageClassName}>
+        <EmptyState>Loading review...</EmptyState>
       </main>
     );
   }
 
   if (isError || !data) {
     return (
-      <main className="shell">
-        <div className="empty">Unable to load review data.</div>
+      <main className={pageClassName}>
+        <EmptyState>Unable to load review data.</EmptyState>
       </main>
     );
   }
 
   return (
-    <main className="shell">
-      <header className="topbar">
+    <main className={pageClassName}>
+      <header className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="eyebrow">Paire Review</p>
-          <h1>{data.session.goal ?? data.session.projectKey}</h1>
+          <p className="mb-1 text-xs font-bold uppercase text-muted-foreground">
+            Paire Review
+          </p>
+          <h1 className="text-2xl font-semibold leading-tight tracking-normal">
+            {data.session.goal ?? data.session.projectKey}
+          </h1>
         </div>
-        <div className="repo-state">
-          <span>{data.git.branch}</span>
-          <span>{data.burden}</span>
+        <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
+          <Badge variant="outline">{data.git.branch}</Badge>
+          <Badge variant="outline">{data.burden}</Badge>
         </div>
       </header>
 
-      <section className="review-list">
+      <section className="grid gap-3.5">
         {data.threads.length === 0 ? (
-          <div className="empty">No review claims have been applied yet.</div>
+          <EmptyState>No review claims have been applied yet.</EmptyState>
         ) : (
           data.threads.map((thread) =>
             thread.claims.map((claim) => (
@@ -131,6 +149,14 @@ function ReviewScreen() {
         )}
       </section>
     </main>
+  );
+}
+
+function EmptyState({ children }: { children: React.ReactNode }) {
+  return (
+    <Card>
+      <CardContent className="text-muted-foreground">{children}</CardContent>
+    </Card>
   );
 }
 
@@ -145,7 +171,10 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
   }, []);
 
   return (
-    <time className="claim-time" dateTime={new Date(updatedAt).toISOString()}>
+    <time
+      className="whitespace-nowrap text-sm leading-none text-muted-foreground"
+      dateTime={new Date(updatedAt).toISOString()}
+    >
       {formatDistanceToNow(updatedAt, { addSuffix: true })}
     </time>
   );
@@ -156,58 +185,69 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
   const statusLabel = claim.agentStatus.replaceAll("_", " ");
 
   return (
-    <article className="claim-card">
-      <div className="claim-header">
-        <Badge variant="secondary" className="category-badge">
-          <AiText source={thread.title || "Behavior"} />
+    <Card>
+      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <Badge variant="secondary" className="px-2.5 py-1 text-sm">
+          <AiText source={thread.title || "Behavior"} inline />
         </Badge>
-        <div className="status-group">
+        <CardAction className="flex flex-wrap items-center gap-2">
           {claim.updatedAt ? (
             <ClaimTimeAgo updatedAt={claim.updatedAt} />
           ) : null}
           <Badge variant="destructive">{statusLabel}</Badge>
-          <Badge variant="outline" className="observed">
+          <Badge variant="outline" className="text-muted-foreground">
             {claim.humanStatus === "accepted" ? "accepted" : "observed"}
           </Badge>
-        </div>
-      </div>
+        </CardAction>
+      </CardHeader>
 
-      <div className="claim-title">
-        <AiText source={claim.title} />
-      </div>
-      {claim.description ? (
-        <div className="claim-description">
-          <AiText source={claim.description} />
-        </div>
-      ) : null}
-      
-      <div className="before-after">
-        {evidence?.before && (
-          <InfoPanel label="Before" direction="left" text={evidence?.before} />
+      <CardContent className="flex flex-col gap-4">
+        <CardTitle className="text-xl font-medium leading-snug">
+          <AiText source={claim.title} />
+        </CardTitle>
+        {claim.description ? (
+          <CardDescription className="text-base leading-relaxed">
+            <AiText source={claim.description} />
+          </CardDescription>
+        ) : null}
+
+        {(evidence?.before || evidence?.after) && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {evidence?.before && (
+              <InfoPanel
+                label="Before"
+                direction="left"
+                text={evidence?.before}
+              />
+            )}
+            {evidence?.after && (
+              <InfoPanel
+                label="After"
+                direction="right"
+                text={evidence?.after}
+              />
+            )}
+          </div>
         )}
-        {evidence?.after && (
-          <InfoPanel label="After" direction="right" text={evidence?.after} />
-        )}
-      </div>
-      
-      {thread.summary ? (
-        <div className="summary">
-          <AiText source={thread.summary} />
-        </div>
-      ) : null}
 
+        {thread.summary ? (
+          <CardDescription className="text-base leading-relaxed">
+            <AiText source={thread.summary} />
+          </CardDescription>
+        ) : null}
 
-      {evidence ? <EvidenceDiff evidence={evidence} /> : null}
+        {evidence ? <EvidenceDiff evidence={evidence} /> : null}
+      </CardContent>
 
-      <footer className="claim-footer">
-        <code>
+      <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
+        <code className="font-mono text-sm text-muted-foreground">
           {evidence
             ? `${evidence.filePath}:${evidence.startLine}-${evidence.endLine}`
             : "No evidence span"}
         </code>
         <ClaimActions claim={claim} />
-      </footer>
-    </article>
+      </CardFooter>
+    </Card>
   );
 }
 
@@ -221,9 +261,11 @@ function InfoPanel({
   text: string;
 }) {
   return (
-    <div className="info-panel">
-      <div className="info-copy">
-        <span aria-hidden="true">{direction === "left" ? "<-" : "->"}</span>
+    <div className="min-h-22 rounded-lg bg-muted p-4">
+      <div className="text-sm leading-relaxed text-muted-foreground">
+        <span aria-hidden="true" className="mr-2 text-foreground">
+          {direction === "left" ? "<-" : "->"}
+        </span>
         <strong>{label}:</strong> <AiText source={text} inline />
       </div>
     </div>
@@ -239,7 +281,7 @@ function AiText({
 }) {
   return (
     <Streamdown
-      className={inline ? "ai-text ai-text-inline" : "ai-text"}
+      className={cn(proseClassName, inline && "inline [&>*]:inline")}
       parseIncompleteMarkdown={false}
     >
       {source}
@@ -300,15 +342,22 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
 
   return (
     <Collapsible
-      className="diff-collapsible"
+      className="overflow-hidden rounded-lg border bg-background"
       open={open}
       onOpenChange={setOpen}
     >
-      <CollapsibleTrigger className="diff-trigger">
+      <CollapsibleTrigger className="flex w-full cursor-pointer items-center justify-between bg-muted px-3 py-2 text-sm font-semibold text-foreground outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [&[data-open]>svg]:rotate-180 [&[data-panel-open]>svg]:rotate-180">
         <span>Code diff</span>
-        <ChevronDown size={18} aria-hidden="true" />
+        <ChevronDown
+          aria-hidden="true"
+          className="size-4 transition-transform"
+        />
       </CollapsibleTrigger>
-      <CollapsibleContent ref={panelRef} className="diff-panel" keepMounted>
+      <CollapsibleContent
+        ref={panelRef}
+        className="max-h-[520px] overflow-auto [&_code]:font-mono [&_pre]:font-mono"
+        keepMounted
+      >
         <PatchDiff
           patch={evidence.diff}
           disableWorkerPool
@@ -361,25 +410,27 @@ function ClaimActions({ claim }: { claim: Claim }) {
   });
 
   return (
-    <div className="segmented-actions">
+    <div className="inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto">
       <Button
         type="button"
         variant="outline"
-        className="segment comment"
+        className="flex-1 rounded-none border-0 shadow-none sm:flex-none"
         onClick={() => commentMutation.mutate()}
       >
-        <MessageSquare size={20} />
+        <MessageSquare data-icon="inline-start" />
         Comment
       </Button>
       <Button
         type="button"
         variant={claim.humanStatus === "accepted" ? "default" : "outline"}
-        className="segment accept"
+        className="min-w-20 flex-1 rounded-none border-0 border-l shadow-none sm:flex-none"
         onClick={() => acceptMutation.mutate()}
       >
-        {claim.humanStatus === "accepted" ? <Check size={20} /> : null}
+        {claim.humanStatus === "accepted" ? (
+          <Check data-icon="inline-start" />
+        ) : null}
         Ok
-        <ThumbsUp size={20} />
+        <ThumbsUp data-icon="inline-end" />
       </Button>
     </div>
   );

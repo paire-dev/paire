@@ -9,11 +9,11 @@
   },
   "scripts": {
     "dev": "bun src/cli.ts",
-    "build": "bun build src/cli.ts --compile --outfile=dist/paire",
+    "build": "bun scripts/build.ts --outfile=dist/paire",
     "release:local": "bash scripts/build-release.sh",
     "smoke": "bun scripts/smoke-cli.ts",
     "test": "bun test",
-    "typecheck": "bunx tsc -p jsconfig.json --noEmit"
+    "typecheck": "bun x tsc -p jsconfig.json --noEmit"
   },
   "keywords": [
     "cli",
@@ -41,6 +41,7 @@
     "@types/bun": "latest",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
+    "bun-plugin-tailwind": "^0.1.2",
     "shadcn": "^4.10.0",
     "typescript": "^5"
   }
