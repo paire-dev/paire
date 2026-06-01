@@ -361,7 +361,7 @@ test("paire it creates a branch session when missing", () => {
   db.close();
 });
 
-test("reset removes only the current branch session", () => {
+test("reset clears review state on the current branch and re-baselines to baseCommit", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
   run(["git", "checkout", "-b", "feature"], fixture.repo);
@@ -370,9 +370,11 @@ test("reset removes only the current branch session", () => {
   const reset = runPaire(fixture, ["reset"]);
   expect(reset.exitCode).toBe(0);
   expect(reset.stdout).toContain("Reset Paire session for branch feature.");
+  expect(reset.stdout).toContain("Review baseline set to");
 
   const featureStatus = runPaire(fixture, ["status"]);
-  expect(featureStatus.stdout).toContain("No Paire session found");
+  expect(featureStatus.stdout).toContain("Session:");
+  expect(featureStatus.stdout).not.toContain("No Paire session found");
 
   run(["git", "checkout", "main"], fixture.repo);
   const mainStatus = runPaire(fixture, ["status"]);
@@ -382,8 +384,61 @@ test("reset removes only the current branch session", () => {
   const sessions = db
     .query<{ branch: string }, []>("select branch from sessions")
     .all();
-  expect(sessions.map((session) => session.branch)).toEqual(["main"]);
+  expect(sessions.map((session) => session.branch).sort()).toEqual([
+    "feature",
+    "main",
+  ]);
+  const featureClaims = db
+    .query<{ count: number }, []>(
+      "select count(*) as count from claims where sessionId in (select id from sessions where branch = 'feature')",
+    )
+    .get();
+  expect(featureClaims?.count).toBe(0);
   db.close();
+});
+
+test("reset re-baselines review so the next packet covers branch changes since baseCommit", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/feature.ts"),
+    "export const featureFlag = true;\n",
+  );
+  commitAll(fixture.repo, "add feature flag");
+
+  const firstReview = runPaire(fixture, ["review"]);
+  const firstPacket = JSON.parse(
+    readFileSync(extractPacketPath(firstReview.stdout), "utf8"),
+  );
+  const firstResult = join(fixture.root, "first-result.json");
+  writeFileSync(
+    firstResult,
+    JSON.stringify(hardcodedAgentResult(firstPacket), null, 2),
+  );
+  expect(
+    runPaire(fixture, ["review", "--apply", firstResult, "--no-open"]).exitCode,
+  ).toBe(0);
+
+  const reset = runPaire(fixture, ["reset"]);
+  expect(reset.exitCode).toBe(0);
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.stdout).toContain("Action required");
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  expect(
+    packet.changedFiles.some(
+      (file: { path: string }) => file.path === "src/feature.ts",
+    ),
+  ).toBe(true);
+  const incrementalDiff = readFileSync(
+    packet.incrementalDiffArtifactPath,
+    "utf8",
+  );
+  expect(incrementalDiff).toContain("featureFlag");
 });
 
 test("committed files that started untracked are included in review packets", () => {

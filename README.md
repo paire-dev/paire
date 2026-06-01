@@ -113,7 +113,7 @@ PAIRE_HOME="$(mktemp -d)" paire start --base main
 
 Paire does not write review state into the target repository by default. Paire revisions are tied to commit SHAs, so it does not snapshot dirty worktree files.
 
-Sessions are scoped to the current Git branch. Running `paire start` on a branch reuses that branch's existing session when one exists, or creates one when it does not. `paire it` also creates the current branch session when needed before reviewing. Use `paire reset` to remove the current branch's local Paire session.
+Sessions are scoped to the current Git branch. Running `paire start` on a branch reuses that branch's existing session when one exists, or creates one when it does not. `paire it` also creates the current branch session when needed before reviewing. Use `paire reset` to clear the current branch's review state and re-baseline the applied revision to `baseCommit`, so the next `paire review` covers all branch changes since the merge-base again.
 
 Project state is isolated by a project key. GitHub remotes use:
 

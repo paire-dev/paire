@@ -302,19 +302,7 @@ async function startCommand(args: string[], ctx: Context) {
   }
 
   if (!getLastAppliedRevision(ctx.db, sessionId)) {
-    ctx.db
-      .prepare(
-        `insert into revisions (id, sessionId, number, state, gitFingerprint, packetArtifactId, packetJson, packetExportPath, resultPath, totalDiffArtifactId, createdAt, appliedAt)
-         values (?, ?, ?, 'applied', ?, null, null, null, null, null, ?, ?)`,
-      )
-      .run(
-        `rev_${crypto.randomUUID()}`,
-        sessionId,
-        0,
-        git.head,
-        now,
-        now,
-      );
+    insertAppliedBaselineRevision(ctx.db, sessionId, git.head, now);
   }
 
   ctx.stdout(
@@ -585,28 +573,41 @@ async function resetCommand(ctx: Context) {
     return;
   }
 
-  const reset = ctx.db.transaction((sessionId: string) => {
-    ctx.db
-      .prepare(
-        `delete from human_review_marks
+  const baseCommit =
+    gitCommand(["merge-base", "HEAD", session.baseRef], session.repoRoot, {
+      allowFail: true,
+    }).trim() || git.head;
+  const now = Date.now();
+
+  const reset = ctx.db.transaction(
+    (sessionId: string, baselineFingerprint: string, updatedAt: number) => {
+      ctx.db
+        .prepare(
+          `delete from human_review_marks
           where claimId in (select id from claims where sessionId = ?)`,
-      )
-      .run(sessionId);
-    ctx.db
-      .prepare(
-        `delete from claim_evidences
+        )
+        .run(sessionId);
+      ctx.db
+        .prepare(
+          `delete from claim_evidences
           where claimId in (select id from claims where sessionId = ?)`,
-      )
-      .run(sessionId);
-    ctx.db.prepare("delete from claims where sessionId = ?").run(sessionId);
-    ctx.db
-      .prepare("delete from change_threads where sessionId = ?")
-      .run(sessionId);
-    ctx.db.prepare("delete from revisions where sessionId = ?").run(sessionId);
-    ctx.db.prepare("delete from sessions where id = ?").run(sessionId);
-  });
-  reset(session.id);
-  ctx.stdout(`Reset Paire session for branch ${git.branch}.`);
+        )
+        .run(sessionId);
+      ctx.db.prepare("delete from claims where sessionId = ?").run(sessionId);
+      ctx.db
+        .prepare("delete from change_threads where sessionId = ?")
+        .run(sessionId);
+      ctx.db.prepare("delete from revisions where sessionId = ?").run(sessionId);
+      ctx.db
+        .prepare("update sessions set baseCommit = ?, updatedAt = ? where id = ?")
+        .run(baselineFingerprint, updatedAt, sessionId);
+      insertAppliedBaselineRevision(ctx.db, sessionId, baselineFingerprint, updatedAt);
+    },
+  );
+  reset(session.id, baseCommit, now);
+  ctx.stdout(
+    `Reset Paire session for branch ${git.branch}. Review baseline set to ${baseCommit}.`,
+  );
 }
 
 async function createPendingPacket(
@@ -1341,6 +1342,25 @@ function getSession(db: Database, repoRoot: string, branch: string) {
       "select * from sessions where repoRoot = ? and branch = ?",
     )
     .get(repoRoot, branch);
+}
+
+function insertAppliedBaselineRevision(
+  db: Database,
+  sessionId: string,
+  gitFingerprint: string,
+  timestamp: number,
+) {
+  db.prepare(
+    `insert into revisions (id, sessionId, number, state, gitFingerprint, packetArtifactId, packetJson, packetExportPath, resultPath, totalDiffArtifactId, createdAt, appliedAt)
+     values (?, ?, ?, 'applied', ?, null, null, null, null, null, ?, ?)`,
+  ).run(
+    `rev_${crypto.randomUUID()}`,
+    sessionId,
+    0,
+    gitFingerprint,
+    timestamp,
+    timestamp,
+  );
 }
 
 function getLastAppliedRevision(db: Database, sessionId: string) {
