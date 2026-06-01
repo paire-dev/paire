@@ -252,8 +252,10 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
         authThreadTitle: "The model tried to rewrite an unchanged area",
         authThreadSummary:
           "The model tried to rewrite a summary for an unchanged area.",
-        authClaimText:
+        authClaimTitle:
           "The model tried to rewrite an unchanged claim even though the status is unchanged.",
+        authClaimDescription:
+          "This rewritten description should also be ignored for unchanged claims.",
       }),
       null,
       2,
@@ -270,15 +272,16 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
     )
     .get();
   const unchangedClaim = db
-    .query<{ text: string }, []>(
-      "select text from claims where id like '%:claim_sandbox_auth_required'",
+    .query<{ title: string; description: string }, []>(
+      "select title, description from claims where id like '%:claim_sandbox_auth_required'",
     )
     .get();
   expect(unchangedThread?.title).toBe("Auth validation");
   expect(unchangedThread?.summary).toBe(
     "Project creation rejects missing users before creating data.",
   );
-  expect(unchangedClaim?.text).toBe(
+  expect(unchangedClaim?.title).toBe("Reject missing users before create");
+  expect(unchangedClaim?.description).toBe(
     "Project creation rejects missing users before returning project data.",
   );
   db.close();
@@ -781,7 +784,9 @@ function hardcodedAgentResult(packet: {
           {
             id: "claim_auth_before_create",
             threadId: "thread_workspace_validation",
-            text: "Project creation rejects missing users before returning project data.",
+            title: "Reject missing users before create",
+            description:
+              "Project creation rejects missing users before returning project data.",
             agentStatus: "new",
             humanStatus: "unreviewed",
             evidences: [
@@ -813,7 +818,8 @@ function sandboxAgentResult(
   overrides: {
     authThreadTitle?: string;
     authThreadSummary?: string;
-    authClaimText?: string;
+    authClaimTitle?: string;
+    authClaimDescription?: string;
   } = {},
 ) {
   return {
@@ -833,8 +839,10 @@ function sandboxAgentResult(
           {
             id: "claim_sandbox_auth_required",
             threadId: "thread_sandbox_auth",
-            text:
-              overrides.authClaimText ??
+            title:
+              overrides.authClaimTitle ?? "Reject missing users before create",
+            description:
+              overrides.authClaimDescription ??
               "Project creation rejects missing users before returning project data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
             humanStatus: "unreviewed",
@@ -864,7 +872,11 @@ function sandboxAgentResult(
           {
             id: "claim_sandbox_workspace_required",
             threadId: "thread_sandbox_workspace",
-            text:
+            title:
+              workspaceStatus === "new"
+                ? "Reject workspace inputs without a name"
+                : "Expose workspace validation version marker",
+            description:
               workspaceStatus === "new"
                 ? "Workspace validation rejects inputs without a workspace name."
                 : "Workspace validation rejects inputs without a workspace name and exposes a validation version marker.",

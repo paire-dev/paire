@@ -205,7 +205,9 @@ function agentResult(
           {
             id: "claim_smoke_auth_required",
             threadId: "thread_smoke_auth_workspace",
-            text: "Project creation rejects missing users before returning project data.",
+            title: "Reject missing users before create",
+            description:
+              "Project creation rejects missing users before returning project data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
             humanStatus: "unreviewed",
             evidences: [
@@ -223,7 +225,11 @@ function agentResult(
           {
             id: "claim_smoke_workspace_required",
             threadId: "thread_smoke_auth_workspace",
-            text:
+            title:
+              workspaceStatus === "new"
+                ? "Reject workspace inputs without a name"
+                : "Expose workspace validation version marker",
+            description:
               workspaceStatus === "new"
                 ? "Workspace validation rejects inputs without a workspace name."
                 : "Workspace validation rejects missing names and exposes a version marker.",

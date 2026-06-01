@@ -35,7 +35,8 @@ type Evidence = {
 
 type Claim = {
   id: string;
-  text: string;
+  title: string;
+  description?: string;
   agentStatus: string;
   humanStatus: HumanStatus;
   updatedAt?: number;
@@ -172,8 +173,13 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
       </div>
 
       <div className="claim-title">
-        <AiText source={claim.text} />
+        <AiText source={claim.title} />
       </div>
+      {claim.description ? (
+        <div className="claim-description">
+          <AiText source={claim.description} />
+        </div>
+      ) : null}
       {thread.summary ? (
         <div className="summary">
           <AiText source={thread.summary} />
