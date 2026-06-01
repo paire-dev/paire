@@ -335,15 +335,22 @@ async function reviewCommand(args: string[], ctx: Context) {
     [
       "PAIRE_AGENT_ACTION_REQUIRED",
       "",
-      `Paire detected changes since revision ${lastApplied?.id ?? "none"}.`,
-      "Analyze the current canonical packet exported at:",
+      "Follow-up prompt for AI:",
+      "",
+      `Paire detected committed changes since revision ${lastApplied?.id ?? "none"}.`,
+      "Analyze this packet:",
       packet.path,
       "",
       "Packet preview:",
       packet.preview,
       "",
-      "Then write the review update JSON and run:",
+      "Write the review update JSON to:",
+      packet.resultPath,
+      "",
+      "Then run:",
       `paire review --apply ${packet.resultPath}`,
+      "",
+      "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
     ].join("\n"),
   );
 }
@@ -571,6 +578,11 @@ async function createPendingPacket(
       "Do not create new claims for line movement, formatting, renames, or helper extraction unless meaning changed.",
       "Set agentStatus to one of: new, unchanged, evidence_moved, amended, invalidated, superseded.",
       "Put every evidence span under the claim that depends on it.",
+      "Format human-facing title, summary, and claim text with Markdown.",
+      "Keep titles short and direct.",
+      "Use summary/description only to add detail that complements the title; do not restate the same point.",
+      "Aim for clarity with progressive disclosure: each new detail should build on the previous one and avoid repetition.",
+      "Describe before/after impact at a high level in short, lower-detail language; do not mention code locations or line numbers in before/after wording.",
     ],
   };
   const packetJson = JSON.stringify(packet, null, 2);
@@ -732,11 +744,17 @@ async function openReviewUi(ctx: Context, session: SessionRow, git: GitState) {
   });
   const url = `http://127.0.0.1:${server.port}/`;
   await ctx.openBrowser(url);
+  ctx.stdout(
+    [
+      `Review UI: ${url}`,
+      `Open this URL in the browser: ${url}`,
+      "Press Ctrl+C to stop.",
+    ].join("\n"),
+  );
   if (ctx.env.PAIRE_BROWSER_CAPTURE) {
     server.stop();
     return;
   }
-  ctx.stdout(`Review UI: ${url}\nPress Ctrl+C to stop.`);
   await new Promise(() => undefined);
 }
 
@@ -893,50 +911,11 @@ function getClaimsForThread(
 
 function diffPreviewForEvidence(totalDiff: string, evidence: AgentEvidence) {
   const diff = fileToRawDiff(totalDiff, evidence.filePath);
-  const hunk = rawHunkForLine(diff, evidence.startLine) || diff;
-  const before = summarizeDiffSide(hunk, "-");
-  const after = summarizeDiffSide(hunk, "+");
   return {
     diff,
-    before: before || "No removed lines in the matched diff hunk.",
-    after: after || "No added lines in the matched diff hunk.",
+    before: "The behavior was missing, stale, or incomplete.",
+    after: "The behavior is now updated by this change.",
   };
-}
-
-function rawHunkForLine(raw: string, line: number) {
-  if (!raw) return "";
-  const starts = [
-    ...raw.matchAll(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,(\d+))? @@.*$/gm),
-  ];
-  for (let index = 0; index < starts.length; index += 1) {
-    const match = starts[index];
-    if (!match || match.index === undefined) continue;
-    const additionStart = Number(match[2] ?? "0");
-    const additionCount = Number(match[3] ?? "1");
-    const additionEnd = Math.max(
-      additionStart,
-      additionStart + additionCount - 1,
-    );
-    if (line < additionStart || line > additionEnd) continue;
-    const next = starts[index + 1]?.index;
-    const fileHeader = raw
-      .slice(0, match.index)
-      .split("\n")
-      .slice(0, 4)
-      .join("\n");
-    return [fileHeader, raw.slice(match.index, next)].filter(Boolean).join("\n");
-  }
-  return "";
-}
-
-function summarizeDiffSide(hunk: string, prefix: "+" | "-") {
-  return hunk
-    .split("\n")
-    .filter((line) => line.startsWith(prefix) && !line.startsWith(`${prefix}${prefix}${prefix}`))
-    .map((line) => line.slice(1).trim())
-    .filter(Boolean)
-    .slice(0, 4)
-    .join(" ");
 }
 
 async function openBrowser(

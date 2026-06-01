@@ -12,6 +12,7 @@ import { createRoot } from "react-dom/client";
 import { Streamdown } from "streamdown";
 
 import { Button } from "./components/ui/button";
+import { Badge } from "./components/ui/badge";
 import {
   Collapsible,
   CollapsibleContent,
@@ -137,14 +138,14 @@ function ClaimCard({ thread, claim }: { thread: Thread; claim: Claim }) {
   return (
     <article className="claim-card">
       <div className="claim-header">
-        <div className="category-pill">
+        <Badge variant="secondary" className="category-badge">
           <AiText source={thread.title || "Behavior"} />
-        </div>
+        </Badge>
         <div className="status-group">
-          <span className="severity-pill">{statusLabel}</span>
-          <span className="observed">
+          <Badge variant="destructive">{statusLabel}</Badge>
+          <Badge variant="outline" className="observed">
             {claim.humanStatus === "accepted" ? "accepted" : "observed"}
-          </span>
+          </Badge>
         </div>
       </div>
 

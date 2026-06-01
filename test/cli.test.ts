@@ -61,6 +61,10 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   const review = runPaire(fixture, ["review"]);
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(review.stdout).toContain("Follow-up prompt for AI:");
+  expect(review.stdout).toContain(
+    "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
+  );
   expect(existsSync(fixture.browserCapture)).toBe(false);
 
   const packetPath = extractPacketPath(review.stdout);
@@ -77,6 +81,7 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   const apply = runPaire(fixture, ["review", "--apply", agentResultPath]);
   expect(apply.exitCode).toBe(0);
   expect(apply.stdout).toContain("Review burden:");
+  expect(apply.stdout).toContain("Open this URL in the browser:");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
   );
@@ -119,6 +124,7 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   const reviewAgain = runPaire(fixture, ["review"]);
   expect(reviewAgain.exitCode).toBe(0);
   expect(reviewAgain.stdout).not.toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(reviewAgain.stdout).toContain("Open this URL in the browser:");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
   );

@@ -129,8 +129,8 @@ textarea {
 }
 
 .ui-button-size-default {
-  height: 40px;
-  padding: 0 16px;
+  height: 36px;
+  padding: 0 14px;
 }
 
 .ui-button-size-sm {
@@ -139,15 +139,52 @@ textarea {
 }
 
 .ui-button-size-icon {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   padding: 0;
 }
 
+.ui-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.ui-badge-default {
+  border-color: transparent;
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.ui-badge-secondary {
+  border-color: transparent;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+
+.ui-badge-destructive {
+  border-color: transparent;
+  background: color-mix(in oklch, var(--destructive), white 88%);
+  color: oklch(0.48 0.18 26);
+}
+
+.ui-badge-outline {
+  border-color: var(--border);
+  background: var(--background);
+  color: var(--foreground);
+}
+
 .shell {
-  width: min(100%, 1240px);
+  width: min(100%, 1040px);
   margin: 0 auto;
-  padding: 34px 24px;
+  padding: 24px 20px;
 }
 
 .topbar {
@@ -209,7 +246,7 @@ p {
 }
 
 h1 {
-  font-size: 28px;
+  font-size: 24px;
   line-height: 1.15;
   font-weight: 650;
 }
@@ -230,14 +267,14 @@ h1 {
 
 .review-list {
   display: grid;
-  gap: 18px;
+  gap: 14px;
 }
 
 .claim-card {
   border: 1px solid color-mix(in oklch, var(--border), black 6%);
-  border-radius: 28px;
+  border-radius: 16px;
   background: var(--card);
-  padding: 28px;
+  padding: 20px;
   box-shadow: 0 1px 1px oklch(0 0 0 / 4%);
 }
 
@@ -246,31 +283,18 @@ h1 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  gap: 14px;
 }
 
-.category-pill {
-  border-radius: 22px;
-  background: oklch(0.94 0.005 95);
-  padding: 12px 20px;
-  color: oklch(0.24 0.008 326);
-  font-size: 22px;
-  font-weight: 650;
+.category-badge {
+  padding: 6px 10px;
+  font-size: 14px;
 }
 
 .status-group {
   display: flex;
   align-items: center;
-  gap: 14px;
-  font-size: 20px;
-}
-
-.severity-pill {
-  border-radius: 8px;
-  background: oklch(0.95 0.028 25);
-  color: oklch(0.47 0.17 25);
-  padding: 6px 12px;
-  font-weight: 650;
+  gap: 8px;
 }
 
 .observed {
@@ -278,38 +302,38 @@ h1 {
 }
 
 .claim-title {
-  margin-top: 28px;
-  font-size: 30px;
-  line-height: 1.2;
+  margin-top: 18px;
+  font-size: 22px;
+  line-height: 1.28;
   font-weight: 500;
   letter-spacing: 0;
 }
 
 .summary {
-  margin-top: 18px;
+  margin-top: 10px;
   color: oklch(0.42 0.012 326);
-  font-size: 22px;
-  line-height: 1.6;
+  font-size: 16px;
+  line-height: 1.55;
 }
 
 .before-after {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 28px;
+  gap: 12px;
+  margin-top: 18px;
 }
 
 .info-panel {
-  min-height: 136px;
-  border-radius: 18px;
+  min-height: 88px;
+  border-radius: 10px;
   background: oklch(0.975 0.002 326);
-  padding: 24px 22px;
+  padding: 14px 16px;
 }
 
 .info-copy {
   color: oklch(0.4 0.012 326);
-  font-size: 22px;
-  line-height: 1.38;
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 .info-copy span {
@@ -322,7 +346,7 @@ h1 {
 }
 
 .diff-collapsible {
-  margin-top: 18px;
+  margin-top: 14px;
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
@@ -338,7 +362,8 @@ h1 {
   background: var(--muted);
   color: var(--foreground);
   cursor: pointer;
-  padding: 11px 14px;
+  padding: 9px 12px;
+  font-size: 14px;
   font-weight: 650;
 }
 
@@ -357,30 +382,30 @@ h1 {
 }
 
 .claim-footer {
-  margin-top: 20px;
+  margin-top: 14px;
 }
 
 .claim-footer code {
   color: oklch(0.56 0.006 326);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 20px;
+  font-size: 13px;
 }
 
 .segmented-actions {
   display: inline-flex;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 10px;
   background: var(--background);
 }
 
 .segment {
-  height: 52px;
+  height: 38px;
   border: 0;
   border-radius: 0;
-  padding: 0 20px;
+  padding: 0 14px;
   color: var(--foreground);
-  font-size: 22px;
+  font-size: 15px;
   font-weight: 650;
 }
 
@@ -389,14 +414,14 @@ h1 {
 }
 
 .segment.accept {
-  min-width: 112px;
+  min-width: 76px;
 }
 
 .empty {
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 12px;
   background: var(--card);
-  padding: 32px;
+  padding: 24px;
   color: var(--muted-foreground);
 }
 
@@ -418,19 +443,19 @@ h1 {
   }
 
   .claim-card {
-    border-radius: 18px;
-    padding: 18px;
+    border-radius: 14px;
+    padding: 16px;
   }
 
   .claim-title {
-    font-size: 24px;
+    font-size: 20px;
   }
 
   .summary,
   .info-copy,
   .claim-footer code,
   .segment {
-    font-size: 17px;
+    font-size: 15px;
   }
 
   .before-after {
