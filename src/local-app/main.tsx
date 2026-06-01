@@ -400,9 +400,6 @@ function ClaimCard({ claim }: { claim: Claim }) {
             <ClaimTimeAgo updatedAt={claim.updatedAt} />
           ) : null}
           <Badge variant="destructive">{statusLabel(claim.agentStatus)}</Badge>
-          <Badge variant="outline" className="text-muted-foreground">
-            {statusLabel(claim.humanStatus)}
-          </Badge>
         </CardAction>
       </CardHeader>
 
