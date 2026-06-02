@@ -12,6 +12,10 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import {
+  formatInstallResult,
+  installAgentInstructions,
+} from "./install-agent-instructions";
 import reviewApp from "../local-app/index.html";
 
 export type CliOptions = {
@@ -58,7 +62,7 @@ type ClaimStatus =
   | "invalidated"
   | "superseded";
 
-type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
+type HumanStatus = "unreviewed" | "accepted";
 
 type AgentEvidence = {
   claimId?: string;
@@ -88,7 +92,6 @@ type AgentThread = {
   id: string;
   title: string;
   summary?: string;
-  status?: string;
   claims: AgentClaim[];
 };
 
@@ -173,12 +176,7 @@ const VALID_AGENT_STATUSES = new Set([
   "invalidated",
   "superseded",
 ]);
-const VALID_HUMAN_STATUSES = new Set([
-  "unreviewed",
-  "accepted",
-  "concern",
-  "irrelevant",
-]);
+const VALID_HUMAN_STATUSES = new Set(["unreviewed", "accepted"]);
 
 export async function runCli(argv: string[], options: CliOptions = {}) {
   const ctx = makeContext(options);
@@ -202,6 +200,9 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         return 0;
       case "sync":
         await syncCommand(ctx);
+        return 0;
+      case "install":
+        installCommand(ctx);
         return 0;
       case "_review-serve": {
         const sessionId = rest[0];
@@ -368,6 +369,11 @@ async function reviewCommand(args: string[], ctx: Context) {
   );
 }
 
+function installCommand(ctx: Context) {
+  const result = installAgentInstructions(getGitRepoRoot(ctx.cwd));
+  ctx.stdout(formatInstallResult(result));
+}
+
 async function itCommand(args: string[], ctx: Context) {
   const git = getGitState(ctx.cwd);
   if (!getSession(ctx.db, git.repoRoot, git.branch)) {
@@ -420,14 +426,15 @@ async function applyReviewCommand(
   }
 
   const apply = ctx.db.transaction((value: AgentApplyPayload) => {
+    let applyOrder = Date.now();
     for (const thread of value.threads) {
       const threadDbId = scopedDbId(session.id, thread.id);
       const existingThread = ctx.db
         .query<
-          { title: string; summary: string; status: string },
+          { title: string; summary: string; updatedAt: number },
           [string, string]
         >(
-          "select title, summary, status from change_threads where id = ? and sessionId = ?",
+          "select title, summary, updatedAt from change_threads where id = ? and sessionId = ?",
         )
         .get(threadDbId, session.id);
       const preserveExistingThreadCopy =
@@ -439,9 +446,9 @@ async function applyReviewCommand(
         );
       ctx.db
         .prepare(
-          `insert into change_threads (id, sessionId, title, summary, status, updatedAt)
-           values (?, ?, ?, ?, ?, ?)
-           on conflict(id) do update set title = excluded.title, summary = excluded.summary, status = excluded.status, updatedAt = excluded.updatedAt`,
+          `insert into change_threads (id, sessionId, title, summary, updatedAt)
+           values (?, ?, ?, ?, ?)
+           on conflict(id) do update set title = excluded.title, summary = excluded.summary, updatedAt = excluded.updatedAt`,
         )
         .run(
           threadDbId,
@@ -450,10 +457,9 @@ async function applyReviewCommand(
           preserveExistingThreadCopy
             ? existingThread.summary
             : (thread.summary ?? ""),
-          preserveExistingThreadCopy
-            ? existingThread.status
-            : (thread.status ?? "active"),
-          Date.now(),
+          preserveExistingThreadCopy && existingThread
+            ? existingThread.updatedAt
+            : ++applyOrder,
         );
       for (const claim of thread.claims) {
         const claimDbId = scopedDbId(session.id, claim.id);
@@ -465,10 +471,11 @@ async function applyReviewCommand(
               beforeText: string | null;
               afterText: string | null;
               humanStatus: HumanStatus;
+              updatedAt: number;
             },
             [string, string]
           >(
-            "select title, description, beforeText, afterText, humanStatus from claims where id = ? and sessionId = ?",
+            "select title, description, beforeText, afterText, humanStatus, updatedAt from claims where id = ? and sessionId = ?",
           )
           .get(claimDbId, session.id);
         const claimCopy = normalizeClaimCopy(claim);
@@ -486,6 +493,10 @@ async function applyReviewCommand(
         const claimAfter = preserveClaimCopy
           ? existingClaim.afterText
           : normalizeNullableCopy(claim.after);
+        const claimHumanStatus =
+          existingClaim && !preserveClaimCopy
+            ? "unreviewed"
+            : (existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed");
         ctx.db
           .prepare(
             `insert into claims (id, threadId, sessionId, title, description, beforeText, afterText, agentStatus, humanStatus, updatedAt)
@@ -493,7 +504,7 @@ async function applyReviewCommand(
              on conflict(id) do update set threadId = excluded.threadId, title = excluded.title,
                description = excluded.description,
                beforeText = excluded.beforeText, afterText = excluded.afterText,
-               agentStatus = excluded.agentStatus, updatedAt = excluded.updatedAt`,
+               agentStatus = excluded.agentStatus, humanStatus = excluded.humanStatus, updatedAt = excluded.updatedAt`,
           )
           .run(
             claimDbId,
@@ -504,8 +515,10 @@ async function applyReviewCommand(
             claimBefore,
             claimAfter,
             claim.agentStatus,
-            existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed",
-            Date.now(),
+            claimHumanStatus,
+            preserveClaimCopy && existingClaim
+              ? existingClaim.updatedAt
+              : ++applyOrder,
           );
         ctx.db
           .prepare("delete from claim_evidences where claimId = ?")
@@ -689,7 +702,7 @@ async function createPendingPacket(
       revisionId: "string",
       gitFingerprint: "string",
       threads:
-        "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, title, description?, before?, after?, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }> }> }>",
+        "Array<{ id, title, summary?, claims: Array<{ id, threadId, title, description?, before?, after?, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }> }> }>",
     },
     rules: [
       "Group related claims into area threads. Treat each thread as one review area with a short area title, not as a single diff line or file.",
@@ -1238,10 +1251,10 @@ async function handleCommentRequest(
 function buildReviewData(db: Database, session: SessionRow, git: GitState) {
   const threads = db
     .query<
-      { id: string; title: string; summary: string; status: string },
+      { id: string; title: string; summary: string },
       [string]
     >(
-      "select id, title, summary, status from change_threads where sessionId = ? order by updatedAt desc",
+      "select id, title, summary from change_threads where sessionId = ? order by updatedAt desc, rowid desc",
     )
     .all(session.id)
     .map((thread) => ({
@@ -1265,7 +1278,7 @@ function getClaimsForThread(
 ) {
   return db
     .query<AgentClaim, [string]>(
-      "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc",
+      "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc, rowid desc",
     )
     .all(threadDbId)
     .map((claim) => ({
@@ -1340,7 +1353,6 @@ function migrate(db: Database) {
       sessionId text not null,
       title text not null,
       summary text not null,
-      status text not null,
       updatedAt integer not null
     );
     create table if not exists claims (
@@ -1392,6 +1404,7 @@ function migrate(db: Database) {
   migrateClaimsDropLegacyTextColumn(db);
   dropColumnIfExists(db, "claim_evidences", "beforeText");
   dropColumnIfExists(db, "claim_evidences", "afterText");
+  dropColumnIfExists(db, "change_threads", "status");
   migrateSessionsToBranchScope(db);
   scopeReviewIds(db);
 }
@@ -1605,7 +1618,7 @@ function getActiveClaims(db: Database, sessionId: string) {
               claims.agentStatus, claims.humanStatus, change_threads.title as threadTitle
        from claims join change_threads on change_threads.id = claims.threadId
        where claims.sessionId = ? and claims.agentStatus != 'superseded'
-       order by change_threads.updatedAt desc, claims.updatedAt desc`,
+       order by change_threads.updatedAt desc, change_threads.rowid desc, claims.updatedAt desc, claims.rowid desc`,
     )
     .all(sessionId);
   return rows.map((claim) => ({
@@ -1735,8 +1748,12 @@ function normalizeStoredClaim(
   };
 }
 
+function getGitRepoRoot(cwd: string): string {
+  return gitCommand(["rev-parse", "--show-toplevel"], cwd).trim();
+}
+
 function getGitState(cwd: string): GitState {
-  const repoRoot = gitCommand(["rev-parse", "--show-toplevel"], cwd).trim();
+  const repoRoot = getGitRepoRoot(cwd);
   const branch = gitCommand(
     ["rev-parse", "--abbrev-ref", "HEAD"],
     repoRoot,
@@ -2014,5 +2031,6 @@ function helpText() {
     "  status",
     "  sync",
     "  reset",
+    "  install",
   ].join("\n");
 }

@@ -89,8 +89,6 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   );
   const html = readFileSync(fixture.htmlCapture, "utf8");
   expect(html).toContain('src="./main.tsx"');
-  expect(html).not.toContain('data-human-status="concern"');
-  expect(html).not.toContain('data-human-status="irrelevant"');
   expect(html).not.toContain("cdn.tailwindcss.com");
 
   const db = new Database(join(fixture.home, "paire.db"));
@@ -216,6 +214,12 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
     "http://127.0.0.1:",
   );
 
+  const dbAfterFirstApply = new Database(join(fixture.home, "paire.db"));
+  dbAfterFirstApply
+    .prepare("update claims set humanStatus = 'accepted'")
+    .run();
+  dbAfterFirstApply.close();
+
   writeFileSync(fixture.browserCapture, "");
   const reopen = runPaire(fixture, ["review"]);
   expect(reopen.exitCode).toBe(0);
@@ -317,7 +321,163 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   expect(unchangedClaim?.afterText).toBe(
     "Project creation rejects missing users before returning data.",
   );
+  const authHumanStatus = db
+    .query<{ humanStatus: string }, []>(
+      "select humanStatus from claims where id like '%:claim_sandbox_auth_required'",
+    )
+    .get();
+  const workspaceHumanStatus = db
+    .query<{ humanStatus: string }, []>(
+      "select humanStatus from claims where id like '%:claim_sandbox_workspace_required'",
+    )
+    .get();
+  expect(authHumanStatus?.humanStatus).toBe("accepted");
+  expect(workspaceHumanStatus?.humanStatus).toBe("unreviewed");
   db.close();
+});
+
+test("review API returns threads and claims newest first", async () => {
+  const fixture = createFixtureRepo();
+
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add workspace validation");
+
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "ordered-result.json");
+  writeFileSync(
+    resultPath,
+    JSON.stringify(
+      {
+        packetId: packet.packetId,
+        sessionId: packet.sessionId,
+        revisionId: packet.revisionId,
+        gitFingerprint: packet.currentFingerprint,
+        threads: [
+          {
+            id: "thread_older",
+            title: "Older thread",
+            summary: "First thread in apply order.",
+            claims: [
+              {
+                id: "claim_older",
+                threadId: "thread_older",
+                title: "Older claim",
+                description: "First claim in apply order.",
+                before: "Before older.",
+                after: "After older.",
+                agentStatus: "new",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "Older claim evidence.",
+                  },
+                ],
+              },
+              {
+                id: "claim_newer",
+                threadId: "thread_older",
+                title: "Newer claim",
+                description: "Second claim in apply order.",
+                before: "Before newer.",
+                after: "After newer.",
+                agentStatus: "new",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "Newer claim evidence.",
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            id: "thread_newer",
+            title: "Newer thread",
+            summary: "Second thread in apply order.",
+            claims: [
+              {
+                id: "claim_thread_newer",
+                threadId: "thread_newer",
+                title: "Newer thread claim",
+                description: "Only claim in the newer thread.",
+                before: "Before thread.",
+                after: "After thread.",
+                agentStatus: "new",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "Newer thread evidence.",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  expect(
+    runPaire(fixture, ["review", "--apply", resultPath, "--no-open"]).exitCode,
+  ).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const server = Bun.spawn(
+    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
+    {
+      cwd: fixture.repo,
+      env: { ...process.env, PAIRE_HOME: fixture.home },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const state = await waitForServerState(fixture.home, session!.id);
+    const reviewData = await fetch(`${state.url}api/review`).then((response) =>
+      response.json(),
+    );
+    expect(reviewData.threads.map((thread: { id: string }) => thread.id)).toEqual([
+      "thread_newer",
+      "thread_older",
+    ]);
+    expect(
+      reviewData.threads
+        .find((thread: { id: string }) => thread.id === "thread_older")
+        ?.claims.map((claim: { id: string }) => claim.id),
+    ).toEqual(["claim_newer", "claim_older"]);
+  } finally {
+    server.kill();
+    await server.exited;
+  }
 });
 
 test("review API loads without embedding raw diffs and serves evidence diffs on demand", async () => {
@@ -822,6 +982,53 @@ test("oversized lockfile diffs are summarized with safe inspection commands", ()
   expect(JSON.stringify(packet.touchedSnippets)).not.toContain("package-499");
 });
 
+test("paire install appends agent instructions to AGENTS.md and CLAUDE.md", () => {
+  const fixture = createFixtureRepo();
+  const agentsPath = join(fixture.repo, "AGENTS.md");
+  const claudePath = join(fixture.repo, "CLAUDE.md");
+  writeFileSync(agentsPath, "# Agent rules\n");
+  writeFileSync(claudePath, "---\ndescription: test\n---\n\n# Claude\n");
+
+  const first = runPaire(fixture, ["install"]);
+  expect(first.exitCode).toBe(0);
+  expect(first.stdout).toContain("Updated: AGENTS.md, CLAUDE.md");
+
+  const agents = readFileSync(agentsPath, "utf8");
+  const claude = readFileSync(claudePath, "utf8");
+  expect(agents).toContain("<!-- paire -->");
+  expect(agents).toContain("When you **git push**, run `paire it`");
+  expect(agents).toContain("paire review --apply");
+  expect(claude).toContain("<!-- paire -->");
+  expect(claude).toContain("When you **git push**, run `paire it`");
+
+  const second = runPaire(fixture, ["install"]);
+  expect(second.exitCode).toBe(0);
+  expect(second.stdout).toContain("Already installed: AGENTS.md, CLAUDE.md");
+  expect(readFileSync(agentsPath, "utf8")).toBe(agents);
+});
+
+test("paire install skips missing agent instruction files", () => {
+  const fixture = createFixtureRepo();
+  writeFileSync(join(fixture.repo, "AGENTS.md"), "# Agent rules\n");
+
+  const result = runPaire(fixture, ["install"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("Updated: AGENTS.md");
+  expect(result.stdout).toContain("Not found (skipped): CLAUDE.md");
+});
+
+test("paire install works in a git repo before the first commit", () => {
+  const fixture = createUncommittedFixtureRepo();
+  writeFileSync(join(fixture.repo, "AGENTS.md"), "# Agent rules\n");
+
+  const result = runPaire(fixture, ["install"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("Updated: AGENTS.md");
+  expect(readFileSync(join(fixture.repo, "AGENTS.md"), "utf8")).toContain(
+    "<!-- paire -->",
+  );
+});
+
 test("it aliases review and status/sync avoid push or commit suggestions", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
@@ -923,13 +1130,21 @@ test("compiled binary supports status in a fixture repo", () => {
   expect(text(result.stdout)).toContain("No Paire session found");
 });
 
-function createFixtureRepo(): Fixture {
+function createUncommittedFixtureRepo(): Fixture {
   const root = mkdtempSync(join(tmpdir(), "paire-cli-"));
   const repo = join(root, "repo");
   const home = join(root, "home");
   const browserCapture = join(root, "browser.txt");
   const htmlCapture = join(root, "review.html");
   run(["git", "init", "-b", "main", repo], root);
+  const fixture = { root, repo, home, browserCapture, htmlCapture };
+  fixtures.push(fixture);
+  return fixture;
+}
+
+function createFixtureRepo(): Fixture {
+  const fixture = createUncommittedFixtureRepo();
+  const { repo } = fixture;
   run(["git", "config", "user.email", "test@example.com"], repo);
   run(["git", "config", "user.name", "Test User"], repo);
   writeFileSync(join(repo, "package-lock.json"), "{}\n");
@@ -937,8 +1152,6 @@ function createFixtureRepo(): Fixture {
   writeFileSync(join(repo, "src/app.ts"), "export const value = 1;\n");
   run(["git", "add", "."], repo);
   run(["git", "commit", "-m", "initial"], repo);
-  const fixture = { root, repo, home, browserCapture, htmlCapture };
-  fixtures.push(fixture);
   return fixture;
 }
 
@@ -1030,7 +1243,6 @@ function hardcodedAgentResult(packet: {
         title: "Workspace validation",
         summary:
           "Project creation now rejects missing users before creating data.",
-        status: "active",
         claims: [
           {
             id: "claim_auth_before_create",
@@ -1088,7 +1300,6 @@ function sandboxAgentResult(
         summary:
           overrides.authThreadSummary ??
           "Project creation rejects missing users before creating data.",
-        status: "active",
         claims: [
           {
             id: "claim_sandbox_auth_required",
@@ -1125,7 +1336,6 @@ function sandboxAgentResult(
           workspaceStatus === "new"
             ? "Workspace validation rejects missing names."
             : "Workspace validation now exposes a validation version marker.",
-        status: "active",
         claims: [
           {
             id: "claim_sandbox_workspace_required",

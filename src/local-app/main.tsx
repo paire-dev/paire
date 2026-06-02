@@ -24,6 +24,7 @@ import {
   ArrowRightFromLine,
   Bot,
   Check,
+  ChevronRight,
   FileCode,
   Files,
   FolderTree,
@@ -52,11 +53,6 @@ import {
   CardTitle,
 } from "./components/ui/card";
 import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "./components/ui/resizable";
-import {
   ThemeProvider,
   useTheme,
   type Theme,
@@ -64,7 +60,19 @@ import {
 import { cn } from "./lib/utils";
 import "./styles.css";
 
-type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
+/** Injected into @pierre/diffs shadow DOM via `unsafeCSS`. */
+const DIFF_SELECTED_LINE_UNSAFE_CSS = `
+  [data-selected-line][data-column-number] {
+    box-shadow: inset 2px 0 0 var(--primary);
+  }
+  [data-selected-line]:is([data-line], [data-no-newline]) {
+  }
+  [data-selected-line][data-gutter-buffer] {
+
+  }
+`;
+
+type HumanStatus = "unreviewed" | "accepted";
 type FilterValue = "all" | string;
 
 type Evidence = {
@@ -93,7 +101,6 @@ type Thread = {
   id: string;
   title: string;
   summary: string;
-  status: string;
   claims: Claim[];
 };
 
@@ -125,19 +132,32 @@ const queryClient = new QueryClient({
   },
 });
 
-const pageClassName = "mx-auto w-full max-w-[1600px] px-3 pt-5 sm:px-5 sm:pt-6";
+const pageClassName = "mx-auto w-full px-3 pt-5 sm:px-5 sm:pt-6";
 const desktopPageClassName = cn(
   pageClassName,
   "flex h-dvh max-h-dvh flex-col overflow-hidden",
 );
 const proseClassName =
   "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
-const humanStatusOptions: Array<HumanStatus> = [
-  "unreviewed",
-  "accepted",
-  "concern",
-  "irrelevant",
-];
+const humanStatusOptions: Array<HumanStatus> = ["unreviewed", "accepted"];
+
+// Returns a HTML DOM node id-friendly string for an Evidence.
+const getEvidenceId = (evidence: Evidence) => {
+  // Sanitize filePath for id: replace slashes and backslashes, remove weird chars
+  // id: claim-<claimId>_<fileName>-<start>-<end>
+  const claimPart = `claim-${evidence.claimId}`;
+  const filePart = evidence.filePath
+    .replace(/[^\w\-\.]+/g, "-") // keep [a-zA-Z0-9_-\.], replace others with -
+    .replace(/^-+/, "") // don't start with hyphen
+    .replace(/-+$/, ""); // don't end with hyphen
+
+  const linesPart = `${evidence.startLine}-${evidence.endLine}`;
+  // Always start with a letter for HTML id
+  return `evid-${claimPart}_${filePart}_${linesPart}`.replace(
+    /[^a-zA-Z0-9_\-:.]/g,
+    "",
+  );
+};
 
 async function fetchReview() {
   const response = await fetch("/api/review", { cache: "no-store" });
@@ -185,7 +205,7 @@ function ReviewScreen() {
     React.useState<FilterValue>("all");
   const [humanStatusFilter, setHumanStatusFilter] =
     React.useState<FilterValue>("all");
-  const [codePanelOpen, setCodePanelOpen] = React.useState(true);
+  const [codePanelOpen, setCodePanelOpen] = React.useState(false);
   const [selectedEvidence, setSelectedEvidence] =
     React.useState<EvidenceSelection | null>(null);
   const codeViewRef = React.useRef<CodeViewHandle<undefined>>(null);
@@ -208,6 +228,12 @@ function ReviewScreen() {
     [codeItems, data?.git.status],
   );
 
+  const evidenceIsSelected = React.useCallback(
+    (evidence: Evidence) =>
+      isEvidenceSelected(evidence, selectedEvidence, codeItems),
+    [codeItems, selectedEvidence],
+  );
+
   const scrollToEvidence = React.useCallback(
     (evidence: Evidence) => {
       const item = findCodeViewItem(codeItems, evidence.filePath);
@@ -224,6 +250,8 @@ function ReviewScreen() {
         align: "center",
         behavior: "smooth",
       });
+
+      window.history.pushState(null, "", `#${getEvidenceId(evidence)}`);
     },
     [codeItems],
   );
@@ -270,14 +298,16 @@ function ReviewScreen() {
     <ReviewClaims
       allThreads={data.threads}
       filteredThreads={filteredThreads}
+      isEvidenceSelected={evidenceIsSelected}
       onEvidenceSelect={scrollToEvidence}
     />
   );
   const reviewPanel = (
     <ReviewScrollPanel
       filterBar={filterBar}
-      sidebarCollapsible={isDesktopLayout}
+      sidebarCollapsible={!codePanelOpen}
     >
+      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
       {reviewContent}
     </ReviewScrollPanel>
   );
@@ -307,58 +337,29 @@ function ReviewScreen() {
         </div>
       </header>
 
-      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
-
       {isDesktopLayout ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          {codePanelOpen ? (
-            <ResizablePanelGroup
-              orientation="horizontal"
-              className="min-h-0 flex-1 gap-0"
-            >
-              <ResizablePanel
-                className="flex min-h-0 min-w-0 flex-col"
-                defaultSize="72%"
-                minSize="55%"
-              >
-                {reviewPanel}
-              </ResizablePanel>
-              {/* <ResizableHandle className="border-none" withHandle /> */}
-              <ResizablePanel
-                className="flex min-h-0 flex-col"
-                defaultSize="50%"
-                minSize="30%"
-                maxSize="70%"
-              >
-                <ReviewCodePanel
-                  codeViewRef={codeViewRef}
-                  className="h-full min-h-0"
-                  diffError={isDiffError}
-                  gitStatus={gitStatusEntries}
-                  items={codeItems}
-                  open
-                  selectedEvidence={selectedEvidence}
-                  onOpenChange={setCodePanelOpen}
-                  onSelectedEvidenceChange={setSelectedEvidence}
-                />
-              </ResizablePanel>
-            </ResizablePanelGroup>
-          ) : (
-            <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_auto] gap-4">
-              {reviewPanel}
-              <ReviewCodePanel
-                codeViewRef={codeViewRef}
-                className="h-full min-h-0"
-                diffError={isDiffError}
-                gitStatus={gitStatusEntries}
-                items={codeItems}
-                open={false}
-                selectedEvidence={selectedEvidence}
-                onOpenChange={setCodePanelOpen}
-                onSelectedEvidenceChange={setSelectedEvidence}
-              />
-            </div>
-          )}
+          <div
+            className={cn(
+              "grid min-h-0 flex-1 gap-4",
+              codePanelOpen
+                ? "grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
+                : "grid-cols-[minmax(0,1fr)_auto]",
+            )}
+          >
+            {reviewPanel}
+            <ReviewCodePanel
+              codeViewRef={codeViewRef}
+              className="h-full min-h-0"
+              diffError={isDiffError}
+              gitStatus={gitStatusEntries}
+              items={codeItems}
+              open={codePanelOpen}
+              selectedEvidence={selectedEvidence}
+              onOpenChange={setCodePanelOpen}
+              onSelectedEvidenceChange={setSelectedEvidence}
+            />
+          </div>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
@@ -391,11 +392,11 @@ function ReviewScrollPanel({
 }) {
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-8">
         <div
           className={cn(
-            "w-full max-w-4xl",
-            sidebarCollapsible ? "mx-auto" : "mr-auto",
+            "w-full max-w-3xl",
+            sidebarCollapsible ? "mx-auto" : "mx-auto",
           )}
         >
           {filterBar}
@@ -409,10 +410,12 @@ function ReviewScrollPanel({
 function ReviewClaims({
   allThreads,
   filteredThreads,
+  isEvidenceSelected,
   onEvidenceSelect,
 }: {
   allThreads: Thread[];
   filteredThreads: Thread[];
+  isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
@@ -426,6 +429,7 @@ function ReviewClaims({
           <ThreadGroup
             key={thread.id}
             thread={thread}
+            isEvidenceSelected={isEvidenceSelected}
             onEvidenceSelect={onEvidenceSelect}
           />
         ))
@@ -580,6 +584,20 @@ function evidenceSelectionRange(evidence: Evidence) {
     side: "additions" as const,
     endSide: "additions" as const,
   };
+}
+
+function isEvidenceSelected(
+  evidence: Evidence,
+  selectedEvidence: EvidenceSelection | null,
+  codeItems: CodeViewItem[],
+) {
+  if (!selectedEvidence) return false;
+  const item = findCodeViewItem(codeItems, evidence.filePath);
+  if (!item || item.id !== selectedEvidence.id) return false;
+  return (
+    selectedEvidence.range.start === evidence.startLine &&
+    selectedEvidence.range.end === evidence.endLine
+  );
 }
 
 type CodeViewScrollRequest = Parameters<
@@ -888,17 +906,19 @@ function FilterButton({
 
 function ThreadGroup({
   thread,
+  isEvidenceSelected,
   onEvidenceSelect,
 }: {
   thread: Thread;
+  isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <section className="flex flex-col gap-0">
+    <section className="flex flex-col gap-1">
       <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-muted/95 backdrop-blur-sm supports-backdrop-filter:bg-muted/80">
         <div className="min-w-0">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <h2 className="text-xl font-semibold leading-snug">
+            <h2 className="text-3xl font-light leading-snug">
               <AiText source={thread.title || "Behavior"} inline />
             </h2>
             <div className="flex flex-wrap gap-2">
@@ -906,17 +926,12 @@ function ThreadGroup({
                 {thread.claims.length}{" "}
                 {thread.claims.length === 1 ? "claim" : "claims"}
               </Badge>
-              {thread.status ? (
-                <Badge variant="outline" className="text-muted-foreground">
-                  {statusLabel(thread.status)}
-                </Badge>
-              ) : null}
             </div>
           </div>
         </div>
       </div>
       {thread.summary ? (
-        <div className="text-base leading-relaxed text-muted-foreground pb-2">
+        <div className="text-lg leading-relaxed text-muted-foreground pb-2 max-w-prose">
           <AiText source={thread.summary} />
         </div>
       ) : null}
@@ -926,6 +941,7 @@ function ThreadGroup({
             key={claim.id}
             claim={claim}
             index={index}
+            isEvidenceSelected={isEvidenceSelected}
             onEvidenceSelect={onEvidenceSelect}
           />
         ))}
@@ -954,7 +970,7 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
 
   return (
     <time
-      className="whitespace-nowrap text-sm leading-none text-muted-foreground"
+      className="whitespace-nowrap text-xs leading-none text-muted-foreground"
       dateTime={new Date(updatedAt).toISOString()}
     >
       {formatDistanceToNow(updatedAt, { addSuffix: true })}
@@ -965,15 +981,17 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
 function ClaimCard({
   claim,
   index,
+  isEvidenceSelected,
   onEvidenceSelect,
 }: {
   claim: Claim;
   index: number;
+  isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <Card>
-      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <Card className={cn(claim.humanStatus === "accepted" ? "ring-1 ring-primary/80" : "")}>
+      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
         <CardTitle className="flex text-xl font-medium leading-snug">
           <span className="text-muted-foreground">{index + 1}.&nbsp;</span>
           <AiText source={claim.title} />
@@ -982,11 +1000,11 @@ function ClaimCard({
           {claim.updatedAt ? (
             <ClaimTimeAgo updatedAt={claim.updatedAt} />
           ) : null}
-          <Badge variant="destructive">{statusLabel(claim.agentStatus)}</Badge>
+          <Badge variant="secondary">{statusLabel(claim.agentStatus)}</Badge>
         </CardAction>
       </CardHeader>
 
-      <CardContent className="flex flex-col gap-4">
+      <CardContent className="flex flex-col gap-8 px-6">
         {claim.description ? (
           <CardDescription className="text-base leading-relaxed">
             <AiText source={claim.description} />
@@ -996,11 +1014,12 @@ function ClaimCard({
         <ClaimDeltaPanels before={claim.before} after={claim.after} />
 
         {claim.evidences.length > 0 ? (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
             {claim.evidences.map((evidence, index) => (
               <EvidenceBlock
                 key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
                 evidence={evidence}
+                selected={isEvidenceSelected(evidence)}
                 onSelect={onEvidenceSelect}
               />
             ))}
@@ -1008,33 +1027,61 @@ function ClaimCard({
         ) : null}
       </CardContent>
 
-      <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
-        <code className="font-mono text-sm text-muted-foreground">
-          {claim.evidences.length === 0
-            ? "No evidence span"
-            : `${claim.evidences.length} evidence ${claim.evidences.length === 1 ? "span" : "spans"}`}
-        </code>
-        <ClaimActions claim={claim} />
+      <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center px-6">
+        <ClaimActions claim={claim} className="ml-auto" />
       </CardFooter>
     </Card>
   );
 }
+
+type DeltaPanelColor = "red" | "blue" | "yellow" | "green";
 
 function claimDeltaPanels(before?: string | null, after?: string | null) {
   const hasBefore = before != null && before !== "";
   const hasAfter = after != null && after !== "";
   if (!hasBefore && !hasAfter) return null;
   if (!hasBefore && hasAfter) {
-    return [{ label: "New", direction: "right" as const, text: after! }];
+    return [
+      {
+        label: "New",
+        color: "blue" as const,
+        direction: "right" as const,
+        text: after!,
+      },
+    ];
   }
   if (hasBefore && !hasAfter) {
-    return [{ label: "Was", direction: "left" as const, text: before! }];
+    return [
+      {
+        label: "Was",
+        color: "red" as const,
+        direction: "left" as const,
+        text: before!,
+      },
+    ];
   }
   return [
-    { label: "Before", direction: "left" as const, text: before! },
-    { label: "After", direction: "right" as const, text: after! },
+    {
+      label: "Before",
+      color: "yellow" as const,
+      direction: "left" as const,
+      text: before!,
+    },
+    {
+      label: "After",
+      color: "green" as const,
+      direction: "right" as const,
+      text: after!,
+    },
   ];
 }
+
+const deltaPanelLabelClasses: Record<DeltaPanelColor, string> = {
+  red: "text-red-800 dark:text-red-600",
+  blue: "text-blue-800 dark:text-blue-600",
+  yellow: "text-yellow-800 dark:text-yellow-600",
+  green: "text-green-800 dark:text-green-600",
+};
 
 function ClaimDeltaPanels({
   before,
@@ -1056,6 +1103,7 @@ function ClaimDeltaPanels({
         <InfoPanel
           key={panel.label}
           label={panel.label}
+          color={panel.color}
           direction={panel.direction}
           text={panel.text}
         />
@@ -1064,43 +1112,79 @@ function ClaimDeltaPanels({
   );
 }
 
+function EvidenceFilePathLabel({
+  filePath,
+  startLine,
+  endLine,
+}: Pick<Evidence, "filePath" | "startLine" | "endLine">) {
+  const lastSlash = filePath.lastIndexOf("/");
+  const directory = lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : "/";
+  const fileName = lastSlash >= 0 ? filePath.slice(lastSlash + 1) : filePath;
+
+  return (
+    <span className="inline-flex items-baseline truncate font-light text-xs">
+      {/* <span className="inline-block max-w-30 truncate">{directory}</span> */}
+      <span className="inline-block font-medium">{fileName}:</span>
+      <span className="inline-block min-w-10 text-left">
+        {startLine}-{endLine}
+      </span>
+    </span>
+  );
+}
+
 function EvidenceBlock({
   evidence,
+  selected,
   onSelect,
 }: {
   evidence: Evidence;
+  selected: boolean;
   onSelect: (evidence: Evidence) => void;
 }) {
-  return (
+  return evidence.change ? (
+    // <div className="flex gap-1 text-sm leading-relaxed text-foreground w-full before:content-['•'] before:mr-1 -ml-2 before:text-muted-foreground items-center">
 
-    <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0 w-full">
-      {evidence.change ? (
-        <p className="flex gap-2 text-md leading-relaxed text-muted-foreground w-full">
-          <AiText source={evidence.change} inline />
-
-          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => onSelect(evidence)}>
-            <FileCode data-icon="inline-start" />
-            <span className="truncate text-xs">
-              {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
-            </span>
-          </Button>
-        </p>
-      ) : null}
-    </div>
-  );
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      aria-pressed={selected}
+      className={cn(
+        "w-full justify-start text-sm font-normal hover:bg-primary/10",
+        selected
+          ? "bg-primary/30"
+          : "bg-muted/30 text-muted-foreground",
+      )}
+      onClick={() => onSelect(evidence)}
+      id={getEvidenceId(evidence)}
+    >
+      <AiText source={evidence.change} inline />
+      {/* <FileCode data-icon="inline-start" />
+        <EvidenceFilePathLabel
+          filePath={evidence.filePath}
+          startLine={evidence.startLine}
+          endLine={evidence.endLine}
+        /> */}
+      <ChevronRight className={"size-4 ml-auto text-muted-foreground"} />
+    </Button>
+  ) : // </div>
+  null;
 }
 
 function InfoPanel({
   label,
+  color,
   direction,
   text,
 }: {
   label: string;
+  color: DeltaPanelColor;
   direction: "left" | "right";
   text: string;
 }) {
+  const labelClass = deltaPanelLabelClasses[color];
   return (
-    <div className="min-h-22 rounded-lg bg-muted p-4">
+    <div className="rounded-lg border border-border p-4">
       <div className="text-sm leading-relaxed text-muted-foreground">
         <span
           aria-hidden="true"
@@ -1112,7 +1196,8 @@ function InfoPanel({
             <ArrowRightFromLine className="relative top-0.5 size-4" />
           )}
         </span>
-        <strong>{label}:</strong> <AiText source={text} inline />
+        <strong className={labelClass}>{label}:</strong>{" "}
+        <AiText source={text} inline />
       </div>
     </div>
   );
@@ -1121,13 +1206,15 @@ function InfoPanel({
 function AiText({
   source,
   inline = false,
+  className,
 }: {
   source: string;
   inline?: boolean;
+  className?: string;
 }) {
   return (
     <Streamdown
-      className={cn(proseClassName, inline && "inline [&>*]:inline")}
+      className={cn(proseClassName, inline && "inline *:inline", className)}
       parseIncompleteMarkdown={false}
     >
       {source}
@@ -1221,9 +1308,7 @@ function ReviewCodePanel({
           size="icon"
           variant="ghost"
           className="size-8"
-          aria-label={
-            fileTreeOpen ? "Collapse file tree" : "Expand file tree"
-          }
+          aria-label={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
           title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
           onClick={() => setFileTreeOpen((value) => !value)}
         >
@@ -1249,7 +1334,7 @@ function ReviewCodePanel({
           ) : (
             <CodeView
               ref={codeViewRef}
-              className="h-full min-h-0 overflow-y-auto overscroll-contain [&_code]:font-mono [&_pre]:font-mono"
+              className="h-full min-h-0 overflow-y-auto overscroll-contain [&_code]:font-mono [&_pre]:font-mono bg-muted"
               items={items}
               selectedLines={selectedEvidence}
               onSelectedLinesChange={onSelectedEvidenceChange}
@@ -1262,6 +1347,7 @@ function ReviewCodePanel({
                 disableLineNumbers: false,
                 disableFileHeader: false,
                 stickyHeaders: true,
+                unsafeCSS: DIFF_SELECTED_LINE_UNSAFE_CSS,
                 layout: {
                   paddingTop: 8,
                   paddingBottom: 16,
@@ -1378,19 +1464,19 @@ function ReviewFileTree({
   );
 }
 
-function ClaimActions({ claim }: { claim: Claim }) {
+function ClaimActions({ claim, className }: { claim: Claim, className?: string  }) {
   const queryClient = useQueryClient();
-  const acceptMutation = useMutation({
-    mutationFn: async () => {
+  const statusMutation = useMutation({
+    mutationFn: async (humanStatus: HumanStatus) => {
       const response = await fetch(
         `/api/claims/${encodeURIComponent(claim.id)}/human-status`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ humanStatus: "accepted" }),
+          body: JSON.stringify({ humanStatus }),
         },
       );
-      if (!response.ok) throw new Error("Failed to accept claim.");
+      if (!response.ok) throw new Error("Failed to update claim status.");
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["review"] }),
   });
@@ -1413,7 +1499,7 @@ function ClaimActions({ claim }: { claim: Claim }) {
   });
 
   return (
-    <div className="inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto">
+    <div className={cn("inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto", className)}>
       <Button
         type="button"
         variant="outline"
@@ -1427,7 +1513,11 @@ function ClaimActions({ claim }: { claim: Claim }) {
         type="button"
         variant={claim.humanStatus === "accepted" ? "default" : "outline"}
         className="min-w-20 flex-1 rounded-none border-0 border-l shadow-none sm:flex-none"
-        onClick={() => acceptMutation.mutate()}
+        onClick={() =>
+          statusMutation.mutate(
+            claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
+          )
+        }
       >
         {claim.humanStatus === "accepted" ? (
           <Check data-icon="inline-start" />
@@ -1440,5 +1530,3 @@ function ClaimActions({ claim }: { claim: Claim }) {
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
-
-

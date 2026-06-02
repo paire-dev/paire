@@ -88,6 +88,7 @@ Commands:
 paire start
 paire review
 paire it
+paire install
 paire status
 paire sync
 paire reset
