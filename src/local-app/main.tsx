@@ -153,20 +153,77 @@ const desktopPageClassName = cn(
 const proseClassName =
   "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
 const humanStatusOptions: Array<HumanStatus> = ["unreviewed", "accepted"];
-const reviewToken =
-  typeof window === "undefined"
-    ? ""
-    : (new URLSearchParams(
-        window.location.hash.startsWith("#")
-          ? window.location.hash.slice(1)
-          : window.location.search,
-      ).get("token") ?? "");
+const REVIEW_TOKEN_STORAGE_KEY = "paire-review-token";
+const LOADING_STATE_DELAY_MS = 250;
+const reviewToken = resolveReviewToken();
+
+function resolveReviewToken() {
+  if (typeof window === "undefined") return "";
+  const urlToken = reviewTokenFromUrl();
+  if (urlToken) {
+    storeReviewToken(urlToken);
+    removeReviewTokenFromHash();
+    return urlToken;
+  }
+  return storedReviewToken();
+}
+
+function reviewTokenFromUrl() {
+  return (
+    new URLSearchParams(
+      window.location.hash.startsWith("#")
+        ? window.location.hash.slice(1)
+        : window.location.search,
+    ).get("token") ?? ""
+  );
+}
+
+function removeReviewTokenFromHash() {
+  if (!window.location.hash.startsWith("#")) return;
+  const hashParams = new URLSearchParams(window.location.hash.slice(1));
+  if (!hashParams.has("token")) return;
+  hashParams.delete("token");
+  const nextUrl = new URL(window.location.href);
+  const nextHash = hashParams.toString();
+  nextUrl.hash = nextHash ? `#${nextHash}` : "";
+  window.history.replaceState(null, "", nextUrl);
+}
+
+function storeReviewToken(token: string) {
+  try {
+    window.localStorage.setItem(REVIEW_TOKEN_STORAGE_KEY, token);
+  } catch {
+    // Storage can be disabled; the in-memory token still works for this page.
+  }
+}
+
+function storedReviewToken() {
+  try {
+    return window.localStorage.getItem(REVIEW_TOKEN_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
 
 function reviewApiHeaders(headers: Record<string, string> = {}) {
   return {
     ...headers,
     "x-paire-review-token": reviewToken,
   };
+}
+
+class ReviewApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+function shouldRetryReviewQuery(failureCount: number, error: unknown) {
+  if (error instanceof ReviewApiError && error.status === 401) return false;
+  return failureCount < 2;
 }
 
 // Returns a HTML DOM node id-friendly string for an Evidence.
@@ -192,7 +249,9 @@ async function fetchReview() {
     cache: "no-store",
     headers: reviewApiHeaders(),
   });
-  if (!response.ok) throw new Error("Failed to load review data.");
+  if (!response.ok) {
+    throw new ReviewApiError("Failed to load review data.", response.status);
+  }
   return (await response.json()) as ReviewData;
 }
 
@@ -201,7 +260,9 @@ async function fetchReviewDiff() {
     cache: "no-store",
     headers: reviewApiHeaders(),
   });
-  if (!response.ok) throw new Error("Failed to load review diff.");
+  if (!response.ok) {
+    throw new ReviewApiError("Failed to load review diff.", response.status);
+  }
   const payload = (await response.json()) as { diff?: string };
   return payload.diff ?? "";
 }
@@ -235,6 +296,21 @@ function useMediaQuery(query: string) {
   return matches;
 }
 
+function useDelayedValue(value: boolean, delayMs: number) {
+  const [delayedValue, setDelayedValue] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!value) {
+      setDelayedValue(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => setDelayedValue(true), delayMs);
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+
+  return delayedValue;
+}
+
 function ReviewScreen() {
   const isDesktopLayout = useMediaQuery("(min-width: 768px)");
   const [agentStatusFilter, setAgentStatusFilter] =
@@ -245,17 +321,24 @@ function ReviewScreen() {
   const [selectedEvidence, setSelectedEvidence] =
     React.useState<EvidenceSelection | null>(null);
   const codeViewRef = React.useRef<CodeViewHandle<undefined>>(null);
-  const { data, isLoading, isError } = useQuery({
+  const {
+    data,
+    error: reviewError,
+    isLoading,
+    isError,
+  } = useQuery({
     queryKey: ["review"],
     queryFn: fetchReview,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
+    retry: shouldRetryReviewQuery,
   });
   const { data: rawDiff = "", isError: isDiffError } = useQuery({
     queryKey: ["review-diff"],
     queryFn: fetchReviewDiff,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
+    retry: shouldRetryReviewQuery,
   });
 
   const codeItems = React.useMemo(() => parseCodeViewItems(rawDiff), [rawDiff]);
@@ -269,6 +352,7 @@ function ReviewScreen() {
       isEvidenceSelected(evidence, selectedEvidence, codeItems),
     [codeItems, selectedEvidence],
   );
+  const showLoadingState = useDelayedValue(isLoading, LOADING_STATE_DELAY_MS);
 
   const scrollToEvidence = React.useCallback(
     (evidence: Evidence) => {
@@ -293,17 +377,30 @@ function ReviewScreen() {
   );
 
   if (isLoading) {
+    if (!showLoadingState) return null;
     return (
       <main className={pageClassName}>
-        <EmptyState>Loading review...</EmptyState>
+        <EmptyState
+          title="Opening review"
+          description="Preparing the latest review state."
+        />
       </main>
     );
   }
 
   if (isError || !data) {
+    const authError =
+      reviewError instanceof ReviewApiError && reviewError.status === 401;
     return (
       <main className={pageClassName}>
-        <EmptyState>Unable to load review data.</EmptyState>
+        <EmptyState
+          title={authError ? "Review link expired" : "Review unavailable"}
+          description={
+            authError
+              ? "Open the Review UI URL printed by Paire again. The local server needs the token from that link."
+              : "Paire could not load this review. Check that the local review server is still running, then reopen the Review UI URL."
+          }
+        />
       </main>
     );
   }
@@ -986,10 +1083,23 @@ function ThreadGroup({
   );
 }
 
-function EmptyState({ children }: { children: React.ReactNode }) {
+function EmptyState({
+  children,
+  title,
+  description,
+}: {
+  children?: React.ReactNode;
+  title?: string;
+  description?: string;
+}) {
   return (
     <Card>
-      <CardContent className="text-muted-foreground">{children}</CardContent>
+      <CardContent className="space-y-1 text-muted-foreground">
+        {title ? (
+          <p className="text-sm font-medium text-foreground">{title}</p>
+        ) : null}
+        {description ? <p>{description}</p> : children}
+      </CardContent>
     </Card>
   );
 }
@@ -1037,7 +1147,7 @@ function ClaimCard({
         <span className="relative left-4 text-xl font-medium leading-snug text-muted-foreground">
           {index + 1}.&nbsp;
         </span>
-        <div>
+        <div className="w-full">
           <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
             <CardTitle className="flex text-xl font-medium leading-snug">
               <AiText source={claim.title} />

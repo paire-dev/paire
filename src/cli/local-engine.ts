@@ -174,7 +174,7 @@ const MAX_EVIDENCE_LINE = 1_000_000;
 const MAX_EVIDENCE_SPAN_LINES = 5_000;
 const REVIEW_PORT = 0;
 const REVIEW_SERVER_START_TIMEOUT_MS = 5_000;
-const REVIEW_TOKEN_BYTES = 32;
+const REVIEW_TOKEN_BYTES = 16;
 const REVIEW_TOKEN_HEADER = "x-paire-review-token";
 
 type ReviewServerState = {
@@ -1139,9 +1139,10 @@ function isProcessRunning(pid: number) {
 
 function createReviewToken() {
   const bytes = crypto.getRandomValues(new Uint8Array(REVIEW_TOKEN_BYTES));
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
 }
 
 function reviewUiUrl(port: number | undefined, token: string) {
