@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 type Fixture = {
   root: string;
@@ -60,7 +60,13 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
 
   const review = runPaire(fixture, ["review"]);
   expect(review.exitCode).toBe(0);
-  expect(review.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(review.stdout).toContain("Action required");
+  expect(review.stdout).toContain("Step 1 — Inspect the git diff (required)");
+  expect(review.stdout).toContain("Step 5 — Open the Review UI (required)");
+  expect(review.stdout).toContain("Do not skip steps");
+  expect(review.stdout).toContain(
+    "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
+  );
   expect(existsSync(fixture.browserCapture)).toBe(false);
 
   const packetPath = extractPacketPath(review.stdout);
@@ -77,13 +83,14 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   const apply = runPaire(fixture, ["review", "--apply", agentResultPath]);
   expect(apply.exitCode).toBe(0);
   expect(apply.stdout).toContain("Review burden:");
+  expect(apply.stdout).toContain("Open this URL in the browser:");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
   );
   const html = readFileSync(fixture.htmlCapture, "utf8");
-  expect(html).toContain('data-human-status="accepted"');
-  expect(html).toContain('data-human-status="concern"');
-  expect(html).toContain('data-human-status="irrelevant"');
+  expect(html).toContain('src="./main.tsx"');
+  expect(html).not.toContain('data-human-status="concern"');
+  expect(html).not.toContain('data-human-status="irrelevant"');
   expect(html).not.toContain("cdn.tailwindcss.com");
 
   const db = new Database(join(fixture.home, "paire.db"));
@@ -113,12 +120,31 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
     .get();
   expect(claims?.count).toBe(1);
   expect(evidences?.count).toBe(1);
+  const claim = db
+    .query<
+      { beforeText: string | null; afterText: string | null },
+      []
+    >("select beforeText, afterText from claims limit 1")
+    .get();
+  expect(claim?.beforeText).toBe("Project creation accepted any user input.");
+  expect(claim?.afterText).toBe(
+    "Project creation rejects missing users before returning data.",
+  );
+  const evidence = db
+    .query<{ changeText: string | null }, []>(
+      "select changeText from claim_evidences limit 1",
+    )
+    .get();
+  expect(evidence?.changeText).toBe(
+    "Throw when `createProject` receives a null user.",
+  );
   db.close();
 
   writeFileSync(fixture.browserCapture, "");
   const reviewAgain = runPaire(fixture, ["review"]);
   expect(reviewAgain.exitCode).toBe(0);
-  expect(reviewAgain.stdout).not.toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(reviewAgain.stdout).not.toContain("Action required");
+  expect(reviewAgain.stdout).toContain("Open this URL in the browser:");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
   );
@@ -164,7 +190,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
 
   const firstReview = runPaire(fixture, ["review"]);
   expect(firstReview.exitCode).toBe(0);
-  expect(firstReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(firstReview.stdout).toContain("Action required");
   expect(existsSync(fixture.browserCapture)).toBe(false);
   const firstPacket = JSON.parse(
     readFileSync(extractPacketPath(firstReview.stdout), "utf8"),
@@ -175,6 +201,8 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   expect(JSON.stringify(firstPacket.touchedSnippets)).toContain(
     "validateWorkspace",
   );
+  expect(firstPacket.touchedSnippets[0]?.text).toMatch(/\d+\|\+/);
+  expect(firstPacket.touchedSnippets[0]?.changedLines).toBeUndefined();
 
   const firstResult = join(fixture.root, "sandbox-agent-result.json");
   writeFileSync(
@@ -191,7 +219,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   writeFileSync(fixture.browserCapture, "");
   const reopen = runPaire(fixture, ["review"]);
   expect(reopen.exitCode).toBe(0);
-  expect(reopen.stdout).not.toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(reopen.stdout).not.toContain("Action required");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
   );
@@ -214,7 +242,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   writeFileSync(fixture.browserCapture, "");
   const staleReview = runPaire(fixture, ["review"]);
   expect(staleReview.exitCode).toBe(0);
-  expect(staleReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(staleReview.stdout).toContain("Action required");
   expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
   const secondPacket = JSON.parse(
     readFileSync(extractPacketPath(staleReview.stdout), "utf8"),
@@ -225,18 +253,150 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   expect(JSON.stringify(secondPacket.touchedSnippets)).toContain(
     "workspaceValidationVersion",
   );
+  expect(secondPacket.touchedSnippets[0]?.addedRanges).toEqual([
+    { startLine: 7, endLine: 8 },
+  ]);
+  expect(secondPacket.touchedSnippets[0]?.changedLines).toBeUndefined();
+  expect(secondPacket.touchedSnippets[0]?.text).toContain(
+    "8|+export const workspaceValidationVersion = 2;",
+  );
 
   const secondResult = join(fixture.root, "sandbox-agent-result-2.json");
   writeFileSync(
     secondResult,
-    JSON.stringify(sandboxAgentResult(secondPacket, "amended"), null, 2),
+    JSON.stringify(
+      sandboxAgentResult(secondPacket, "amended", {
+        authThreadTitle: "The model tried to rewrite an unchanged area",
+        authThreadSummary:
+          "The model tried to rewrite a summary for an unchanged area.",
+        authClaimTitle:
+          "The model tried to rewrite an unchanged claim even though the status is unchanged.",
+        authClaimDescription:
+          "This rewritten description should also be ignored for unchanged claims.",
+        authClaimBefore: "This rewritten before should be ignored.",
+        authClaimAfter: "This rewritten after should be ignored.",
+      }),
+      null,
+      2,
+    ),
   );
   const secondApply = runPaire(fixture, ["review", "--apply", secondResult]);
   expect(secondApply.exitCode).toBe(0);
   expect(secondApply.stdout).toContain("Review burden: 1 amended, 1 unchanged");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const unchangedThread = db
+    .query<{ title: string; summary: string }, []>(
+      "select title, summary from change_threads where id like '%:thread_sandbox_auth'",
+    )
+    .get();
+  const unchangedClaim = db
+    .query<
+      {
+        title: string;
+        description: string;
+        beforeText: string | null;
+        afterText: string | null;
+      },
+      []
+    >(
+      "select title, description, beforeText, afterText from claims where id like '%:claim_sandbox_auth_required'",
+    )
+    .get();
+  expect(unchangedThread?.title).toBe("Auth validation");
+  expect(unchangedThread?.summary).toBe(
+    "Project creation rejects missing users before creating data.",
+  );
+  expect(unchangedClaim?.title).toBe("Reject missing users before create");
+  expect(unchangedClaim?.description).toBe(
+    "Project creation rejects missing users before returning project data.",
+  );
+  expect(unchangedClaim?.beforeText).toBe(
+    "Project creation accepted any user input.",
+  );
+  expect(unchangedClaim?.afterText).toBe(
+    "Project creation rejects missing users before returning data.",
+  );
+  db.close();
 });
 
-test("dirty worktree asks for committed changes instead of creating a packet", () => {
+test("review API loads without embedding raw diffs and serves evidence diffs on demand", async () => {
+  const fixture = createFixtureRepo();
+
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add workspace validation");
+
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "result.json");
+  writeFileSync(
+    resultPath,
+    JSON.stringify(hardcodedAgentResult(packet), null, 2),
+  );
+  expect(
+    runPaire(fixture, ["review", "--apply", resultPath, "--no-open"]).exitCode,
+  ).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const server = Bun.spawn(
+    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
+    {
+      cwd: fixture.repo,
+      env: { ...process.env, PAIRE_HOME: fixture.home },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const state = await waitForServerState(fixture.home, session!.id);
+    const reviewResponse = await fetch(`${state.url}api/review`);
+    expect(reviewResponse.ok).toBe(true);
+    const reviewText = await reviewResponse.text();
+    expect(reviewText).not.toContain('"diff":"diff --git');
+    const reviewData = JSON.parse(reviewText);
+    const evidence = reviewData.threads[0].claims[0].evidences[0];
+    expect(evidence.claimId).toBe("claim_auth_before_create");
+
+    const reviewDiffResponse = await fetch(`${state.url}api/review/diff`);
+    expect(reviewDiffResponse.ok).toBe(true);
+    const reviewDiffPayload = await reviewDiffResponse.json();
+    expect(reviewDiffPayload.diff).toContain(
+      "diff --git a/src/app.ts b/src/app.ts",
+    );
+    expect(reviewDiffPayload.diff).toContain("throw new Error('Unauthorized')");
+
+    const diffResponse = await fetch(
+      `${state.url}api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
+    );
+    expect(diffResponse.ok).toBe(true);
+    const diffPayload = await diffResponse.json();
+    expect(diffPayload.diff).toContain("diff --git a/src/app.ts b/src/app.ts");
+    expect(diffPayload.diff).toContain("throw new Error('Unauthorized')");
+  } finally {
+    server.kill();
+    await server.exited;
+  }
+});
+
+test("dirty worktree opens review UI with committed-state warning", () => {
   const fixture = createFixtureRepo();
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
 
@@ -247,7 +407,176 @@ test("dirty worktree asks for committed changes instead of creating a packet", (
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
   expect(review.stdout).toContain("Paire reviews committed code only");
-  expect(existsSync(fixture.browserCapture)).toBe(false);
+  expect(review.stdout).toContain(
+    "commit changes; paire it; and follow all the instructions to review and apply.",
+  );
+  expect(review.stdout).toContain("Step 2 — Run Paire again (required)");
+  expect(review.stdout).toContain("Open this URL in the browser:");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
+    "http://127.0.0.1:",
+  );
+  expect(readFileSync(fixture.htmlCapture, "utf8")).toContain(
+    'src="./main.tsx"',
+  );
+});
+
+test("sessions are scoped to the current git branch", () => {
+  const fixture = createFixtureRepo();
+
+  const mainStart = runPaire(fixture, [
+    "start",
+    "--base",
+    "main",
+    "--goal",
+    "Main review",
+  ]);
+  expect(mainStart.exitCode).toBe(0);
+  const mainSession = mainStart.stdout.match(/Session ID: (.+)/)?.[1];
+
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  const featureStart = runPaire(fixture, [
+    "start",
+    "--base",
+    "main",
+    "--goal",
+    "Feature review",
+  ]);
+  expect(featureStart.exitCode).toBe(0);
+  const featureSession = featureStart.stdout.match(/Session ID: (.+)/)?.[1];
+  expect(featureSession).toBeTruthy();
+  expect(featureSession).not.toBe(mainSession);
+
+  const featureRestart = runPaire(fixture, ["start", "--base", "main"]);
+  expect(featureRestart.stdout).toContain(`Session ID: ${featureSession}`);
+
+  run(["git", "checkout", "main"], fixture.repo);
+  const mainStatus = runPaire(fixture, ["status"]);
+  expect(mainStatus.stdout).toContain(`Session: ${mainSession}`);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const sessions = db
+    .query<{ branch: string }, []>("select branch from sessions order by branch")
+    .all();
+  expect(sessions.map((session) => session.branch)).toEqual([
+    "feature",
+    "main",
+  ]);
+  db.close();
+});
+
+test("paire it creates a branch session when missing", () => {
+  const fixture = createFixtureRepo();
+
+  const result = runPaire(fixture, ["it", "--base", "main"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("Paire session ready.");
+  expect(result.stdout).toContain("Open this URL in the browser:");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db
+    .query<{ branch: string }, []>("select branch from sessions")
+    .get();
+  expect(session?.branch).toBe("main");
+  db.close();
+});
+
+test("reset clears review state on the current branch and re-baselines to baseCommit", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const reset = runPaire(fixture, ["reset"]);
+  expect(reset.exitCode).toBe(0);
+  expect(reset.stdout).toContain("Reset Paire session for branch feature.");
+  expect(reset.stdout).toContain("Review baseline set to");
+
+  const featureStatus = runPaire(fixture, ["status"]);
+  expect(featureStatus.stdout).toContain("Session:");
+  expect(featureStatus.stdout).not.toContain("No Paire session found");
+
+  run(["git", "checkout", "main"], fixture.repo);
+  const mainStatus = runPaire(fixture, ["status"]);
+  expect(mainStatus.stdout).toContain("Session:");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const sessions = db
+    .query<{ branch: string }, []>("select branch from sessions")
+    .all();
+  expect(sessions.map((session) => session.branch).sort()).toEqual([
+    "feature",
+    "main",
+  ]);
+  const featureClaims = db
+    .query<{ count: number }, []>(
+      "select count(*) as count from claims where sessionId in (select id from sessions where branch = 'feature')",
+    )
+    .get();
+  expect(featureClaims?.count).toBe(0);
+  db.close();
+});
+
+test("reset removes exported agent-result and current-packet", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change value to two");
+
+  const review = runPaire(fixture, ["review"]);
+  const packetPath = extractPacketPath(review.stdout);
+  const exportDir = dirname(packetPath);
+  const agentResultPath = join(exportDir, "agent-result.json");
+  writeFileSync(agentResultPath, JSON.stringify({ stale: true }, null, 2));
+  expect(existsSync(packetPath)).toBe(true);
+  expect(existsSync(agentResultPath)).toBe(true);
+
+  expect(runPaire(fixture, ["reset"]).exitCode).toBe(0);
+  expect(existsSync(agentResultPath)).toBe(false);
+  expect(existsSync(packetPath)).toBe(false);
+});
+
+test("reset re-baselines review so the next packet covers branch changes since baseCommit", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/feature.ts"),
+    "export const featureFlag = true;\n",
+  );
+  commitAll(fixture.repo, "add feature flag");
+
+  const firstReview = runPaire(fixture, ["review"]);
+  const firstPacket = JSON.parse(
+    readFileSync(extractPacketPath(firstReview.stdout), "utf8"),
+  );
+  const firstResult = join(fixture.root, "first-result.json");
+  writeFileSync(
+    firstResult,
+    JSON.stringify(hardcodedAgentResult(firstPacket), null, 2),
+  );
+  expect(
+    runPaire(fixture, ["review", "--apply", firstResult, "--no-open"]).exitCode,
+  ).toBe(0);
+
+  const reset = runPaire(fixture, ["reset"]);
+  expect(reset.exitCode).toBe(0);
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.stdout).toContain("Action required");
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  expect(
+    packet.changedFiles.some(
+      (file: { path: string }) => file.path === "src/feature.ts",
+    ),
+  ).toBe(true);
+  const incrementalDiff = readFileSync(
+    packet.incrementalDiffArtifactPath,
+    "utf8",
+  );
+  expect(incrementalDiff).toContain("featureFlag");
 });
 
 test("committed files that started untracked are included in review packets", () => {
@@ -266,7 +595,7 @@ test("committed files that started untracked are included in review packets", ()
   commitAll(fixture.repo, "add workspace validator");
 
   const review = runPaire(fixture, ["review"]);
-  expect(review.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(review.stdout).toContain("Action required");
   const packet = JSON.parse(
     readFileSync(extractPacketPath(review.stdout), "utf8"),
   );
@@ -403,7 +732,7 @@ test("new git changes after apply require a fresh packet and do not open browser
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 4;\n");
   commitAll(fixture.repo, "change value to four");
   const staleReview = runPaire(fixture, ["review"]);
-  expect(staleReview.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(staleReview.stdout).toContain("Action required");
   expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
 });
 
@@ -500,7 +829,7 @@ test("it aliases review and status/sync avoid push or commit suggestions", () =>
   commitAll(fixture.repo, "change value to two");
 
   const it = runPaire(fixture, ["it"]);
-  expect(it.stdout).toContain("PAIRE_AGENT_ACTION_REQUIRED");
+  expect(it.stdout).toContain("Action required");
 
   const status = runPaire(fixture, ["status"]);
   expect(status.stdout).toContain("Paire status");
@@ -513,20 +842,76 @@ test("it aliases review and status/sync avoid push or commit suggestions", () =>
   expect(sync.stdout).not.toContain("git commit");
 });
 
+test("compiled binary spawns review server without script path", async () => {
+  const fixture = createFixtureRepo();
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const binary = join(fixture.root, "paire-bin");
+  const build = Bun.spawnSync(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "../scripts/build.ts"),
+      `--outfile=${binary}`,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(build.exitCode).toBe(0);
+
+  const env = {
+    ...process.env,
+    PAIRE_HOME: fixture.home,
+  };
+
+  expect(
+    Bun.spawnSync([binary, "start", "--base", "main"], {
+      cwd: fixture.repo,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode,
+  ).toBe(0);
+
+  const review = Bun.spawnSync([binary, "review"], {
+    cwd: fixture.repo,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(review.exitCode).toBe(0);
+  expect(text(review.stdout)).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
+  expect(text(review.stdout)).toContain("Open this URL in the browser:");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const state = await waitForServerState(fixture.home, session!.id);
+  const reviewResponse = await fetch(`${state.url}api/review`);
+  expect(reviewResponse.ok).toBe(true);
+
+  if (state.pid) {
+    try {
+      process.kill(state.pid);
+    } catch {
+      // already exited
+    }
+  }
+});
+
 test("compiled binary supports status in a fixture repo", () => {
   const fixture = createFixtureRepo();
   const binary = join(fixture.root, "paire-bin");
   const build = Bun.spawnSync(
     [
       process.execPath,
-      "build",
-      resolve(import.meta.dir, "../src/cli.ts"),
-      "--compile",
+      resolve(import.meta.dir, "../scripts/build.ts"),
       `--outfile=${binary}`,
     ],
     { stdout: "pipe", stderr: "pipe" },
   );
   expect(build.exitCode).toBe(0);
+  expect(text(build.stderr)).not.toContain("invalid @ rule");
 
   const result = Bun.spawnSync([binary, "status"], {
     cwd: fixture.repo,
@@ -600,16 +985,32 @@ function text(value: Uint8Array) {
 }
 
 function extractPacketPath(stdout: string) {
-  const lines = stdout.split("\n");
-  const marker = lines.findIndex(
-    (line) =>
-      line.trim() === "Analyze this packet:" ||
-      line.trim() === "Analyze the current canonical packet exported at:",
-  );
-  if (marker < 0 || !lines[marker + 1]) {
-    throw new Error(`Packet path missing from output:\n${stdout}`);
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (
+      trimmed.startsWith("/") &&
+      trimmed.endsWith("current-packet.json") &&
+      !trimmed.includes("--apply")
+    ) {
+      return trimmed;
+    }
   }
-  return lines[marker + 1]?.trim() ?? "";
+  throw new Error(`Packet path missing from output:\n${stdout}`);
+}
+
+async function waitForServerState(home: string, sessionId: string) {
+  const path = join(home, "review-servers", `${sessionId}.json`);
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, "utf8")) as {
+        url: string;
+        pid?: number;
+      };
+    }
+    await Bun.sleep(50);
+  }
+  throw new Error("Review server did not start.");
 }
 
 function hardcodedAgentResult(packet: {
@@ -634,7 +1035,12 @@ function hardcodedAgentResult(packet: {
           {
             id: "claim_auth_before_create",
             threadId: "thread_workspace_validation",
-            text: "Project creation rejects missing users before returning project data.",
+            title: "Reject missing users before create",
+            description:
+              "Project creation rejects missing users before returning project data.",
+            before: "Project creation accepted any user input.",
+            after:
+              "Project creation rejects missing users before returning data.",
             agentStatus: "new",
             humanStatus: "unreviewed",
             evidences: [
@@ -643,6 +1049,7 @@ function hardcodedAgentResult(packet: {
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
+                change: "Throw when `createProject` receives a null user.",
               },
             ],
           },
@@ -660,6 +1067,14 @@ function sandboxAgentResult(
     currentFingerprint: string;
   },
   workspaceStatus: "new" | "amended",
+  overrides: {
+    authThreadTitle?: string;
+    authThreadSummary?: string;
+    authClaimTitle?: string;
+    authClaimDescription?: string;
+    authClaimBefore?: string;
+    authClaimAfter?: string;
+  } = {},
 ) {
   return {
     packetId: packet.packetId,
@@ -668,18 +1083,27 @@ function sandboxAgentResult(
     gitFingerprint: packet.currentFingerprint,
     threads: [
       {
-        id: "thread_sandbox_auth_workspace",
-        title: "Auth and workspace validation",
+        id: "thread_sandbox_auth",
+        title: overrides.authThreadTitle ?? "Auth validation",
         summary:
-          workspaceStatus === "new"
-            ? "Project creation rejects missing users and workspace validation rejects missing names."
-            : "Workspace validation now exposes a validation version marker.",
+          overrides.authThreadSummary ??
+          "Project creation rejects missing users before creating data.",
         status: "active",
         claims: [
           {
             id: "claim_sandbox_auth_required",
-            threadId: "thread_sandbox_auth_workspace",
-            text: "Project creation rejects missing users before returning project data.",
+            threadId: "thread_sandbox_auth",
+            title:
+              overrides.authClaimTitle ?? "Reject missing users before create",
+            description:
+              overrides.authClaimDescription ??
+              "Project creation rejects missing users before returning project data.",
+            before:
+              overrides.authClaimBefore ??
+              "Project creation accepted any user input.",
+            after:
+              overrides.authClaimAfter ??
+              "Project creation rejects missing users before returning data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
             humanStatus: "unreviewed",
             evidences: [
@@ -688,16 +1112,40 @@ function sandboxAgentResult(
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
+                change: "Throw when `createProject` receives a null user.",
               },
             ],
           },
+        ],
+      },
+      {
+        id: "thread_sandbox_workspace",
+        title: "Workspace validation",
+        summary:
+          workspaceStatus === "new"
+            ? "Workspace validation rejects missing names."
+            : "Workspace validation now exposes a validation version marker.",
+        status: "active",
+        claims: [
           {
             id: "claim_sandbox_workspace_required",
-            threadId: "thread_sandbox_auth_workspace",
-            text:
+            threadId: "thread_sandbox_workspace",
+            title:
+              workspaceStatus === "new"
+                ? "Reject workspace inputs without a name"
+                : "Expose workspace validation version marker",
+            description:
               workspaceStatus === "new"
                 ? "Workspace validation rejects inputs without a workspace name."
                 : "Workspace validation rejects inputs without a workspace name and exposes a validation version marker.",
+            before:
+              workspaceStatus === "new"
+                ? "Workspace inputs were accepted without a name check."
+                : "Workspace validation rejected missing names only.",
+            after:
+              workspaceStatus === "new"
+                ? "Workspace validation rejects inputs without a workspace name."
+                : "Workspace validation rejects missing names and exposes a version marker.",
             agentStatus: workspaceStatus,
             humanStatus: "unreviewed",
             evidences: [
@@ -706,6 +1154,10 @@ function sandboxAgentResult(
                 startLine: 1,
                 endLine: workspaceStatus === "new" ? 6 : 8,
                 symbol: "validateWorkspace",
+                change:
+                  workspaceStatus === "new"
+                    ? "Reject workspace inputs when the workspace name is missing."
+                    : "Expose `workspaceValidationVersion` after validating the workspace name.",
               },
             ],
           },

@@ -44,7 +44,7 @@ await write(join(repo, "src/workspace.ts"), [
 commitAll("add auth and workspace validation");
 
 const firstReview = runPaire(["review"]);
-assert(firstReview.includes("PAIRE_AGENT_ACTION_REQUIRED"));
+assert(firstReview.includes("Action required"));
 assert(!existsSync(browserCapture));
 const firstPacketPath = extractPacketPath(firstReview);
 const firstPacket = await Bun.file(firstPacketPath).json();
@@ -62,7 +62,7 @@ runPaire(["review", "--apply", firstResultPath]);
 
 await Bun.write(browserCapture, "");
 const reopen = runPaire(["review"]);
-assert(!reopen.includes("PAIRE_AGENT_ACTION_REQUIRED"));
+assert(!reopen.includes("Action required"));
 assert((await Bun.file(browserCapture).text()).includes("http://127.0.0.1:"));
 
 await write(join(repo, "src/workspace.ts"), [
@@ -79,7 +79,7 @@ await write(join(repo, "src/workspace.ts"), [
 commitAll("add workspace validation version");
 await Bun.write(browserCapture, "");
 const secondReview = runPaire(["review"]);
-assert(secondReview.includes("PAIRE_AGENT_ACTION_REQUIRED"));
+assert(secondReview.includes("Action required"));
 assert((await Bun.file(browserCapture).text()) === "");
 const secondPacketPath = extractPacketPath(secondReview);
 const secondPacket = await Bun.file(secondPacketPath).json();
@@ -152,16 +152,17 @@ function text(value: Uint8Array) {
 }
 
 function extractPacketPath(stdout: string) {
-  const lines = stdout.split("\n");
-  const marker = lines.findIndex(
-    (line) =>
-      line.trim() === "Analyze this packet:" ||
-      line.trim() === "Analyze the current canonical packet exported at:",
-  );
-  if (marker < 0 || !lines[marker + 1]) {
-    throw new Error(`Packet path missing from output:\n${stdout}`);
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (
+      trimmed.startsWith("/") &&
+      trimmed.endsWith("current-packet.json") &&
+      !trimmed.includes("--apply")
+    ) {
+      return trimmed;
+    }
   }
-  return lines[marker + 1]?.trim() ?? "";
+  throw new Error(`Packet path missing from output:\n${stdout}`);
 }
 
 function agentResult(
@@ -191,7 +192,12 @@ function agentResult(
           {
             id: "claim_smoke_auth_required",
             threadId: "thread_smoke_auth_workspace",
-            text: "Project creation rejects missing users before returning project data.",
+            title: "Reject missing users before create",
+            description:
+              "Project creation rejects missing users before returning project data.",
+            before: "Project creation accepted any user input.",
+            after:
+              "Project creation rejects missing users before returning data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
             humanStatus: "unreviewed",
             evidences: [
@@ -200,13 +206,26 @@ function agentResult(
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
+                change: "Throw when `createProject` receives a null user.",
               },
             ],
           },
           {
             id: "claim_smoke_workspace_required",
             threadId: "thread_smoke_auth_workspace",
-            text:
+            title:
+              workspaceStatus === "new"
+                ? "Reject workspace inputs without a name"
+                : "Expose workspace validation version marker",
+            description:
+              workspaceStatus === "new"
+                ? "Workspace validation rejects inputs without a workspace name."
+                : "Workspace validation rejects missing names and exposes a version marker.",
+            before:
+              workspaceStatus === "new"
+                ? "Workspace inputs were accepted without a name check."
+                : "Workspace validation rejected missing names only.",
+            after:
               workspaceStatus === "new"
                 ? "Workspace validation rejects inputs without a workspace name."
                 : "Workspace validation rejects missing names and exposes a version marker.",
@@ -218,6 +237,10 @@ function agentResult(
                 startLine: 1,
                 endLine: workspaceStatus === "new" ? 6 : 8,
                 symbol: "validateWorkspace",
+                change:
+                  workspaceStatus === "new"
+                    ? "Reject workspace inputs when the workspace name is missing."
+                    : "Expose `workspaceValidationVersion` after validating the workspace name.",
               },
             ],
           },

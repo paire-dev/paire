@@ -1,10 +1,18 @@
 import { parsePatchFiles } from "@pierre/diffs";
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+
+import { addedLineRanges, annotateHunkText } from "./diff-line-numbers";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+
+import reviewApp from "../local-app/index.html";
 
 export type CliOptions = {
   cwd?: string;
@@ -53,20 +61,26 @@ type ClaimStatus =
 type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
 
 type AgentEvidence = {
+  claimId?: string;
   filePath: string;
   startLine: number;
   endLine: number;
   symbol?: string;
   fingerprint?: string;
   revisionId?: string;
+  change: string;
 };
 
 type AgentClaim = {
   id: string;
   threadId: string;
-  text: string;
+  title: string;
+  description?: string;
+  before?: string | null;
+  after?: string | null;
   agentStatus: ClaimStatus;
   humanStatus?: HumanStatus;
+  updatedAt?: number;
   evidences: AgentEvidence[];
 };
 
@@ -132,6 +146,7 @@ type TouchedSnippet = {
   endLine: number;
   hunkHeader?: string;
   text: string;
+  addedRanges?: Array<{ startLine: number; endLine: number }>;
   summarized: boolean;
 };
 
@@ -140,6 +155,16 @@ const MAX_INLINE_SNIPPET_CHARS = 4_000;
 const MAX_TOTAL_SNIPPET_CHARS = 18_000;
 const MAX_PACKET_PREVIEW_CHARS = 16_000;
 const REVIEW_PORT = 0;
+const REVIEW_SERVER_START_TIMEOUT_MS = 5_000;
+
+type ReviewServerState = {
+  pid: number;
+  port: number;
+  url: string;
+  sessionId: string;
+  repoRoot: string;
+  startedAt: number;
+};
 const VALID_AGENT_STATUSES = new Set([
   "new",
   "unchanged",
@@ -167,7 +192,10 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         await reviewCommand(rest, ctx);
         return 0;
       case "it":
-        await reviewCommand(rest, ctx);
+        await itCommand(rest, ctx);
+        return 0;
+      case "reset":
+        await resetCommand(ctx);
         return 0;
       case "status":
         await statusCommand(ctx);
@@ -175,6 +203,12 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
       case "sync":
         await syncCommand(ctx);
         return 0;
+      case "_review-serve": {
+        const sessionId = rest[0];
+        if (!sessionId) throw new Error("Missing session id.");
+        await reviewServeCommand(sessionId, ctx);
+        return 0;
+      }
       case "help":
       case "--help":
       case "-h":
@@ -227,7 +261,7 @@ async function startCommand(args: string[], ctx: Context) {
       allowFail: true,
     }).trim() || git.head;
   const goal = stringFlag(parsed, "goal") ?? null;
-  const existing = getSession(ctx.db, git.repoRoot);
+  const existing = getSession(ctx.db, git.repoRoot, git.branch);
   const now = Date.now();
   const sessionId = existing?.id ?? `ses_${crypto.randomUUID()}`;
 
@@ -271,19 +305,7 @@ async function startCommand(args: string[], ctx: Context) {
   }
 
   if (!getLastAppliedRevision(ctx.db, sessionId)) {
-    ctx.db
-      .prepare(
-        `insert into revisions (id, sessionId, number, state, gitFingerprint, packetArtifactId, packetJson, packetExportPath, resultPath, totalDiffArtifactId, createdAt, appliedAt)
-         values (?, ?, ?, 'applied', ?, null, null, null, null, null, ?, ?)`,
-      )
-      .run(
-        `rev_${crypto.randomUUID()}`,
-        sessionId,
-        0,
-        git.head,
-        now,
-        now,
-      );
+    insertAppliedBaselineRevision(ctx.db, sessionId, git.head, now);
   }
 
   ctx.stdout(
@@ -314,7 +336,7 @@ async function reviewCommand(args: string[], ctx: Context) {
   }
 
   const git = getGitState(ctx.cwd);
-  const session = getSession(ctx.db, git.repoRoot);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
   if (!session) {
     const base = detectBaseRef(git.repoRoot);
     ctx.stdout(`No Paire session found.\nRun:\npaire start --base ${base}`);
@@ -322,6 +344,7 @@ async function reviewCommand(args: string[], ctx: Context) {
   }
   if (!git.clean) {
     ctx.stdout(dirtyWorktreeMessage(git));
+    await openReviewUi(ctx, session, git);
     return;
   }
   const lastApplied = getLastAppliedRevision(ctx.db, session.id);
@@ -331,21 +354,26 @@ async function reviewCommand(args: string[], ctx: Context) {
   }
 
   const packet = await createPendingPacket(ctx, session, git, lastApplied);
+  const diffFrom = lastApplied?.gitFingerprint ?? session.baseCommit;
+  const diffFromLabel = lastApplied
+    ? `last applied commit ${diffFrom}`
+    : `base commit ${diffFrom}`;
   ctx.stdout(
-    [
-      "PAIRE_AGENT_ACTION_REQUIRED",
-      "",
-      `Paire detected changes since revision ${lastApplied?.id ?? "none"}.`,
-      "Analyze the current canonical packet exported at:",
-      packet.path,
-      "",
-      "Packet preview:",
-      packet.preview,
-      "",
-      "Then write the review update JSON and run:",
-      `paire review --apply ${packet.resultPath}`,
-    ].join("\n"),
+    reviewActionRequiredMessage({
+      diffFrom,
+      diffFromLabel,
+      lastAppliedId: lastApplied?.id ?? null,
+      packet,
+    }),
   );
+}
+
+async function itCommand(args: string[], ctx: Context) {
+  const git = getGitState(ctx.cwd);
+  if (!getSession(ctx.db, git.repoRoot, git.branch)) {
+    await startCommand(args, ctx);
+  }
+  await reviewCommand([], ctx);
 }
 
 async function applyReviewCommand(
@@ -394,6 +422,21 @@ async function applyReviewCommand(
   const apply = ctx.db.transaction((value: AgentApplyPayload) => {
     for (const thread of value.threads) {
       const threadDbId = scopedDbId(session.id, thread.id);
+      const existingThread = ctx.db
+        .query<
+          { title: string; summary: string; status: string },
+          [string, string]
+        >(
+          "select title, summary, status from change_threads where id = ? and sessionId = ?",
+        )
+        .get(threadDbId, session.id);
+      const preserveExistingThreadCopy =
+        !!existingThread &&
+        thread.claims.length > 0 &&
+        thread.claims.every((claim) =>
+          claim.agentStatus === "unchanged" ||
+          claim.agentStatus === "evidence_moved"
+        );
       ctx.db
         .prepare(
           `insert into change_threads (id, sessionId, title, summary, status, updatedAt)
@@ -403,30 +446,63 @@ async function applyReviewCommand(
         .run(
           threadDbId,
           session.id,
-          thread.title,
-          thread.summary ?? "",
-          thread.status ?? "active",
+          preserveExistingThreadCopy ? existingThread.title : thread.title,
+          preserveExistingThreadCopy
+            ? existingThread.summary
+            : (thread.summary ?? ""),
+          preserveExistingThreadCopy
+            ? existingThread.status
+            : (thread.status ?? "active"),
           Date.now(),
         );
       for (const claim of thread.claims) {
         const claimDbId = scopedDbId(session.id, claim.id);
         const existingClaim = ctx.db
-          .query<{ humanStatus: HumanStatus }, [string, string]>(
-            "select humanStatus from claims where id = ? and sessionId = ?",
+          .query<
+            {
+              title: string;
+              description: string;
+              beforeText: string | null;
+              afterText: string | null;
+              humanStatus: HumanStatus;
+            },
+            [string, string]
+          >(
+            "select title, description, beforeText, afterText, humanStatus from claims where id = ? and sessionId = ?",
           )
           .get(claimDbId, session.id);
+        const claimCopy = normalizeClaimCopy(claim);
+        const preserveClaimCopy =
+          !!existingClaim && claim.agentStatus === "unchanged";
+        const claimTitle = preserveClaimCopy
+          ? existingClaim.title
+          : claimCopy.title;
+        const claimDescription = preserveClaimCopy
+          ? existingClaim.description
+          : claimCopy.description;
+        const claimBefore = preserveClaimCopy
+          ? existingClaim.beforeText
+          : normalizeNullableCopy(claim.before);
+        const claimAfter = preserveClaimCopy
+          ? existingClaim.afterText
+          : normalizeNullableCopy(claim.after);
         ctx.db
           .prepare(
-            `insert into claims (id, threadId, sessionId, text, agentStatus, humanStatus, updatedAt)
-             values (?, ?, ?, ?, ?, ?, ?)
-             on conflict(id) do update set threadId = excluded.threadId, text = excluded.text,
+            `insert into claims (id, threadId, sessionId, title, description, beforeText, afterText, agentStatus, humanStatus, updatedAt)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             on conflict(id) do update set threadId = excluded.threadId, title = excluded.title,
+               description = excluded.description,
+               beforeText = excluded.beforeText, afterText = excluded.afterText,
                agentStatus = excluded.agentStatus, updatedAt = excluded.updatedAt`,
           )
           .run(
             claimDbId,
             threadDbId,
             session.id,
-            claim.text,
+            claimTitle,
+            claimDescription,
+            claimBefore,
+            claimAfter,
             claim.agentStatus,
             existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed",
             Date.now(),
@@ -437,8 +513,8 @@ async function applyReviewCommand(
         for (const evidence of claim.evidences) {
           ctx.db
             .prepare(
-              `insert into claim_evidences (id, claimId, revisionId, filePath, startLine, endLine, symbol, fingerprint)
-               values (?, ?, ?, ?, ?, ?, ?, ?)`,
+              `insert into claim_evidences (id, claimId, revisionId, filePath, startLine, endLine, symbol, fingerprint, changeText)
+               values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               `ev_${crypto.randomUUID()}`,
@@ -449,6 +525,7 @@ async function applyReviewCommand(
               evidence.endLine,
               evidence.symbol ?? null,
               evidence.fingerprint ?? null,
+              evidence.change.trim(),
             );
         }
       }
@@ -474,7 +551,7 @@ async function applyReviewCommand(
 
 async function statusCommand(ctx: Context) {
   const git = getGitState(ctx.cwd);
-  const session = getSession(ctx.db, git.repoRoot);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
   ctx.stdout(
     session
       ? formatStatus(ctx.db, session, git)
@@ -484,12 +561,60 @@ async function statusCommand(ctx: Context) {
 
 async function syncCommand(ctx: Context) {
   const git = getGitState(ctx.cwd);
-  const session = getSession(ctx.db, git.repoRoot);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
   const status = session
     ? formatStatus(ctx.db, session, git)
     : `No Paire session found.\nRun:\npaire start --base ${detectBaseRef(git.repoRoot)}`;
   ctx.stdout(
     `${status}\n\nCloud sync is not configured in this local build. Run paire review to update or open the local review.`,
+  );
+}
+
+async function resetCommand(ctx: Context) {
+  const git = getGitState(ctx.cwd);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
+  if (!session) {
+    ctx.stdout(
+      `No Paire session found for branch ${git.branch}.\nRun:\npaire start --base ${detectBaseRef(git.repoRoot)}`,
+    );
+    return;
+  }
+
+  const baseCommit =
+    gitCommand(["merge-base", "HEAD", session.baseRef], session.repoRoot, {
+      allowFail: true,
+    }).trim() || git.head;
+  const now = Date.now();
+
+  const reset = ctx.db.transaction(
+    (sessionId: string, baselineFingerprint: string, updatedAt: number) => {
+      ctx.db
+        .prepare(
+          `delete from human_review_marks
+          where claimId in (select id from claims where sessionId = ?)`,
+        )
+        .run(sessionId);
+      ctx.db
+        .prepare(
+          `delete from claim_evidences
+          where claimId in (select id from claims where sessionId = ?)`,
+        )
+        .run(sessionId);
+      ctx.db.prepare("delete from claims where sessionId = ?").run(sessionId);
+      ctx.db
+        .prepare("delete from change_threads where sessionId = ?")
+        .run(sessionId);
+      ctx.db.prepare("delete from revisions where sessionId = ?").run(sessionId);
+      ctx.db
+        .prepare("update sessions set baseCommit = ?, updatedAt = ? where id = ?")
+        .run(baselineFingerprint, updatedAt, sessionId);
+      insertAppliedBaselineRevision(ctx.db, sessionId, baselineFingerprint, updatedAt);
+    },
+  );
+  reset(session.id, baseCommit, now);
+  clearProjectReviewExports(ctx, session);
+  ctx.stdout(
+    `Reset Paire session for branch ${git.branch}. Review baseline set to ${baseCommit}.`,
   );
 }
 
@@ -564,13 +689,27 @@ async function createPendingPacket(
       revisionId: "string",
       gitFingerprint: "string",
       threads:
-        "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, text, agentStatus, humanStatus?, evidences[] }> }>",
+        "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, title, description?, before?, after?, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }> }> }>",
     },
     rules: [
+      "Group related claims into area threads. Treat each thread as one review area with a short area title, not as a single diff line or file.",
+      "Order areas and claims for review, not alphabetically: start with the main behavior or core contract, then supporting helpers, then consumers/usages, then tests, generated files, config, and lockfiles.",
+      "Use the first area for the most important files or behavior a reviewer needs to understand before the rest of the change makes sense.",
+      "When updating an existing thread, keep its thread id stable. Only create a new thread when the claim does not fit an existing area.",
       "Update existing claims before creating new ones.",
       "Do not create new claims for line movement, formatting, renames, or helper extraction unless meaning changed.",
       "Set agentStatus to one of: new, unchanged, evidence_moved, amended, invalidated, superseded.",
-      "Put every evidence span under the claim that depends on it.",
+      "For unchanged claims, keep the existing thread title, thread summary, claim title, claim description, claim before, and claim after byte-for-byte. Only update evidence spans and evidence change lines if the code moved.",
+      "Put every evidence span under the claim that depends on it. Use multiple files and ranges to cover the entire change.",
+      "Evidence startLine/endLine are 1-based line numbers in the post-change file (HEAD). Copy them from the N| prefixes in touchedSnippets.text.",
+      "Prefer multiple narrow evidence spans over one hunk-wide span when a claim depends on distinct changed regions. Use touchedSnippets.addedRanges as a guide for contiguous added-line groups.",
+      "When a claim spans non-contiguous line ranges or files, add separate evidence objects under the same claim rather than one oversized range.",
+      "Format human-facing thread title, thread summary, claim title, and claim description with Markdown.",
+      "Keep claim titles short and direct.",
+      "Use claim description only to add detail that complements the title; do not restate the same point.",
+      "Aim for clarity with progressive disclosure: each new detail should build on the previous one and avoid repetition.",
+      "On each claim, set optional before and after to high-level behavior summaries for the whole claim; use null when not applicable (pure addition: null before; pure removal: null after). Do not mention file paths or line numbers.",
+      "On each evidence span, set change to a required imperative line describing what this span does; verb-first, concise, and may name symbols or APIs.",
     ],
   };
   const packetJson = JSON.stringify(packet, null, 2);
@@ -624,12 +763,24 @@ function insertArtifactRef(db: Database, kind: string, path: string) {
   return id;
 }
 
+function projectExportDirectory(ctx: Context, session: SessionRow) {
+  return join(ctx.projectsDir, session.projectKey);
+}
+
+function clearProjectReviewExports(ctx: Context, session: SessionRow) {
+  const directory = projectExportDirectory(ctx, session);
+  for (const filename of ["agent-result.json", "current-packet.json"]) {
+    const path = join(directory, filename);
+    if (existsSync(path)) unlinkSync(path);
+  }
+}
+
 async function writeCurrentPacketExport(
   ctx: Context,
   session: SessionRow,
   packetJson: string,
 ) {
-  const directory = join(ctx.projectsDir, session.projectKey);
+  const directory = projectExportDirectory(ctx, session);
   mkdirSync(directory, { recursive: true });
   const path = join(directory, "current-packet.json");
   await Bun.write(path, packetJson);
@@ -682,22 +833,90 @@ function formatStatus(db: Database, session: SessionRow, git: GitState) {
   return lines.join("\n");
 }
 
+const AGENT_DIRTY_WORKTREE_ONE_LINER =
+  "commit changes; paire it; and follow all the instructions to review and apply.";
+
+function reviewActionRequiredMessage({
+  diffFrom,
+  diffFromLabel,
+  lastAppliedId,
+  packet,
+}: {
+  diffFrom: string;
+  diffFromLabel: string;
+  lastAppliedId: string | null;
+  packet: { path: string; resultPath: string; preview: string };
+}) {
+  return [
+    "Action required",
+    "",
+    "Coding agent workflow — complete every step below in order.",
+    "Do not skip steps. Do not stop after step 1 or 2. The task is incomplete until step 5 succeeds.",
+    "",
+    "Step 1 — Inspect the git diff (required)",
+    `Changes since the last applied revision (${lastAppliedId ?? "none"}). Run and read the full output:`,
+    `git diff ${diffFrom}..HEAD`,
+    `(${diffFromLabel})`,
+    "",
+    "Step 2 — Read the full packet (required)",
+    "Analyze this packet:",
+    "Read the entire exported packet JSON at this path (use the preview below only as a shortcut):",
+    packet.path,
+    "",
+    "Step 3 — Write the review update JSON (required)",
+    "Write the review update JSON to:",
+    packet.resultPath,
+    "Follow packet.rules and resultSchema exactly.",
+    "",
+    "Step 4 — Apply the review (required)",
+    "Then run:",
+    `paire review --apply ${packet.resultPath}`,
+    "Do not consider the review done until this command exits 0.",
+    "",
+    "Step 5 — Open the Review UI (required)",
+    "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
+    "",
+    "Before you stop, confirm every item:",
+    "[ ] git diff inspected",
+    "[ ] full packet read from the exported path",
+    `[ ] JSON written to ${packet.resultPath}`,
+    "[ ] paire review --apply succeeded",
+    "[ ] Review UI opened when a URL was printed",
+    "",
+    "Packet preview:",
+    packet.preview,
+    "",
+  ].join("\n");
+}
+
 function dirtyWorktreeMessage(git: GitState) {
   return [
     "PAIRE_NEEDS_COMMITTED_CHANGES",
     "",
     "Paire reviews committed code only.",
-    "The current worktree has uncommitted changes, so Paire will not create a review packet or open a stale review.",
+    "The current worktree has uncommitted changes, so Paire will not create a review packet from dirty files.",
+    "Opening the existing review UI. It shows committed review state, not the latest worktree changes.",
+    "",
+    "Coding agent workflow — complete every step below in order. Do not skip steps.",
+    "",
+    "Step 1 — Commit or discard worktree changes (required)",
+    "Commit or stash your changes, or discard them with git checkout -- .",
+    "",
+    "Step 2 — Run Paire again (required)",
+    "Run: paire it",
+    "(or: commit, then paire review)",
+    "",
+    "Step 3 — Follow every printed instruction through apply (required)",
+    AGENT_DIRTY_WORKTREE_ONE_LINER,
+    "When paire review prints Action required, complete all five steps through paire review --apply.",
+    "Do not stop until apply succeeds and you opened the Review UI URL when printed.",
     "",
     `Current branch: ${git.branch}`,
     `Current HEAD: ${git.head}`,
     "",
     "Safe inspection:",
-    "git status --short",
-    "git diff --stat",
-    "",
-    "Commit or discard the worktree changes, then run:",
-    "paire review",
+    "`git status --short`",
+    "`git diff --stat`",
   ].join("\n");
 }
 
@@ -710,73 +929,310 @@ async function printStatusAndOpen(
   await openReviewUi(ctx, session, git);
 }
 
-async function openReviewUi(ctx: Context, session: SessionRow, git: GitState) {
-  const data = buildReviewData(ctx.db, session, git);
-  const html = renderReviewHtml(data);
-  if (ctx.env.PAIRE_BROWSER_HTML_CAPTURE) {
-    await Bun.write(ctx.env.PAIRE_BROWSER_HTML_CAPTURE, html);
+function paireCliSpawnArgs(...args: string[]): string[] {
+  if (import.meta.path.startsWith("/$bunfs/")) {
+    return [process.execPath, ...args];
   }
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: REVIEW_PORT,
-    fetch: (request: Request) => handleReviewRequest(request, html, data, ctx),
-  });
-  const url = `http://127.0.0.1:${server.port}/`;
-  await ctx.openBrowser(url);
+  return [process.execPath, join(import.meta.dir, "../cli.ts"), ...args];
+}
+
+async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
+  if (ctx.env.PAIRE_BROWSER_HTML_CAPTURE) {
+    await Bun.write(
+      ctx.env.PAIRE_BROWSER_HTML_CAPTURE,
+      await Bun.file(join(import.meta.dir, "../local-app/index.html")).text(),
+    );
+  }
+
   if (ctx.env.PAIRE_BROWSER_CAPTURE) {
+    const server = createReviewServer(session, ctx);
+    const url = reviewUiUrl(server.port);
+    await ctx.openBrowser(url);
+    ctx.stdout(reviewUiMessage(url));
     server.stop();
     return;
   }
-  ctx.stdout(`Review UI: ${url}\nPress Ctrl+C to stop.`);
+
+  const statePath = reviewServerStatePath(ctx, session.id);
+  const existing = readReviewServerState(statePath);
+  if (existing?.pid && isProcessRunning(existing.pid)) {
+    await ctx.openBrowser(existing.url);
+    ctx.stdout(reviewUiMessage(existing.url));
+    return;
+  }
+
+  if (existing) {
+    unlinkSync(statePath);
+  }
+
+  Bun.spawn(paireCliSpawnArgs("_review-serve", session.id), {
+    cwd: session.repoRoot,
+    env: { ...ctx.env, PAIRE_HOME: ctx.paireHome },
+    stdout: "ignore",
+    stderr: "ignore",
+    stdin: "ignore",
+    detached: true,
+  }).unref();
+
+  const state = await waitForReviewServerState(statePath);
+  await ctx.openBrowser(state.url);
+  ctx.stdout(reviewUiMessage(state.url));
+}
+
+function createReviewServer(session: SessionRow, ctx: Context) {
+  return Bun.serve({
+    hostname: "127.0.0.1",
+    port: REVIEW_PORT,
+    routes: {
+      "/": reviewApp,
+      "/api/review": (request: Request) =>
+        handleReviewRequest(request, session, ctx),
+      "/api/review/diff": (request: Request) =>
+        handleReviewDiffRequest(request, session, ctx),
+      "/api/claims/:claimId/evidence-diff": (request: Request) =>
+        handleEvidenceDiffRequest(request, session, ctx),
+      "/api/claims/:claimId/human-status": (request: Request) =>
+        handleHumanStatusRequest(request, session, ctx),
+      "/api/claims/:claimId/comment": (request: Request) =>
+        handleCommentRequest(request, session, ctx),
+    },
+  });
+}
+
+async function reviewServeCommand(sessionId: string, ctx: Context) {
+  const session = ctx.db
+    .query<SessionRow, [string]>("select * from sessions where id = ?")
+    .get(sessionId);
+  if (!session) {
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+
+  const statePath = reviewServerStatePath(ctx, sessionId);
+  mkdirSync(dirname(statePath), { recursive: true });
+
+  const server = createReviewServer(session, ctx);
+  const port = server.port;
+  if (port == null) {
+    throw new Error("Review UI server did not bind to a port.");
+  }
+  const url = reviewUiUrl(port);
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      pid: process.pid,
+      port,
+      url,
+      sessionId,
+      repoRoot: session.repoRoot,
+      startedAt: Date.now(),
+    } satisfies ReviewServerState),
+  );
+
+  const shutdown = () => {
+    server.stop();
+    try {
+      unlinkSync(statePath);
+    } catch {
+      // ignore missing state file
+    }
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
   await new Promise(() => undefined);
+}
+
+function reviewServerStatePath(ctx: Context, sessionId: string) {
+  return join(ctx.paireHome, "review-servers", `${sessionId}.json`);
+}
+
+function readReviewServerState(path: string) {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as ReviewServerState;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForReviewServerState(path: string) {
+  const deadline = Date.now() + REVIEW_SERVER_START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const state = readReviewServerState(path);
+    if (state?.url) return state;
+    await Bun.sleep(50);
+  }
+  throw new Error("Review UI server failed to start.");
+}
+
+function isProcessRunning(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function reviewUiUrl(port: number | undefined) {
+  if (port == null) {
+    throw new Error("Review UI server did not bind to a port.");
+  }
+  return `http://127.0.0.1:${port}/`;
+}
+
+function reviewUiMessage(url: string) {
+  return [`Review UI: ${url}`, `Open this URL in the browser: ${url}`].join(
+    "\n",
+  );
 }
 
 async function handleReviewRequest(
   request: Request,
-  html: string,
-  data: ReturnType<typeof buildReviewData>,
+  session: SessionRow,
   ctx: Context,
 ) {
-  const url = new URL(request.url);
-  if (url.pathname === "/api/review") {
-    return Response.json(data);
+  if (request.method !== "GET") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
   }
-  const statusMatch = /^\/api\/claims\/([^/]+)\/human-status$/.exec(
-    url.pathname,
+  const freshSession = ctx.db
+    .query<SessionRow, [string]>("select * from sessions where id = ?")
+    .get(session.id);
+  if (!freshSession) {
+    return Response.json({ error: "Session not found." }, { status: 404 });
+  }
+  return Response.json(
+    buildReviewData(ctx.db, freshSession, getGitState(freshSession.repoRoot)),
   );
-  if (request.method === "POST" && statusMatch) {
-    const claimId = decodeURIComponent(statusMatch[1] ?? "");
-    const claimDbId = scopedDbId(data.session.id, claimId);
-    const payload = (await request.json()) as { humanStatus?: unknown };
-    if (
-      typeof payload.humanStatus !== "string" ||
-      !VALID_HUMAN_STATUSES.has(payload.humanStatus)
-    ) {
-      return Response.json({ error: "Invalid humanStatus." }, { status: 400 });
-    }
-    const update = ctx.db
-      .prepare(
-        "update claims set humanStatus = ?, updatedAt = ? where id = ? and sessionId = ?",
-      )
-      .run(payload.humanStatus, Date.now(), claimDbId, data.session.id);
-    if (update.changes === 0) {
-      return Response.json({ error: "Claim not found." }, { status: 404 });
-    }
-    ctx.db
-      .prepare(
-        "insert into human_review_marks (id, claimId, humanStatus, note, updatedAt) values (?, ?, ?, null, ?)",
-      )
-      .run(
-        `mark_${crypto.randomUUID()}`,
-        claimDbId,
-        payload.humanStatus,
-        Date.now(),
-      );
-    return Response.json({ ok: true });
+}
+
+async function handleHumanStatusRequest(
+  request: Request,
+  session: SessionRow,
+  ctx: Context,
+) {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
   }
-  return new Response(html, {
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+  const claimId = (request as Request & { params: { claimId: string } }).params
+    .claimId;
+  const claimDbId = scopedDbId(session.id, claimId);
+  const payload = (await request.json()) as { humanStatus?: unknown };
+  if (
+    typeof payload.humanStatus !== "string" ||
+    !VALID_HUMAN_STATUSES.has(payload.humanStatus)
+  ) {
+    return Response.json({ error: "Invalid humanStatus." }, { status: 400 });
+  }
+  const update = ctx.db
+    .prepare(
+      "update claims set humanStatus = ?, updatedAt = ? where id = ? and sessionId = ?",
+    )
+    .run(payload.humanStatus, Date.now(), claimDbId, session.id);
+  if (update.changes === 0) {
+    return Response.json({ error: "Claim not found." }, { status: 404 });
+  }
+  ctx.db
+    .prepare(
+      "insert into human_review_marks (id, claimId, humanStatus, note, updatedAt) values (?, ?, ?, null, ?)",
+    )
+    .run(
+      `mark_${crypto.randomUUID()}`,
+      claimDbId,
+      payload.humanStatus,
+      Date.now(),
+    );
+  return Response.json({ ok: true });
+}
+
+async function handleEvidenceDiffRequest(
+  request: Request,
+  session: SessionRow,
+  ctx: Context,
+) {
+  if (request.method !== "GET") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  const claimId = (request as Request & { params: { claimId: string } }).params
+    .claimId;
+  const filePath = new URL(request.url).searchParams.get("filePath");
+  if (!filePath) {
+    return Response.json({ error: "Missing filePath." }, { status: 400 });
+  }
+
+  const claimDbId = scopedDbId(session.id, claimId);
+  const evidence = ctx.db
+    .query<{ filePath: string }, [string, string, string]>(
+      `select claim_evidences.filePath
+         from claim_evidences
+         join claims on claims.id = claim_evidences.claimId
+        where claims.id = ?
+          and claims.sessionId = ?
+          and claim_evidences.filePath = ?
+        limit 1`,
+    )
+    .get(claimDbId, session.id, filePath);
+  if (!evidence) {
+    return Response.json({ error: "Evidence not found." }, { status: 404 });
+  }
+
+  const totalDiff = gitDiffForCurrentState(
+    session.baseCommit,
+    session.repoRoot,
+    true,
+  );
+  return Response.json({ diff: fileToRawDiff(totalDiff, evidence.filePath) });
+}
+
+async function handleReviewDiffRequest(
+  request: Request,
+  session: SessionRow,
+  _ctx: Context,
+) {
+  if (request.method !== "GET") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  return Response.json({
+    diff: gitDiffForCurrentState(session.baseCommit, session.repoRoot, true),
   });
+}
+
+async function handleCommentRequest(
+  request: Request,
+  session: SessionRow,
+  ctx: Context,
+) {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  const claimId = (request as Request & { params: { claimId: string } }).params
+    .claimId;
+  const claimDbId = scopedDbId(session.id, claimId);
+  const payload = (await request.json()) as { note?: unknown };
+  if (typeof payload.note !== "string" || !payload.note.trim()) {
+    return Response.json({ error: "Invalid comment." }, { status: 400 });
+  }
+  const claim = ctx.db
+    .query<{ humanStatus: HumanStatus }, [string, string]>(
+      "select humanStatus from claims where id = ? and sessionId = ?",
+    )
+    .get(claimDbId, session.id);
+  if (!claim) {
+    return Response.json({ error: "Claim not found." }, { status: 404 });
+  }
+  ctx.db
+    .prepare(
+      "insert into human_review_marks (id, claimId, humanStatus, note, updatedAt) values (?, ?, ?, ?, ?)",
+    )
+    .run(
+      `mark_${crypto.randomUUID()}`,
+      claimDbId,
+      claim.humanStatus,
+      payload.note.trim(),
+      Date.now(),
+    );
+  return Response.json({ ok: true });
 }
 
 function buildReviewData(db: Database, session: SessionRow, git: GitState) {
@@ -797,6 +1253,7 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
     session,
     git,
     burden: reviewBurden(db, session.id),
+    generatedAt: Date.now(),
     threads,
   };
 }
@@ -808,162 +1265,25 @@ function getClaimsForThread(
 ) {
   return db
     .query<AgentClaim, [string]>(
-      "select id, threadId, text, agentStatus, humanStatus from claims where threadId = ? order by updatedAt desc",
+      "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc",
     )
     .all(threadDbId)
     .map((claim) => ({
       ...claim,
+      ...normalizeStoredClaim(claim),
       id: publicDbId(sessionId, claim.id),
       threadId: publicDbId(sessionId, claim.threadId),
       evidences: db
         .query<
         AgentEvidence & { revisionId: string },
         [string]
-      >("select filePath, startLine, endLine, symbol, fingerprint, revisionId from claim_evidences where claimId = ? order by filePath, startLine")
-        .all(claim.id),
+      >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, changeText as change from claim_evidences where claimId = ? order by filePath, startLine")
+        .all(claim.id)
+        .map((evidence) => ({
+          ...evidence,
+          claimId: publicDbId(sessionId, claim.id),
+        })),
     }));
-}
-
-function renderReviewHtml(data: ReturnType<typeof buildReviewData>) {
-  const body = renderToStaticMarkup(
-    React.createElement(
-      "main",
-      { className: "mx-auto max-w-5xl px-6 py-8 font-sans text-slate-950" },
-      React.createElement(
-        "h1",
-        { className: "text-2xl font-semibold" },
-        "Paire Review",
-      ),
-      React.createElement(
-        "p",
-        { className: "mt-1 text-sm text-slate-500" },
-        data.session.goal ?? "No goal set",
-      ),
-      React.createElement(
-        "section",
-        { className: "mt-6 rounded-lg border border-slate-200 bg-white p-4" },
-        React.createElement(
-          "h2",
-          {
-            className:
-              "text-sm font-medium uppercase tracking-wide text-slate-500",
-          },
-          "Review burden",
-        ),
-        React.createElement("p", { className: "mt-2 text-lg" }, data.burden),
-      ),
-      ...data.threads.map((thread) =>
-        React.createElement(
-          "section",
-          {
-            key: thread.id,
-            className: "mt-4 rounded-lg border border-slate-200 bg-white p-4",
-          },
-          React.createElement(
-            "h2",
-            { className: "text-lg font-semibold" },
-            thread.title,
-          ),
-          React.createElement(
-            "p",
-            { className: "mt-1 text-sm text-slate-600" },
-            thread.summary,
-          ),
-          ...thread.claims.map((claim) =>
-            React.createElement(
-              "article",
-              { key: claim.id, className: "mt-3 rounded-md bg-slate-50 p-3" },
-              React.createElement(
-                "div",
-                { className: "text-sm font-medium" },
-                claim.text,
-              ),
-              React.createElement(
-                "div",
-                { className: "mt-1 text-xs text-slate-500" },
-                `${claim.agentStatus} / ${claim.humanStatus ?? "unreviewed"}`,
-              ),
-              React.createElement(
-                "ul",
-                {
-                  className: "mt-2 grid gap-1 text-xs font-mono text-slate-600",
-                },
-                ...claim.evidences.map((evidence) =>
-                  React.createElement(
-                    "li",
-                    {
-                      key: `${evidence.filePath}:${evidence.startLine}-${evidence.endLine}`,
-                    },
-                    `${evidence.filePath}:${evidence.startLine}-${evidence.endLine}${evidence.symbol ? ` (${evidence.symbol})` : ""}`,
-                  ),
-                ),
-              ),
-              React.createElement(
-                "div",
-                { className: "mt-3 flex flex-wrap gap-2" },
-                ...(["accepted", "concern", "irrelevant"] as const).map(
-                  (status) =>
-                    React.createElement(
-                      "button",
-                      {
-                        key: status,
-                        type: "button",
-                        "data-claim-id": claim.id,
-                        "data-human-status": status,
-                        className:
-                          "rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100",
-                      },
-                      status,
-                    ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Paire Review</title><style>${reviewCss()}</style></head><body class="bg-slate-100">${body}<script>
-window.__PAIRE_REACT_PREVIEW__=true;
-document.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-claim-id][data-human-status]");
-  if (!button) return;
-  const claimId = button.getAttribute("data-claim-id");
-  const humanStatus = button.getAttribute("data-human-status");
-  const response = await fetch("/api/claims/" + encodeURIComponent(claimId) + "/human-status", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ humanStatus })
-  });
-  if (response.ok) {
-    button.parentElement.querySelectorAll("button").forEach((node) => node.classList.remove("bg-slate-900", "text-white"));
-    button.classList.add("bg-slate-900", "text-white");
-  }
-});
-</script></body></html>`;
-}
-
-function reviewCss() {
-  return `
-*{box-sizing:border-box}
-body{margin:0;background:#f1f5f9;color:#020617}
-.font-sans{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.font-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
-.mx-auto{margin-left:auto;margin-right:auto}
-.max-w-5xl{max-width:64rem}
-.px-6{padding-left:1.5rem;padding-right:1.5rem}.py-8{padding-top:2rem;padding-bottom:2rem}
-.p-4{padding:1rem}.p-3{padding:.75rem}.px-2{padding-left:.5rem;padding-right:.5rem}.py-1{padding-top:.25rem;padding-bottom:.25rem}
-.mt-1{margin-top:.25rem}.mt-2{margin-top:.5rem}.mt-3{margin-top:.75rem}.mt-4{margin-top:1rem}.mt-6{margin-top:1.5rem}
-.text-2xl{font-size:1.5rem;line-height:2rem}.text-lg{font-size:1.125rem;line-height:1.75rem}.text-sm{font-size:.875rem;line-height:1.25rem}.text-xs{font-size:.75rem;line-height:1rem}
-.font-semibold{font-weight:600}.font-medium{font-weight:500}.uppercase{text-transform:uppercase}.tracking-wide{letter-spacing:.025em}
-.text-slate-950{color:#020617}.text-slate-700{color:#334155}.text-slate-600{color:#475569}.text-slate-500{color:#64748b}.text-white{color:#fff}
-.bg-slate-100{background:#f1f5f9}.bg-white{background:#fff}.bg-slate-50{background:#f8fafc}.bg-slate-900{background:#0f172a}
-.border{border:1px solid}.border-slate-200{border-color:#e2e8f0}.border-slate-300{border-color:#cbd5e1}
-.rounded-lg{border-radius:.5rem}.rounded-md{border-radius:.375rem}
-.grid{display:grid}.gap-1{gap:.25rem}.gap-2{gap:.5rem}.flex{display:flex}.flex-wrap{flex-wrap:wrap}
-button{cursor:pointer}.hover\\:bg-slate-100:hover{background:#f1f5f9}
-ul{padding-left:1rem}
-`;
 }
 
 async function openBrowser(
@@ -990,7 +1310,7 @@ function migrate(db: Database) {
   db.exec(`
     create table if not exists sessions (
       id text primary key,
-      repoRoot text not null unique,
+      repoRoot text not null,
       projectKey text not null,
       goal text,
       baseRef text not null,
@@ -998,7 +1318,8 @@ function migrate(db: Database) {
       branch text not null,
       upstream text,
       createdAt integer not null,
-      updatedAt integer not null
+      updatedAt integer not null,
+      unique(repoRoot, branch)
     );
     create table if not exists revisions (
       id text primary key,
@@ -1026,7 +1347,10 @@ function migrate(db: Database) {
       id text primary key,
       threadId text not null,
       sessionId text not null,
-      text text not null,
+      title text not null,
+      description text not null default '',
+      beforeText text,
+      afterText text,
       agentStatus text not null,
       humanStatus text not null,
       updatedAt integer not null
@@ -1060,7 +1384,48 @@ function migrate(db: Database) {
   addNullableColumn(db, "revisions", "packetExportPath", "text");
   addNullableColumn(db, "revisions", "resultPath", "text");
   addNullableColumn(db, "revisions", "totalDiffArtifactId", "text");
+  addNullableColumn(db, "claims", "title", "text");
+  addNullableColumn(db, "claims", "description", "text");
+  addNullableColumn(db, "claims", "beforeText", "text");
+  addNullableColumn(db, "claims", "afterText", "text");
+  addNullableColumn(db, "claim_evidences", "changeText", "text");
+  migrateClaimsDropLegacyTextColumn(db);
+  dropColumnIfExists(db, "claim_evidences", "beforeText");
+  dropColumnIfExists(db, "claim_evidences", "afterText");
+  migrateSessionsToBranchScope(db);
   scopeReviewIds(db);
+}
+
+function migrateSessionsToBranchScope(db: Database) {
+  const table = db
+    .query<{ sql: string }, []>(
+      "select sql from sqlite_master where type = 'table' and name = 'sessions'",
+    )
+    .get();
+  if (!/\brepoRoot\s+text\s+not\s+null\s+unique\b/i.test(table?.sql ?? "")) {
+    return;
+  }
+
+  db.exec(`
+    create table sessions_next (
+      id text primary key,
+      repoRoot text not null,
+      projectKey text not null,
+      goal text,
+      baseRef text not null,
+      baseCommit text not null,
+      branch text not null,
+      upstream text,
+      createdAt integer not null,
+      updatedAt integer not null,
+      unique(repoRoot, branch)
+    );
+    insert into sessions_next (id, repoRoot, projectKey, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt)
+      select id, repoRoot, projectKey, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt
+        from sessions;
+    drop table sessions;
+    alter table sessions_next rename to sessions;
+  `);
 }
 
 function addNullableColumn(
@@ -1074,6 +1439,54 @@ function addNullableColumn(
   } catch {
     // SQLite throws when the column already exists.
   }
+}
+
+function tableHasColumn(db: Database, table: string, column: string) {
+  return db
+    .query<{ name: string }, []>(`pragma table_info(${table})`)
+    .all()
+    .some((row) => row.name === column);
+}
+
+function dropColumnIfExists(db: Database, table: string, column: string) {
+  if (!tableHasColumn(db, table, column)) return;
+  db.exec(`alter table ${table} drop column ${column}`);
+}
+
+function migrateClaimsDropLegacyTextColumn(db: Database) {
+  if (!tableHasColumn(db, "claims", "text")) return;
+  db.exec(`
+    create table claims_next (
+      id text primary key,
+      threadId text not null,
+      sessionId text not null,
+      title text not null,
+      description text not null default '',
+      beforeText text,
+      afterText text,
+      agentStatus text not null,
+      humanStatus text not null,
+      updatedAt integer not null
+    );
+    insert into claims_next (
+      id, threadId, sessionId, title, description, beforeText, afterText,
+      agentStatus, humanStatus, updatedAt
+    )
+    select
+      id,
+      threadId,
+      sessionId,
+      coalesce(nullif(trim(title), ''), text),
+      coalesce(description, ''),
+      beforeText,
+      afterText,
+      agentStatus,
+      humanStatus,
+      updatedAt
+    from claims;
+    drop table claims;
+    alter table claims_next rename to claims;
+  `);
 }
 
 function scopeReviewIds(db: Database) {
@@ -1118,10 +1531,31 @@ function scopeReviewIds(db: Database) {
   `);
 }
 
-function getSession(db: Database, repoRoot: string) {
+function getSession(db: Database, repoRoot: string, branch: string) {
   return db
-    .query<SessionRow, [string]>("select * from sessions where repoRoot = ?")
-    .get(repoRoot);
+    .query<SessionRow, [string, string]>(
+      "select * from sessions where repoRoot = ? and branch = ?",
+    )
+    .get(repoRoot, branch);
+}
+
+function insertAppliedBaselineRevision(
+  db: Database,
+  sessionId: string,
+  gitFingerprint: string,
+  timestamp: number,
+) {
+  db.prepare(
+    `insert into revisions (id, sessionId, number, state, gitFingerprint, packetArtifactId, packetJson, packetExportPath, resultPath, totalDiffArtifactId, createdAt, appliedAt)
+     values (?, ?, ?, 'applied', ?, null, null, null, null, null, ?, ?)`,
+  ).run(
+    `rev_${crypto.randomUUID()}`,
+    sessionId,
+    0,
+    gitFingerprint,
+    timestamp,
+    timestamp,
+  );
 }
 
 function getLastAppliedRevision(db: Database, sessionId: string) {
@@ -1166,7 +1600,9 @@ function reviewBurden(db: Database, sessionId: string) {
 function getActiveClaims(db: Database, sessionId: string) {
   const rows = db
     .query<AgentClaim & { threadTitle: string }, [string]>(
-      `select claims.id, claims.threadId, claims.text, claims.agentStatus, claims.humanStatus, change_threads.title as threadTitle
+      `select claims.id, claims.threadId, claims.title, claims.description,
+              claims.beforeText as before, claims.afterText as after,
+              claims.agentStatus, claims.humanStatus, change_threads.title as threadTitle
        from claims join change_threads on change_threads.id = claims.threadId
        where claims.sessionId = ? and claims.agentStatus != 'superseded'
        order by change_threads.updatedAt desc, claims.updatedAt desc`,
@@ -1174,13 +1610,14 @@ function getActiveClaims(db: Database, sessionId: string) {
     .all(sessionId);
   return rows.map((claim) => ({
     ...claim,
+    ...normalizeStoredClaim(claim),
     id: publicDbId(sessionId, claim.id),
     threadId: publicDbId(sessionId, claim.threadId),
     evidences: db
       .query<
       AgentEvidence & { revisionId: string },
       [string]
-    >("select filePath, startLine, endLine, symbol, fingerprint, revisionId from claim_evidences where claimId = ? order by filePath, startLine")
+    >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, changeText as change from claim_evidences where claimId = ? order by filePath, startLine")
       .all(claim.id),
   }));
 }
@@ -1210,8 +1647,15 @@ function validateApplyPayload(value: unknown): AgentApplyPayload {
       throw new Error("Each thread needs id, title, and claims.");
     }
     for (const claim of thread.claims) {
-      if (!claim.id || !claim.threadId || !claim.text)
-        throw new Error("Each claim needs id, threadId, and text.");
+      if (!claim.id || !claim.threadId) {
+        throw new Error("Each claim needs id and threadId.");
+      }
+      if ("text" in claim && (claim as { text?: unknown }).text != null) {
+        throw new Error("Claim text is no longer supported; use title and description.");
+      }
+      if (!normalizeClaimCopy(claim).title) {
+        throw new Error("Each claim needs title.");
+      }
       if (!VALID_AGENT_STATUSES.has(claim.agentStatus))
         throw new Error(`Invalid agentStatus: ${claim.agentStatus}`);
       if (claim.humanStatus && !VALID_HUMAN_STATUSES.has(claim.humanStatus)) {
@@ -1229,10 +1673,66 @@ function validateApplyPayload(value: unknown): AgentApplyPayload {
             "Each evidence needs filePath, startLine, and endLine.",
           );
         }
+        if ("before" in evidence || "after" in evidence) {
+          throw new Error(
+            "Evidence before/after are no longer supported; set claim before/after and evidence change.",
+          );
+        }
+        if (typeof evidence.change !== "string" || !evidence.change.trim()) {
+          throw new Error("Each evidence needs a non-empty change line.");
+        }
+        if (claim.before != null && typeof claim.before !== "string") {
+          throw new Error("Claim before must be a string when provided.");
+        }
+        if (claim.after != null && typeof claim.after !== "string") {
+          throw new Error("Claim after must be a string when provided.");
+        }
       }
     }
   }
-  return payload;
+  return normalizeApplyPayload(payload);
+}
+
+function normalizeNullableCopy(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function normalizeApplyPayload(payload: AgentApplyPayload): AgentApplyPayload {
+  return {
+    ...payload,
+    threads: payload.threads.map((thread) => ({
+      ...thread,
+      claims: thread.claims.map((claim) => ({
+        ...claim,
+        before: normalizeNullableCopy(claim.before),
+        after: normalizeNullableCopy(claim.after),
+        evidences: claim.evidences.map((evidence) => ({
+          ...evidence,
+          change: evidence.change.trim(),
+        })),
+      })),
+    })),
+  };
+}
+
+function normalizeClaimCopy(claim: Pick<AgentClaim, "title" | "description">) {
+  return {
+    title: claim.title.trim(),
+    description: claim.description?.trim() ?? "",
+  };
+}
+
+function normalizeStoredClaim(
+  claim: Pick<AgentClaim, "title" | "description">,
+) {
+  const copy = normalizeClaimCopy(claim);
+  return {
+    title: copy.title,
+    description: copy.description,
+  };
 }
 
 function getGitState(cwd: string): GitState {
@@ -1384,12 +1884,17 @@ function touchedSnippets(diff: string): TouchedSnippet[] {
       const summarize = shouldSummarizeFile(file.name, raw);
       for (const hunk of file.hunks) {
         if (total > MAX_TOTAL_SNIPPET_CHARS) break;
+        const rawHunk = rawHunkText(raw, hunk.hunkSpecs ?? "");
+        const annotated = summarize
+          ? null
+          : annotateHunkText(
+              rawHunk,
+              hunk.additionStart,
+              hunk.deletionStart,
+            );
         const text = summarize
           ? `[summarized: ${file.name} is too large or generated; inspect the artifact diff path instead]`
-          : rawHunkText(raw, hunk.hunkSpecs ?? "").slice(
-              0,
-              MAX_INLINE_SNIPPET_CHARS,
-            );
+          : annotated!.annotatedText.slice(0, MAX_INLINE_SNIPPET_CHARS);
         total += text.length;
         snippets.push({
           filePath: file.name,
@@ -1400,6 +1905,9 @@ function touchedSnippets(diff: string): TouchedSnippet[] {
           ),
           hunkHeader: hunk.hunkSpecs,
           text,
+          addedRanges: summarize
+            ? undefined
+            : addedLineRanges(annotated!.lines),
           summarized: summarize,
         });
       }
@@ -1505,5 +2013,6 @@ function helpText() {
     "  it",
     "  status",
     "  sync",
+    "  reset",
   ].join("\n");
 }

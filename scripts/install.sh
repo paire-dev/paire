@@ -6,7 +6,6 @@ REPO="${PAIRE_REPO:-paire-dev/paire-cli}"
 VERSION="${PAIRE_VERSION:-latest}"
 INSTALL_DIR="${PAIRE_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="${PAIRE_BASE_URL:-}"
-GITHUB_TOKEN="${PAIRE_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 
 fail() {
   printf 'paire install: %s\n' "$*" >&2
@@ -48,14 +47,6 @@ checksum() {
 download() {
   local url="$1"
   local output="$2"
-  if [[ -n "$GITHUB_TOKEN" && "$url" == https://github.com/* ]]; then
-    curl --fail --location --silent --show-error \
-      --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-      --header "X-GitHub-Api-Version: 2022-11-28" \
-      "$url" \
-      --output "$output"
-    return
-  fi
   curl --fail --location --silent --show-error "$url" --output "$output"
 }
 

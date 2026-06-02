@@ -51,12 +51,12 @@ paire start --base main --goal "Review current changes"
 paire review
 ```
 
-Paire reviews committed code only. If the worktree is dirty, `paire review` prints `PAIRE_NEEDS_COMMITTED_CHANGES` and does not create a packet or open the browser. Commit or discard the worktree changes, then run `paire review` again.
+Paire reviews committed code only. If the worktree is dirty, `paire review` prints `PAIRE_NEEDS_COMMITTED_CHANGES`, does not create a packet from dirty files, and opens the existing review UI with a warning that it is not showing the latest worktree changes. Commit or discard the worktree changes, then run `paire review` again.
 
 If `HEAD` changed since the last applied Paire revision and the worktree is clean, `paire review` prints:
 
 ```txt
-PAIRE_AGENT_ACTION_REQUIRED
+Action required
 
 Paire detected changes since revision <id>.
 Analyze the current canonical packet exported at:
@@ -90,6 +90,7 @@ paire review
 paire it
 paire status
 paire sync
+paire reset
 paire review --apply <file>
 paire review --stdin
 ```
@@ -111,6 +112,8 @@ PAIRE_HOME="$(mktemp -d)" paire start --base main
 ```
 
 Paire does not write review state into the target repository by default. Paire revisions are tied to commit SHAs, so it does not snapshot dirty worktree files.
+
+Sessions are scoped to the current Git branch. Running `paire start` on a branch reuses that branch's existing session when one exists, or creates one when it does not. `paire it` also creates the current branch session when needed before reviewing. Use `paire reset` to clear the current branch's review state and re-baseline the applied revision to `baseCommit`, so the next `paire review` covers all branch changes since the merge-base again.
 
 Project state is isolated by a project key. GitHub remotes use:
 
@@ -159,20 +162,17 @@ Unsupported values fail closed. The script never evaluates detected values as sh
 
 ## Install
 
-From a private GitHub release, use a token with release asset access:
-
 ```sh
 curl -fsSLo /tmp/paire-install.sh \
   https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh
 less /tmp/paire-install.sh
-PAIRE_GITHUB_TOKEN="$GITHUB_TOKEN" bash /tmp/paire-install.sh
+bash /tmp/paire-install.sh
 ```
 
-The short form is:
+Or pipe directly:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh |
-  PAIRE_GITHUB_TOKEN="$GITHUB_TOKEN" bash
+curl -fsSL https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh | bash
 ```
 
 The installer:
@@ -187,7 +187,7 @@ Pin a version or install elsewhere:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh |
-  PAIRE_GITHUB_TOKEN="$GITHUB_TOKEN" PAIRE_VERSION=v0.1.0 PAIRE_INSTALL_DIR="$HOME/bin" bash
+  PAIRE_VERSION=v0.1.0 PAIRE_INSTALL_DIR="$HOME/bin" bash
 ```
 
 For local release testing:
