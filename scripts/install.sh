@@ -2,7 +2,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-REPO="${PAIRE_REPO:-paire-dev/paire-cli}"
+REPO="${PAIRE_REPO:-paire-dev/paire}"
 VERSION="${PAIRE_VERSION:-latest}"
 INSTALL_DIR="${PAIRE_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="${PAIRE_BASE_URL:-}"

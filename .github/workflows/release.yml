@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset: paire-linux-x64
+          - runner: ubuntu-24.04-arm
+            asset: paire-linux-arm64
+          - runner: macos-latest
+            asset: paire-darwin-arm64
+          - runner: macos-15-intel
+            asset: paire-darwin-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build release binary
+        run: bash scripts/build-release.sh
+
+      - name: Verify asset name
+        run: |
+          built="dist/releases/${{ matrix.asset }}"
+          test -f "$built"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/releases/${{ matrix.asset }}
+            dist/releases/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release assets
+        run: |
+          mkdir -p release
+          for asset in paire-darwin-arm64 paire-darwin-x64 paire-linux-arm64 paire-linux-x64; do
+            cp "artifacts/${asset}/${asset}" "release/${asset}"
+          done
+          cd release
+          sha256sum paire-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
