@@ -187,7 +187,6 @@ function agentResult(
           workspaceStatus === "new"
             ? "The smoke change adds auth and workspace validation behavior."
             : "The smoke change updates the workspace validation claim.",
-        status: "active",
         claims: [
           {
             id: "claim_smoke_auth_required",

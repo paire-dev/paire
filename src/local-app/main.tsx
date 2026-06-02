@@ -94,7 +94,6 @@ type Thread = {
   id: string;
   title: string;
   summary: string;
-  status: string;
   claims: Claim[];
 };
 
@@ -393,7 +392,7 @@ function ReviewScrollPanel({
         <div
           className={cn(
             "w-full max-w-3xl",
-            sidebarCollapsible ? "mx-auto" : "mr-auto",
+            sidebarCollapsible ? "mx-auto" : "mx-auto",
           )}
         >
           {filterBar}
@@ -904,17 +903,12 @@ function ThreadGroup({
                 {thread.claims.length}{" "}
                 {thread.claims.length === 1 ? "claim" : "claims"}
               </Badge>
-              {thread.status ? (
-                <Badge variant="outline" className="text-muted-foreground">
-                  {statusLabel(thread.status)}
-                </Badge>
-              ) : null}
             </div>
           </div>
         </div>
       </div>
       {thread.summary ? (
-        <div className="text-base leading-relaxed text-muted-foreground pb-2">
+        <div className="text-lg leading-relaxed text-muted-foreground pb-2">
           <AiText source={thread.summary} />
         </div>
       ) : null}
@@ -1018,21 +1012,69 @@ function ClaimCard({
   );
 }
 
+type DeltaPanelColor = "red" | "blue" | "yellow" | "green";
+
 function claimDeltaPanels(before?: string | null, after?: string | null) {
   const hasBefore = before != null && before !== "";
   const hasAfter = after != null && after !== "";
   if (!hasBefore && !hasAfter) return null;
   if (!hasBefore && hasAfter) {
-    return [{ label: "New", direction: "right" as const, text: after! }];
+    return [
+      {
+        label: "New",
+        color: "blue" as const,
+        direction: "right" as const,
+        text: after!,
+      },
+    ];
   }
   if (hasBefore && !hasAfter) {
-    return [{ label: "Was", direction: "left" as const, text: before! }];
+    return [
+      {
+        label: "Was",
+        color: "red" as const,
+        direction: "left" as const,
+        text: before!,
+      },
+    ];
   }
   return [
-    { label: "Before", direction: "left" as const, text: before! },
-    { label: "After", direction: "right" as const, text: after! },
+    {
+      label: "Before",
+      color: "yellow" as const,
+      direction: "left" as const,
+      text: before!,
+    },
+    {
+      label: "After",
+      color: "green" as const,
+      direction: "right" as const,
+      text: after!,
+    },
   ];
 }
+
+const deltaPanelColorClasses: Record<
+  DeltaPanelColor,
+  { border: string; label: string }
+> = {
+  red: {
+    border: "border-red-500/30 bg-red-500/5",
+    label: "text-red-600 dark:text-red-400",
+  },
+  blue: {
+    border: "border-blue-500/30 bg-blue-500/5",
+    label: "text-blue-600 dark:text-blue-400",
+  },
+  yellow: {
+    border: "border-yellow-500/30 bg-yellow-500/5",
+    label: "text-yellow-600 dark:text-yellow-400",
+  },
+  green: {
+    border: "border-green-500/30 bg-green-500/5",
+    label: "text-green-600 dark:text-green-400",
+  },
+};
 
 function ClaimDeltaPanels({
   before,
@@ -1054,6 +1096,7 @@ function ClaimDeltaPanels({
         <InfoPanel
           key={panel.label}
           label={panel.label}
+          color={panel.color}
           direction={panel.direction}
           text={panel.text}
         />
@@ -1113,19 +1156,27 @@ function EvidenceBlock({
 
 function InfoPanel({
   label,
+  color,
   direction,
   text,
 }: {
   label: string;
+  color: DeltaPanelColor;
   direction: "left" | "right";
   text: string;
 }) {
+  const styles = deltaPanelColorClasses[color];
   return (
-    <div className="rounded-lg border border-border p-4">
+    <div
+      className={cn("rounded-lg border p-4", styles.border)}
+    >
       <div className="text-sm leading-relaxed text-muted-foreground">
         <span
           aria-hidden="true"
-          className="mr-2 inline-flex items-center justify-center text-foreground"
+          className={cn(
+            "mr-2 inline-flex items-center justify-center",
+            styles.label,
+          )}
         >
           {direction === "left" ? (
             <ArrowLeftFromLine className="relative top-0.5 size-4" />
@@ -1133,7 +1184,8 @@ function InfoPanel({
             <ArrowRightFromLine className="relative top-0.5 size-4" />
           )}
         </span>
-        <strong>{label}:</strong> <AiText source={text} inline />
+        <strong className={styles.label}>{label}:</strong>{" "}
+        <AiText source={text} inline />
       </div>
     </div>
   );

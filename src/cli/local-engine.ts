@@ -92,7 +92,6 @@ type AgentThread = {
   id: string;
   title: string;
   summary?: string;
-  status?: string;
   claims: AgentClaim[];
 };
 
@@ -437,10 +436,10 @@ async function applyReviewCommand(
       const threadDbId = scopedDbId(session.id, thread.id);
       const existingThread = ctx.db
         .query<
-          { title: string; summary: string; status: string },
+          { title: string; summary: string },
           [string, string]
         >(
-          "select title, summary, status from change_threads where id = ? and sessionId = ?",
+          "select title, summary from change_threads where id = ? and sessionId = ?",
         )
         .get(threadDbId, session.id);
       const preserveExistingThreadCopy =
@@ -452,9 +451,9 @@ async function applyReviewCommand(
         );
       ctx.db
         .prepare(
-          `insert into change_threads (id, sessionId, title, summary, status, updatedAt)
-           values (?, ?, ?, ?, ?, ?)
-           on conflict(id) do update set title = excluded.title, summary = excluded.summary, status = excluded.status, updatedAt = excluded.updatedAt`,
+          `insert into change_threads (id, sessionId, title, summary, updatedAt)
+           values (?, ?, ?, ?, ?)
+           on conflict(id) do update set title = excluded.title, summary = excluded.summary, updatedAt = excluded.updatedAt`,
         )
         .run(
           threadDbId,
@@ -463,9 +462,6 @@ async function applyReviewCommand(
           preserveExistingThreadCopy
             ? existingThread.summary
             : (thread.summary ?? ""),
-          preserveExistingThreadCopy
-            ? existingThread.status
-            : (thread.status ?? "active"),
           Date.now(),
         );
       for (const claim of thread.claims) {
@@ -702,7 +698,7 @@ async function createPendingPacket(
       revisionId: "string",
       gitFingerprint: "string",
       threads:
-        "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, title, description?, before?, after?, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }> }> }>",
+        "Array<{ id, title, summary?, claims: Array<{ id, threadId, title, description?, before?, after?, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }> }> }>",
     },
     rules: [
       "Group related claims into area threads. Treat each thread as one review area with a short area title, not as a single diff line or file.",
@@ -1251,10 +1247,10 @@ async function handleCommentRequest(
 function buildReviewData(db: Database, session: SessionRow, git: GitState) {
   const threads = db
     .query<
-      { id: string; title: string; summary: string; status: string },
+      { id: string; title: string; summary: string },
       [string]
     >(
-      "select id, title, summary, status from change_threads where sessionId = ? order by updatedAt desc",
+      "select id, title, summary from change_threads where sessionId = ? order by updatedAt desc",
     )
     .all(session.id)
     .map((thread) => ({
@@ -1353,7 +1349,6 @@ function migrate(db: Database) {
       sessionId text not null,
       title text not null,
       summary text not null,
-      status text not null,
       updatedAt integer not null
     );
     create table if not exists claims (
@@ -1405,6 +1400,7 @@ function migrate(db: Database) {
   migrateClaimsDropLegacyTextColumn(db);
   dropColumnIfExists(db, "claim_evidences", "beforeText");
   dropColumnIfExists(db, "claim_evidences", "afterText");
+  dropColumnIfExists(db, "change_threads", "status");
   migrateSessionsToBranchScope(db);
   scopeReviewIds(db);
 }

@@ -1065,7 +1065,6 @@ function hardcodedAgentResult(packet: {
         title: "Workspace validation",
         summary:
           "Project creation now rejects missing users before creating data.",
-        status: "active",
         claims: [
           {
             id: "claim_auth_before_create",
@@ -1123,7 +1122,6 @@ function sandboxAgentResult(
         summary:
           overrides.authThreadSummary ??
           "Project creation rejects missing users before creating data.",
-        status: "active",
         claims: [
           {
             id: "claim_sandbox_auth_required",
@@ -1160,7 +1158,6 @@ function sandboxAgentResult(
           workspaceStatus === "new"
             ? "Workspace validation rejects missing names."
             : "Workspace validation now exposes a validation version marker.",
-        status: "active",
         claims: [
           {
             id: "claim_sandbox_workspace_required",
