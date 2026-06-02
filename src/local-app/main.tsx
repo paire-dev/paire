@@ -24,6 +24,7 @@ import {
   ArrowRightFromLine,
   Bot,
   Check,
+  ChevronRight,
   FileCode,
   Files,
   FolderTree,
@@ -125,7 +126,7 @@ const queryClient = new QueryClient({
   },
 });
 
-const pageClassName = "mx-auto w-full max-w-[1600px] px-3 pt-5 sm:px-5 sm:pt-6";
+const pageClassName = "mx-auto w-full px-3 pt-5 sm:px-5 sm:pt-6";
 const desktopPageClassName = cn(
   pageClassName,
   "flex h-dvh max-h-dvh flex-col overflow-hidden",
@@ -276,8 +277,9 @@ function ReviewScreen() {
   const reviewPanel = (
     <ReviewScrollPanel
       filterBar={filterBar}
-      sidebarCollapsible={isDesktopLayout}
+      sidebarCollapsible={!codePanelOpen}
     >
+      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
       {reviewContent}
     </ReviewScrollPanel>
   );
@@ -307,8 +309,6 @@ function ReviewScreen() {
         </div>
       </header>
 
-      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
-
       {isDesktopLayout ? (
         <div className="flex min-h-0 flex-1 flex-col">
           {codePanelOpen ? (
@@ -318,8 +318,7 @@ function ReviewScreen() {
             >
               <ResizablePanel
                 className="flex min-h-0 min-w-0 flex-col mr-4"
-                defaultSize="72%"
-                minSize="55%"
+                defaultSize="50%"
               >
                 {reviewPanel}
               </ResizablePanel>
@@ -328,7 +327,6 @@ function ReviewScreen() {
                 className="flex min-h-0 flex-col"
                 defaultSize="50%"
                 minSize="30%"
-                maxSize="70%"
               >
                 <ReviewCodePanel
                   codeViewRef={codeViewRef}
@@ -894,11 +892,11 @@ function ThreadGroup({
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <section className="flex flex-col gap-0">
+    <section className="flex flex-col gap-1">
       <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-muted/95 backdrop-blur-sm supports-backdrop-filter:bg-muted/80">
         <div className="min-w-0">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <h2 className="text-xl font-semibold leading-snug">
+            <h2 className="text-3xl font-light leading-snug">
               <AiText source={thread.title || "Behavior"} inline />
             </h2>
             <div className="flex flex-wrap gap-2">
@@ -954,7 +952,7 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
 
   return (
     <time
-      className="whitespace-nowrap text-sm leading-none text-muted-foreground"
+      className="whitespace-nowrap text-xs leading-none text-muted-foreground"
       dateTime={new Date(updatedAt).toISOString()}
     >
       {formatDistanceToNow(updatedAt, { addSuffix: true })}
@@ -1075,10 +1073,10 @@ function EvidenceFilePathLabel({
 
   return (
     <span className="inline-flex items-baseline truncate font-light text-xs">
-      <span className="inline-block max-w-30 truncate">{directory}</span>
-      <span className="inline-block font-medium">{fileName}</span>
-      <span className="inline-block">
-        :{startLine}-{endLine}
+      {/* <span className="inline-block max-w-30 truncate">{directory}</span> */}
+      <span className="inline-block font-medium">{fileName}:</span>
+      <span className="inline-block min-w-10 text-left">
+        {startLine}-{endLine}
       </span>
     </span>
   );
@@ -1091,29 +1089,26 @@ function EvidenceBlock({
   evidence: Evidence;
   onSelect: (evidence: Evidence) => void;
 }) {
-  return (
-    <div className="flex flex-col gap-3 w-full">
-      {evidence.change ? (
-        <p className="flex gap-1 text-md leading-relaxed text-foreground w-full before:content-['•'] before:mr-1 -ml-2 before:text-muted-foreground">
-          <AiText source={evidence.change} inline />
+  return evidence.change ? (
+    // <div className="flex gap-1 text-sm leading-relaxed text-foreground w-full before:content-['•'] before:mr-1 -ml-2 before:text-muted-foreground items-center">
 
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto text-muted-foreground"
-            onClick={() => onSelect(evidence)}
-          >
-            <FileCode data-icon="inline-start" />
-            <EvidenceFilePathLabel
-              filePath={evidence.filePath}
-              startLine={evidence.startLine}
-              endLine={evidence.endLine}
-            />
-          </Button>
-        </p>
-      ) : null}
-    </div>
-  );
+    <Button
+      variant="ghost"
+      size="sm"
+      className="w-full font-normal text-muted-foreground text-sm justify-start bg-muted/30"
+      onClick={() => onSelect(evidence)}
+    >
+      <AiText source={evidence.change} inline />
+      {/* <FileCode data-icon="inline-start" />
+        <EvidenceFilePathLabel
+          filePath={evidence.filePath}
+          startLine={evidence.startLine}
+          endLine={evidence.endLine}
+        /> */}
+      <ChevronRight className="size-4 ml-auto text-muted-foreground" />
+    </Button>
+  ) : // </div>
+  null;
 }
 
 function InfoPanel({
@@ -1126,7 +1121,7 @@ function InfoPanel({
   text: string;
 }) {
   return (
-    <div className="rounded-lg bg-muted/30 p-4">
+    <div className="rounded-lg border border-border p-4">
       <div className="text-sm leading-relaxed text-muted-foreground">
         <span
           aria-hidden="true"
@@ -1147,13 +1142,15 @@ function InfoPanel({
 function AiText({
   source,
   inline = false,
+  className,
 }: {
   source: string;
   inline?: boolean;
+  className?: string;
 }) {
   return (
     <Streamdown
-      className={cn(proseClassName, inline && "inline [&>*]:inline")}
+      className={cn(proseClassName, inline && "inline *:inline", className)}
       parseIncompleteMarkdown={false}
     >
       {source}
