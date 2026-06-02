@@ -522,9 +522,15 @@ function CopyAgentPromptButton({ text }: { text: string }) {
       onClick={() => void copy()}
     >
       {copied ? (
-        <Check className="size-3.5" aria-hidden />
+        <>
+          <Check className="size-3.5" aria-hidden />
+          <span>Copied</span>
+        </>
       ) : (
-        <Bot className="size-3.5" aria-hidden />
+        <>
+          <Bot className="size-3.5" aria-hidden />
+          <span>Copy agent prompt</span>
+        </>
       )}
     </Button>
   );
