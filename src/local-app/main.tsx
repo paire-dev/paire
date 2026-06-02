@@ -317,7 +317,7 @@ function ReviewScreen() {
               className="min-h-0 flex-1 gap-0"
             >
               <ResizablePanel
-                className="flex min-h-0 min-w-0 flex-col"
+                className="flex min-h-0 min-w-0 flex-col mr-4"
                 defaultSize="72%"
                 minSize="55%"
               >
@@ -996,7 +996,7 @@ function ClaimCard({
         <ClaimDeltaPanels before={claim.before} after={claim.after} />
 
         {claim.evidences.length > 0 ? (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
             {claim.evidences.map((evidence, index) => (
               <EvidenceBlock
                 key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
@@ -1064,6 +1064,27 @@ function ClaimDeltaPanels({
   );
 }
 
+function EvidenceFilePathLabel({
+  filePath,
+  startLine,
+  endLine,
+}: Pick<Evidence, "filePath" | "startLine" | "endLine">) {
+  const lastSlash = filePath.lastIndexOf("/");
+  const directory =
+    lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : "/";
+  const fileName = lastSlash >= 0 ? filePath.slice(lastSlash + 1) : filePath;
+
+  return (
+    <span className="inline-flex items-baseline truncate font-light text-xs">
+      <span className="inline-block max-w-30 truncate">{directory}</span>
+      <span className="inline-block font-medium">{fileName}</span>
+      <span className="inline-block">
+        :{startLine}-{endLine}
+      </span>
+    </span>
+  );
+}
+
 function EvidenceBlock({
   evidence,
   onSelect,
@@ -1072,17 +1093,23 @@ function EvidenceBlock({
   onSelect: (evidence: Evidence) => void;
 }) {
   return (
-
-    <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0 w-full">
+    <div className="flex flex-col gap-3 pt-4 first:pt-0 w-full">
       {evidence.change ? (
         <p className="flex gap-2 text-md leading-relaxed text-muted-foreground w-full">
           <AiText source={evidence.change} inline />
 
-          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => onSelect(evidence)}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto"
+            onClick={() => onSelect(evidence)}
+          >
             <FileCode data-icon="inline-start" />
-            <span className="truncate text-xs">
-              {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
-            </span>
+            <EvidenceFilePathLabel
+              filePath={evidence.filePath}
+              startLine={evidence.startLine}
+              endLine={evidence.endLine}
+            />
           </Button>
         </p>
       ) : null}
@@ -1100,7 +1127,7 @@ function InfoPanel({
   text: string;
 }) {
   return (
-    <div className="min-h-22 rounded-lg bg-muted p-4">
+    <div className="rounded-lg bg-muted/30 p-4">
       <div className="text-sm leading-relaxed text-muted-foreground">
         <span
           aria-hidden="true"
@@ -1221,9 +1248,7 @@ function ReviewCodePanel({
           size="icon"
           variant="ghost"
           className="size-8"
-          aria-label={
-            fileTreeOpen ? "Collapse file tree" : "Expand file tree"
-          }
+          aria-label={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
           title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
           onClick={() => setFileTreeOpen((value) => !value)}
         >
@@ -1440,5 +1465,3 @@ function ClaimActions({ claim }: { claim: Claim }) {
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
-
-
