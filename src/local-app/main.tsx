@@ -185,7 +185,7 @@ function ReviewScreen() {
     React.useState<FilterValue>("all");
   const [humanStatusFilter, setHumanStatusFilter] =
     React.useState<FilterValue>("all");
-  const [codePanelOpen, setCodePanelOpen] = React.useState(true);
+  const [codePanelOpen, setCodePanelOpen] = React.useState(false);
   const [selectedEvidence, setSelectedEvidence] =
     React.useState<EvidenceSelection | null>(null);
   const codeViewRef = React.useRef<CodeViewHandle<undefined>>(null);
@@ -394,7 +394,7 @@ function ReviewScrollPanel({
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
         <div
           className={cn(
-            "w-full max-w-4xl",
+            "w-full max-w-3xl",
             sidebarCollapsible ? "mx-auto" : "mr-auto",
           )}
         >
@@ -973,7 +973,7 @@ function ClaimCard({
 }) {
   return (
     <Card>
-      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
         <CardTitle className="flex text-xl font-medium leading-snug">
           <span className="text-muted-foreground">{index + 1}.&nbsp;</span>
           <AiText source={claim.title} />
@@ -986,7 +986,7 @@ function ClaimCard({
         </CardAction>
       </CardHeader>
 
-      <CardContent className="flex flex-col gap-4">
+      <CardContent className="flex flex-col gap-8 px-6">
         {claim.description ? (
           <CardDescription className="text-base leading-relaxed">
             <AiText source={claim.description} />
@@ -1008,7 +1008,7 @@ function ClaimCard({
         ) : null}
       </CardContent>
 
-      <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
+      <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center px-6">
         <code className="font-mono text-sm text-muted-foreground">
           {claim.evidences.length === 0
             ? "No evidence span"
@@ -1070,8 +1070,7 @@ function EvidenceFilePathLabel({
   endLine,
 }: Pick<Evidence, "filePath" | "startLine" | "endLine">) {
   const lastSlash = filePath.lastIndexOf("/");
-  const directory =
-    lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : "/";
+  const directory = lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : "/";
   const fileName = lastSlash >= 0 ? filePath.slice(lastSlash + 1) : filePath;
 
   return (
@@ -1093,15 +1092,15 @@ function EvidenceBlock({
   onSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <div className="flex flex-col gap-3 pt-4 first:pt-0 w-full">
+    <div className="flex flex-col gap-3 w-full">
       {evidence.change ? (
-        <p className="flex gap-2 text-md leading-relaxed text-muted-foreground w-full">
+        <p className="flex gap-1 text-md leading-relaxed text-foreground w-full before:content-['•'] before:mr-1 -ml-2 before:text-muted-foreground">
           <AiText source={evidence.change} inline />
 
           <Button
             variant="ghost"
             size="sm"
-            className="ml-auto"
+            className="ml-auto text-muted-foreground"
             onClick={() => onSelect(evidence)}
           >
             <FileCode data-icon="inline-start" />
@@ -1274,7 +1273,7 @@ function ReviewCodePanel({
           ) : (
             <CodeView
               ref={codeViewRef}
-              className="h-full min-h-0 overflow-y-auto overscroll-contain [&_code]:font-mono [&_pre]:font-mono"
+              className="h-full min-h-0 overflow-y-auto overscroll-contain [&_code]:font-mono [&_pre]:font-mono bg-muted"
               items={items}
               selectedLines={selectedEvidence}
               onSelectedLinesChange={onSelectedEvidenceChange}
