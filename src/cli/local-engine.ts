@@ -12,6 +12,10 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import {
+  formatInstallResult,
+  installAgentInstructions,
+} from "./install-agent-instructions";
 import reviewApp from "../local-app/index.html";
 
 export type CliOptions = {
@@ -203,6 +207,9 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
       case "sync":
         await syncCommand(ctx);
         return 0;
+      case "install":
+        installCommand(ctx);
+        return 0;
       case "_review-serve": {
         const sessionId = rest[0];
         if (!sessionId) throw new Error("Missing session id.");
@@ -366,6 +373,12 @@ async function reviewCommand(args: string[], ctx: Context) {
       packet,
     }),
   );
+}
+
+function installCommand(ctx: Context) {
+  const git = getGitState(ctx.cwd);
+  const result = installAgentInstructions(git.repoRoot);
+  ctx.stdout(formatInstallResult(result));
 }
 
 async function itCommand(args: string[], ctx: Context) {
@@ -2014,5 +2027,6 @@ function helpText() {
     "  status",
     "  sync",
     "  reset",
+    "  install",
   ].join("\n");
 }

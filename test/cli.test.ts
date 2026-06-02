@@ -822,6 +822,41 @@ test("oversized lockfile diffs are summarized with safe inspection commands", ()
   expect(JSON.stringify(packet.touchedSnippets)).not.toContain("package-499");
 });
 
+test("paire install appends agent instructions to AGENTS.md and CLAUDE.md", () => {
+  const fixture = createFixtureRepo();
+  const agentsPath = join(fixture.repo, "AGENTS.md");
+  const claudePath = join(fixture.repo, "CLAUDE.md");
+  writeFileSync(agentsPath, "# Agent rules\n");
+  writeFileSync(claudePath, "---\ndescription: test\n---\n\n# Claude\n");
+
+  const first = runPaire(fixture, ["install"]);
+  expect(first.exitCode).toBe(0);
+  expect(first.stdout).toContain("Updated: AGENTS.md, CLAUDE.md");
+
+  const agents = readFileSync(agentsPath, "utf8");
+  const claude = readFileSync(claudePath, "utf8");
+  expect(agents).toContain("<!-- paire -->");
+  expect(agents).toContain("When you **git push**, run `paire it`");
+  expect(agents).toContain("paire review --apply");
+  expect(claude).toContain("<!-- paire -->");
+  expect(claude).toContain("When you **git push**, run `paire it`");
+
+  const second = runPaire(fixture, ["install"]);
+  expect(second.exitCode).toBe(0);
+  expect(second.stdout).toContain("Already installed: AGENTS.md, CLAUDE.md");
+  expect(readFileSync(agentsPath, "utf8")).toBe(agents);
+});
+
+test("paire install skips missing agent instruction files", () => {
+  const fixture = createFixtureRepo();
+  writeFileSync(join(fixture.repo, "AGENTS.md"), "# Agent rules\n");
+
+  const result = runPaire(fixture, ["install"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("Updated: AGENTS.md");
+  expect(result.stdout).toContain("Not found (skipped): CLAUDE.md");
+});
+
 test("it aliases review and status/sync avoid push or commit suggestions", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
