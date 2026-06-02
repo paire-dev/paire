@@ -364,7 +364,7 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
   }
 });
 
-test("dirty worktree asks for committed changes instead of creating a packet", () => {
+test("dirty worktree opens review UI with committed-state warning", () => {
   const fixture = createFixtureRepo();
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
 
@@ -375,7 +375,13 @@ test("dirty worktree asks for committed changes instead of creating a packet", (
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
   expect(review.stdout).toContain("Paire reviews committed code only");
-  expect(existsSync(fixture.browserCapture)).toBe(false);
+  expect(review.stdout).toContain("Open this URL in the browser:");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
+    "http://127.0.0.1:",
+  );
+  expect(readFileSync(fixture.htmlCapture, "utf8")).toContain(
+    'src="./main.tsx"',
+  );
 });
 
 test("sessions are scoped to the current git branch", () => {

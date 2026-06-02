@@ -51,7 +51,7 @@ paire start --base main --goal "Review current changes"
 paire review
 ```
 
-Paire reviews committed code only. If the worktree is dirty, `paire review` prints `PAIRE_NEEDS_COMMITTED_CHANGES` and does not create a packet or open the browser. Commit or discard the worktree changes, then run `paire review` again.
+Paire reviews committed code only. If the worktree is dirty, `paire review` prints `PAIRE_NEEDS_COMMITTED_CHANGES`, does not create a packet from dirty files, and opens the existing review UI with a warning that it is not showing the latest worktree changes. Commit or discard the worktree changes, then run `paire review` again.
 
 If `HEAD` changed since the last applied Paire revision and the worktree is clean, `paire review` prints:
 

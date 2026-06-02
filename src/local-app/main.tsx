@@ -10,6 +10,7 @@ import {
 import {
   ArrowLeftFromLine,
   ArrowRightFromLine,
+  AlertTriangle,
   Check,
   MessageSquare,
   Monitor,
@@ -23,6 +24,11 @@ import { Streamdown } from "streamdown";
 
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "./components/ui/alert";
 import {
   Card,
   CardAction,
@@ -74,7 +80,7 @@ type Thread = {
 
 type ReviewData = {
   session: { goal: string | null; projectKey: string };
-  git: { branch: string; head: string; clean: boolean };
+  git: { branch: string; head: string; clean: boolean; status: string };
   burden: string;
   generatedAt: number;
   threads: Thread[];
@@ -171,6 +177,8 @@ function ReviewScreen() {
         </div>
       </header>
 
+      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
+
       <FilterBar
         agentStatus={agentStatusFilter}
         humanStatus={humanStatusFilter}
@@ -193,6 +201,19 @@ function ReviewScreen() {
         )}
       </section>
     </main>
+  );
+}
+
+function DirtyWorktreeAlert() {
+  return (
+    <Alert className="mb-4 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+      <AlertTriangle />
+      <AlertTitle>These are not the latest changes.</AlertTitle>
+      <AlertDescription className="text-amber-900 dark:text-amber-200">
+        Commit your worktree changes, then run <code>paire review</code> again
+        to review the latest committed code.
+      </AlertDescription>
+    </Alert>
   );
 }
 

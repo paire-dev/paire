@@ -345,6 +345,7 @@ async function reviewCommand(args: string[], ctx: Context) {
   }
   if (!git.clean) {
     ctx.stdout(dirtyWorktreeMessage(git));
+    await openReviewUi(ctx, session, git);
     return;
   }
   const lastApplied = getLastAppliedRevision(ctx.db, session.id);
@@ -841,7 +842,8 @@ function dirtyWorktreeMessage(git: GitState) {
     "PAIRE_NEEDS_COMMITTED_CHANGES",
     "",
     "Paire reviews committed code only.",
-    "The current worktree has uncommitted changes, so Paire will not create a review packet or open a stale review.",
+    "The current worktree has uncommitted changes, so Paire will not create a review packet from dirty files.",
+    "Opening the existing review UI. It shows committed review state, not the latest worktree changes.",
     "",
     `Current branch: ${git.branch}`,
     `Current HEAD: ${git.head}`,
