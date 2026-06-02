@@ -1,88 +1,51 @@
 # Paire CLI
 
-Private Bun CLI for local, LLM-free review state that coding agents can drive.
+Local, LLM-free review state for coding agents. Paire detects Git changes between commits, exports review packets, and hosts a browser UI. Agents read the packet, write review JSON, and apply it with `paire review --apply`.
 
-Paire does not call a model. A coding agent commits code, runs `paire review`, reads the packet Paire creates, writes structured review JSON, and applies it with `paire review --apply`. Paire owns Git diff detection between commits, stale-state prevention, local review memory, and the local browser review UI.
+**Requirements:** Git. The release binary needs no Bun.
 
-## Requirements
-
-- Bun
-- Git
-
-The compiled binary is enough for end users. Bun is only required for development, tests, and builds.
-
-## Development
-
-Install dependencies:
+## Install
 
 ```sh
-bun install
+curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh | bash
 ```
 
-Run from source:
+Inspect first, then run:
 
 ```sh
-bun src/cli.ts --help
-bun src/cli.ts start --base main --goal "Review current changes"
-bun src/cli.ts review
+curl -fsSLo /tmp/paire-install.sh \
+  https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh
+less /tmp/paire-install.sh
+bash /tmp/paire-install.sh
 ```
 
-Run checks:
+Installs to `~/.local/bin/paire` by default. Pin a version or change the target:
 
 ```sh
-bun run typecheck
-bun test
+curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh |
+  PAIRE_VERSION=v0.1.0 PAIRE_INSTALL_DIR="$HOME/bin" bash
 ```
-
-Run an inspectable real CLI smoke sandbox:
-
-```sh
-bun run smoke
-```
-
-The smoke script creates a temporary Git repo, runs real Paire commands, applies hardcoded agent JSON, and prints the sandbox paths for manual inspection.
 
 ## Usage
 
-Inside a Git repo:
+In a Git repo:
 
 ```sh
 paire start --base main --goal "Review current changes"
 paire review
 ```
 
-Paire reviews committed code only. If the worktree is dirty, `paire review` prints `PAIRE_NEEDS_COMMITTED_CHANGES`, does not create a packet from dirty files, and opens the existing review UI with a warning that it is not showing the latest worktree changes. Commit the worktree changes, then run `paire review` again.
+Paire reviews **committed** code only. With a dirty worktree, `paire review` prints `PAIRE_NEEDS_COMMITTED_CHANGES` and does not build a packet from uncommitted files. Commit, then run `paire review` again.
 
-If `HEAD` changed since the last applied Paire revision and the worktree is clean, `paire review` prints:
-
-```txt
-Action required
-
-Paire detected changes since revision <id>.
-Analyze the current canonical packet exported at:
-<absolute packet path>
-
-Packet preview:
-{
-  "packetId": "...",
-  ...
-}
-
-Then write the review update JSON and run:
-paire review --apply <absolute result path>
-```
-
-The packet JSON is canonical in SQLite. The exported packet path is a stable per-project read handle for the current pending packet, not historical packet storage. `paire review` also prints a generous inline preview and truncates it with a message when the packet is large.
-
-The coding agent should read the current exported packet or use the inline preview, write the result JSON, then run:
+When `HEAD` moved since the last applied revision, `paire review` prints **Action required**: read the exported packet (path printed), write review JSON, then:
 
 ```sh
 paire review --apply /path/to/agent-result.json
 ```
 
-When the applied review matches the current `HEAD`, `paire review` opens the browser UI at `127.0.0.1`.
+When the applied review matches `HEAD`, the browser UI opens at `127.0.0.1`.
 
-Commands:
+**Commands**
 
 ```txt
 paire start
@@ -98,9 +61,7 @@ paire review --apply <file>
 paire review --stdin
 ```
 
-## Local State
-
-Default locations:
+**State** (override with `PAIRE_HOME`):
 
 ```txt
 ~/.paire/paire.db
@@ -108,134 +69,41 @@ Default locations:
 ~/.paire/projects/<project-key>/current-packet.json
 ```
 
-Use `PAIRE_HOME` to isolate state:
+Sessions are per Git branch. `paire start` reuses or creates the branch session; `paire it` does the same before reviewing. `paire reset` clears branch state and re-baselines to `baseCommit`. State is keyed by remote (`github/<owner>/<repo>/…`) or local folder name plus a repo-root hash.
+
+---
+
+## Development
+
+Requires [Bun](https://bun.sh).
 
 ```sh
-PAIRE_HOME="$(mktemp -d)" paire start --base main
+bun install
+bun src/cli.ts --help
+bun run typecheck && bun test
+bun run smoke   # temp repo + real CLI smoke
 ```
 
-Paire does not write review state into the target repository by default. Paire revisions are tied to commit SHAs, so it does not snapshot dirty worktree files.
-
-Sessions are scoped to the current Git branch. Running `paire start` on a branch reuses that branch's existing session when one exists, or creates one when it does not. `paire it` also creates the current branch session when needed before reviewing. Use `paire reset` to clear the current branch's review state and re-baseline the applied revision to `baseCommit`, so the next `paire review` covers all branch changes since the merge-base again.
-
-Project state is isolated by a project key. GitHub remotes use:
-
-```txt
-github/<owner>/<repo>/<repo-root-hash>
-```
-
-Local repos without a GitHub remote use:
-
-```txt
-local/<folder-name>/<repo-root-hash>
-```
-
-The hash suffix avoids collisions between multiple local clones of the same repository.
-
-## Build
-
-Build the development binary for the current machine:
+**Build**
 
 ```sh
-bun run build
-./dist/paire --help
+bun run build              # ./dist/paire
+bun run release:local      # dist/releases/paire-${OS}-${ARCH} + SHA256SUMS
 ```
 
-Build a release asset for the current machine:
+**Releases**
+
+Tag to publish all four binaries (`darwin`/`linux` × `arm64`/`x64`):
 
 ```sh
-bun run release:local
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
-This writes:
-
-```txt
-dist/releases/paire-${OS}-${ARCH}
-dist/releases/SHA256SUMS
-```
-
-The release script derives `OS` and `ARCH` from trusted system commands and fixed mappings:
-
-```sh
-OS="$(uname -s)"      # Darwin -> darwin, Linux -> linux
-ARCH="$(uname -m)"    # x86_64/amd64 -> x64, arm64/aarch64 -> arm64
-```
-
-Unsupported values fail closed. The script never evaluates detected values as shell code.
-
-## Releases
-
-GitHub Actions builds all four release binaries (`paire-darwin-arm64`, `paire-darwin-x64`, `paire-linux-arm64`, `paire-linux-x64`) on native runners, merges `SHA256SUMS`, and publishes a GitHub release when you push a version tag:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-`workflow_dispatch` on the **Release** workflow runs the same builds without publishing (useful to verify CI). Pushes to `main` run **CI** (typecheck, tests, and a linux-x64 build).
-
-## Install
-
-```sh
-curl -fsSLo /tmp/paire-install.sh \
-  https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh
-less /tmp/paire-install.sh
-bash /tmp/paire-install.sh
-```
-
-Or pipe directly:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh | bash
-```
-
-The installer:
-
-- detects `OS-ARCH` from `uname`
-- downloads `paire-${OS}-${ARCH}` from the release
-- downloads `SHA256SUMS`
-- verifies the binary checksum before installing
-- installs to `~/.local/bin/paire` by default
-
-Pin a version or install elsewhere:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh |
-  PAIRE_VERSION=v0.1.0 PAIRE_INSTALL_DIR="$HOME/bin" bash
-```
-
-For local release testing:
+CI runs on `main`; **Release** workflow can be triggered manually without publishing. Local install smoke:
 
 ```sh
 bun run release:local
 PAIRE_BASE_URL="file://$(pwd)/dist/releases" PAIRE_INSTALL_DIR="$(mktemp -d)" bash scripts/install.sh
 ```
 
-## Release Assets
-
-The installer expects these asset names:
-
-```txt
-paire-darwin-arm64
-paire-darwin-x64
-paire-linux-arm64
-paire-linux-x64
-SHA256SUMS
-```
-
-Secure `OS-ARCH` generation steps:
-
-1. Detect OS with `uname -s`.
-2. Map only known values: `Darwin -> darwin`, `Linux -> linux`.
-3. Detect architecture with `uname -m`.
-4. Map only known values: `x86_64|amd64 -> x64`, `arm64|aarch64 -> arm64`.
-5. Reject anything else.
-6. Build the asset name as `paire-${OS}-${ARCH}` after mapping.
-7. Generate checksums from final files:
-
-```sh
-cd dist/releases
-shasum -a 256 paire-* > SHA256SUMS
-```
-
-Build each platform on a matching OS/architecture runner. Do not hand-rename binaries across platforms.
+Release assets: `paire-darwin-arm64`, `paire-darwin-x64`, `paire-linux-arm64`, `paire-linux-x64`, and `SHA256SUMS`. Build each platform on a matching runner; map `uname` to `darwin`/`linux` and `x64`/`arm64` only (unsupported values fail closed).
