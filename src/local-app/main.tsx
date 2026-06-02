@@ -1066,18 +1066,16 @@ function ClaimCard({
             <ClaimDeltaPanels before={claim.before} after={claim.after} />
 
             {claim.evidences.length > 0 ? (
-              <TooltipProvider delay={700}>
-                <div className="flex flex-col gap-2">
-                  {claim.evidences.map((evidence, index) => (
-                    <EvidenceBlock
-                      key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
-                      evidence={evidence}
-                      selected={isEvidenceSelected(evidence)}
-                      onSelect={onEvidenceSelect}
-                    />
-                  ))}
-                </div>
-              </TooltipProvider>
+              <div className="flex flex-col gap-2">
+                {claim.evidences.map((evidence, index) => (
+                  <EvidenceBlock
+                    key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
+                    evidence={evidence}
+                    selected={isEvidenceSelected(evidence)}
+                    onSelect={onEvidenceSelect}
+                  />
+                ))}
+              </div>
             ) : null}
           </CardContent>
         </div>
@@ -1280,6 +1278,7 @@ function DiffViewControls({
       <ButtonGroup>
         <Tooltip>
           <TooltipTrigger
+            delay={0}
             render={
               <Toggle
                 variant="outline"
@@ -1302,6 +1301,7 @@ function DiffViewControls({
         </Tooltip>
         <Tooltip>
           <TooltipTrigger
+            delay={0}
             render={
               <Toggle
                 variant="outline"
@@ -1322,12 +1322,12 @@ function DiffViewControls({
         </Tooltip>
       </ButtonGroup>
       <ToggleGroup
-        type="single"
         variant="outline"
         size="sm"
         spacing={0}
-        value={diffStyle}
-        onValueChange={(value) => {
+        value={[diffStyle]}
+        onValueChange={(values) => {
+          const value = values[0];
           if (value === "split" || value === "unified") {
             onDiffStyleChange(value);
           }

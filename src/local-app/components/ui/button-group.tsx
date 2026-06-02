@@ -1,6 +1,7 @@
-import * as React from "react";
+import { mergeProps } from "@base-ui/react/merge-props";
+import { useRender } from "@base-ui/react/use-render";
 import { cva, type VariantProps } from "class-variance-authority";
-import { Slot } from "radix-ui";
+import * as React from "react";
 
 import { cn } from "../../lib/utils";
 import { Separator } from "./separator";
@@ -40,22 +41,25 @@ function ButtonGroup({
 
 function ButtonGroupText({
   className,
-  asChild = false,
+  render,
   ...props
-}: React.ComponentProps<"div"> & {
-  asChild?: boolean;
-}) {
-  const Comp = asChild ? Slot.Root : "div";
-
-  return (
-    <Comp
-      className={cn(
-        "flex items-center gap-2 rounded-md border bg-muted px-4 text-sm font-medium shadow-xs [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4",
-        className,
-      )}
-      {...props}
-    />
-  );
+}: useRender.ComponentProps<"div">) {
+  return useRender({
+    defaultTagName: "div",
+    props: mergeProps<"div">(
+      {
+        className: cn(
+          "flex items-center gap-2 rounded-md border bg-muted px-4 text-sm font-medium shadow-xs [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4",
+          className,
+        ),
+      },
+      props,
+    ),
+    render,
+    state: {
+      slot: "button-group-text",
+    },
+  });
 }
 
 function ButtonGroupSeparator({
@@ -68,7 +72,7 @@ function ButtonGroupSeparator({
       data-slot="button-group-separator"
       orientation={orientation}
       className={cn(
-        "relative m-0! self-stretch bg-input data-[orientation=vertical]:h-auto",
+        "relative m-0! self-stretch bg-input data-vertical:h-auto",
         className,
       )}
       {...props}

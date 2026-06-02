@@ -120,4 +120,4 @@ When you **git push**, run `paire it` and follow every instruction Paire prints 
 - Do not consider the task done until `paire review --apply` succeeds.
 
 ## UI
-Use shadcn components with Base UI not Radix UI.
+Use shadcn components with Base UI not Radix UI (Never install it).
