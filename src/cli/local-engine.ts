@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 
 import { addedLineRanges, annotateHunkText } from "./diff-line-numbers";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -157,13 +158,30 @@ const LARGE_DIFF_BYTES = 30_000;
 const MAX_INLINE_SNIPPET_CHARS = 4_000;
 const MAX_TOTAL_SNIPPET_CHARS = 18_000;
 const MAX_PACKET_PREVIEW_CHARS = 16_000;
+const MAX_APPLY_PAYLOAD_BYTES = 2_000_000;
+const MAX_THREADS_PER_APPLY = 100;
+const MAX_CLAIMS_PER_THREAD = 200;
+const MAX_EVIDENCES_PER_CLAIM = 50;
+const MAX_ID_CHARS = 160;
+const MAX_TITLE_CHARS = 500;
+const MAX_DESCRIPTION_CHARS = 4_000;
+const MAX_SUMMARY_CHARS = 4_000;
+const MAX_BEHAVIOR_COPY_CHARS = 4_000;
+const MAX_EVIDENCE_CHANGE_CHARS = 1_000;
+const MAX_COMMENT_CHARS = 4_000;
+const MAX_FILE_PATH_CHARS = 1_000;
+const MAX_EVIDENCE_LINE = 1_000_000;
+const MAX_EVIDENCE_SPAN_LINES = 5_000;
 const REVIEW_PORT = 0;
 const REVIEW_SERVER_START_TIMEOUT_MS = 5_000;
+const REVIEW_TOKEN_BYTES = 16;
+const REVIEW_TOKEN_HEADER = "x-paire-review-token";
 
 type ReviewServerState = {
   pid: number;
   port: number;
   url: string;
+  token: string;
   sessionId: string;
   repoRoot: string;
   startedAt: number;
@@ -194,6 +212,9 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         return 0;
       case "reset":
         await resetCommand(ctx);
+        return 0;
+      case "server":
+        await serverCommand(rest, ctx);
         return 0;
       case "status":
         await statusCommand(ctx);
@@ -232,9 +253,13 @@ function makeContext(options: CliOptions) {
     options.stderr ?? ((message: string) => console.error(message));
   const cwd = resolve(options.cwd ?? process.cwd());
   const paireHome = resolve(env.PAIRE_HOME ?? join(homedir(), ".paire"));
-  mkdirSync(paireHome, { recursive: true });
-  mkdirSync(join(paireHome, "artifacts"), { recursive: true });
-  const db = new Database(join(paireHome, "paire.db"));
+  ensurePrivateDirectory(paireHome);
+  ensurePrivateDirectory(join(paireHome, "artifacts"));
+  ensurePrivateDirectory(join(paireHome, "projects"));
+  ensurePrivateDirectory(join(paireHome, "review-servers"));
+  const dbPath = join(paireHome, "paire.db");
+  const db = new Database(dbPath);
+  ensurePrivateFile(dbPath);
   migrate(db);
   return {
     cwd,
@@ -306,7 +331,7 @@ async function startCommand(args: string[], ctx: Context) {
   }
 
   if (!getLastAppliedRevision(ctx.db, sessionId)) {
-    insertAppliedBaselineRevision(ctx.db, sessionId, git.head, now);
+    insertAppliedBaselineRevision(ctx.db, sessionId, baseCommit, now);
   }
 
   ctx.stdout(
@@ -393,6 +418,9 @@ async function applyReviewCommand(
     : await Bun.file(
         resolveRequiredPath(applyPath, "Missing --apply file."),
       ).text();
+  if (raw.length > MAX_APPLY_PAYLOAD_BYTES) {
+    throw new Error("Agent result is too large.");
+  }
   const payload = validateApplyPayload(JSON.parse(raw));
   const session = ctx.db
     .query<SessionRow, [string]>("select * from sessions where id = ?")
@@ -401,7 +429,7 @@ async function applyReviewCommand(
   const git = getGitState(session.repoRoot);
   if (!git.clean) {
     throw new Error(
-      "Paire reviews committed code only. Commit or discard the current worktree changes, then run paire review --apply again.",
+      "Paire reviews committed code only. Commit the current worktree changes, then run paire review --apply again.",
     );
   }
   if (git.fingerprint !== payload.gitFingerprint) {
@@ -583,6 +611,65 @@ async function syncCommand(ctx: Context) {
   );
 }
 
+async function serverCommand(args: string[], ctx: Context) {
+  const [subcommand = "help", ...rest] = args;
+  switch (subcommand) {
+    case "start":
+      await serverStartCommand(rest, ctx);
+      return;
+    case "stop":
+      await serverStopCommand(ctx);
+      return;
+    case "help":
+    case "--help":
+    case "-h":
+      ctx.stdout(serverHelpText());
+      return;
+    default:
+      throw new Error(`Unknown server command: ${subcommand}\n\n${serverHelpText()}`);
+  }
+}
+
+async function serverStartCommand(args: string[], ctx: Context) {
+  const parsed = parseFlags(args);
+  const git = getGitState(ctx.cwd);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
+  if (!session) {
+    ctx.stdout(
+      `No Paire session found for branch ${git.branch}.\nRun:\npaire start --base ${detectBaseRef(git.repoRoot)}`,
+    );
+    return;
+  }
+
+  const state = await ensureReviewServer(ctx, session);
+  if (!parsed.flags.has("no-open")) {
+    await ctx.openBrowser(state.url);
+  }
+  ctx.stdout(reviewUiMessage(state.url));
+}
+
+async function serverStopCommand(ctx: Context) {
+  const git = getGitState(ctx.cwd);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
+  if (!session) {
+    ctx.stdout(
+      `No Paire session found for branch ${git.branch}.\nRun:\npaire start --base ${detectBaseRef(git.repoRoot)}`,
+    );
+    return;
+  }
+
+  const outcome = await stopReviewServerAtPath(reviewServerStatePath(ctx, session.id));
+  if (outcome === "stopped") {
+    ctx.stdout("Stopped the review UI server.");
+    return;
+  }
+  if (outcome === "stale") {
+    ctx.stdout("Review UI server was not running. Removed stale state.");
+    return;
+  }
+  ctx.stdout("No review UI server is running for this branch.");
+}
+
 async function resetCommand(ctx: Context) {
   const git = getGitState(ctx.cwd);
   const session = getSession(ctx.db, git.repoRoot, git.branch);
@@ -762,9 +849,10 @@ async function writeArtifact(
   contents: string,
 ) {
   const directory = join(ctx.artifactsDir, kind);
-  mkdirSync(directory, { recursive: true });
+  ensurePrivateDirectory(directory);
   const path = join(directory, filename);
   await Bun.write(path, contents);
+  ensurePrivateFile(path);
   return path;
 }
 
@@ -794,9 +882,10 @@ async function writeCurrentPacketExport(
   packetJson: string,
 ) {
   const directory = projectExportDirectory(ctx, session);
-  mkdirSync(directory, { recursive: true });
+  ensurePrivateDirectory(directory);
   const path = join(directory, "current-packet.json");
   await Bun.write(path, packetJson);
+  ensurePrivateFile(path);
   return path;
 }
 
@@ -831,7 +920,7 @@ function formatStatus(db: Database, session: SessionRow, git: GitState) {
     `Review burden: ${burden}`,
     git.clean
       ? "Suggested inspection: git diff --stat"
-      : "Review blocked: Paire reviews committed code only. Commit or discard worktree changes before running paire review.",
+      : "Review blocked: Paire reviews committed code only. Commit worktree changes before running paire review.",
   ];
   if (pending?.packetJson) {
     lines.push(
@@ -912,8 +1001,8 @@ function dirtyWorktreeMessage(git: GitState) {
     "",
     "Coding agent workflow — complete every step below in order. Do not skip steps.",
     "",
-    "Step 1 — Commit or discard worktree changes (required)",
-    "Commit or stash your changes, or discard them with git checkout -- .",
+    "Step 1 — Commit worktree changes (required)",
+    "Commit or stash your changes before running Paire.",
     "",
     "Step 2 — Run Paire again (required)",
     "Run: paire it",
@@ -958,20 +1047,33 @@ async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
   }
 
   if (ctx.env.PAIRE_BROWSER_CAPTURE) {
-    const server = createReviewServer(session, ctx);
-    const url = reviewUiUrl(server.port);
+    const token = createReviewToken();
+    const server = createReviewServer(session, ctx, token);
+    const url = reviewUiUrl(server.port, token);
     await ctx.openBrowser(url);
     ctx.stdout(reviewUiMessage(url));
     server.stop();
     return;
   }
 
+  const state = await ensureReviewServer(ctx, session);
+  await ctx.openBrowser(state.url);
+  ctx.stdout(reviewUiMessage(state.url));
+}
+
+async function ensureReviewServer(
+  ctx: Context,
+  session: SessionRow,
+): Promise<ReviewServerState> {
   const statePath = reviewServerStatePath(ctx, session.id);
   const existing = readReviewServerState(statePath);
-  if (existing?.pid && isProcessRunning(existing.pid)) {
-    await ctx.openBrowser(existing.url);
-    ctx.stdout(reviewUiMessage(existing.url));
-    return;
+  if (
+    existing?.pid &&
+    existing.token &&
+    isProcessRunning(existing.pid) &&
+    (await isReviewServerAlive(existing))
+  ) {
+    return existing;
   }
 
   if (existing) {
@@ -987,27 +1089,35 @@ async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
     detached: true,
   }).unref();
 
-  const state = await waitForReviewServerState(statePath);
-  await ctx.openBrowser(state.url);
-  ctx.stdout(reviewUiMessage(state.url));
+  return waitForReviewServerState(statePath);
 }
 
-function createReviewServer(session: SessionRow, ctx: Context) {
+function createReviewServer(session: SessionRow, ctx: Context, token: string) {
   return Bun.serve({
     hostname: "127.0.0.1",
     port: REVIEW_PORT,
     routes: {
       "/": reviewApp,
       "/api/review": (request: Request) =>
-        handleReviewRequest(request, session, ctx),
+        authenticatedReviewRequest(request, token, () =>
+          handleReviewRequest(request, session, ctx),
+        ),
       "/api/review/diff": (request: Request) =>
-        handleReviewDiffRequest(request, session, ctx),
+        authenticatedReviewRequest(request, token, () =>
+          handleReviewDiffRequest(request, session, ctx),
+        ),
       "/api/claims/:claimId/evidence-diff": (request: Request) =>
-        handleEvidenceDiffRequest(request, session, ctx),
+        authenticatedReviewRequest(request, token, () =>
+          handleEvidenceDiffRequest(request, session, ctx),
+        ),
       "/api/claims/:claimId/human-status": (request: Request) =>
-        handleHumanStatusRequest(request, session, ctx),
+        authenticatedReviewRequest(request, token, () =>
+          handleHumanStatusRequest(request, session, ctx),
+        ),
       "/api/claims/:claimId/comment": (request: Request) =>
-        handleCommentRequest(request, session, ctx),
+        authenticatedReviewRequest(request, token, () =>
+          handleCommentRequest(request, session, ctx),
+        ),
     },
   });
 }
@@ -1021,25 +1131,28 @@ async function reviewServeCommand(sessionId: string, ctx: Context) {
   }
 
   const statePath = reviewServerStatePath(ctx, sessionId);
-  mkdirSync(dirname(statePath), { recursive: true });
+  ensurePrivateDirectory(dirname(statePath));
 
-  const server = createReviewServer(session, ctx);
+  const token = createReviewToken();
+  const server = createReviewServer(session, ctx, token);
   const port = server.port;
   if (port == null) {
     throw new Error("Review UI server did not bind to a port.");
   }
-  const url = reviewUiUrl(port);
+  const url = reviewUiUrl(port, token);
   writeFileSync(
     statePath,
     JSON.stringify({
       pid: process.pid,
       port,
       url,
+      token,
       sessionId,
       repoRoot: session.repoRoot,
       startedAt: Date.now(),
     } satisfies ReviewServerState),
   );
+  ensurePrivateFile(statePath);
 
   const shutdown = () => {
     server.stop();
@@ -1063,7 +1176,15 @@ function reviewServerStatePath(ctx: Context, sessionId: string) {
 function readReviewServerState(path: string) {
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as ReviewServerState;
+    const state = JSON.parse(readFileSync(path, "utf8")) as Partial<ReviewServerState>;
+    if (
+      typeof state.pid !== "number" ||
+      typeof state.url !== "string" ||
+      typeof state.token !== "string"
+    ) {
+      return null;
+    }
+    return state as ReviewServerState;
   } catch {
     return null;
   }
@@ -1088,17 +1209,113 @@ function isProcessRunning(pid: number) {
   }
 }
 
-function reviewUiUrl(port: number | undefined) {
+async function isReviewServerAlive(state: Pick<ReviewServerState, "url" | "token">) {
+  try {
+    const response = await fetch(new URL("/api/review", state.url), {
+      headers: { [REVIEW_TOKEN_HEADER]: state.token },
+      signal: AbortSignal.timeout(1_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function stopReviewServerAtPath(
+  statePath: string,
+): Promise<"stopped" | "stale" | "missing"> {
+  if (!existsSync(statePath)) {
+    return "missing";
+  }
+
+  const state = readReviewServerState(statePath);
+  if (!state) {
+    try {
+      unlinkSync(statePath);
+    } catch {
+      // ignore
+    }
+    return "stale";
+  }
+
+  const wasRunning =
+    isProcessRunning(state.pid) && (await isReviewServerAlive(state));
+  if (wasRunning) {
+    try {
+      process.kill(state.pid, "SIGTERM");
+    } catch {
+      // process may have exited between checks
+    }
+
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && isProcessRunning(state.pid)) {
+      await Bun.sleep(50);
+    }
+
+    if (isProcessRunning(state.pid)) {
+      try {
+        process.kill(state.pid, "SIGKILL");
+      } catch {
+        // ignore
+      }
+      const killDeadline = Date.now() + 1_000;
+      while (Date.now() < killDeadline && isProcessRunning(state.pid)) {
+        await Bun.sleep(50);
+      }
+    }
+  }
+
+  if (existsSync(statePath)) {
+    try {
+      unlinkSync(statePath);
+    } catch {
+      // ignore
+    }
+  }
+
+  return wasRunning ? "stopped" : "stale";
+}
+
+function createReviewToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(REVIEW_TOKEN_BYTES));
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+function reviewUiUrl(port: number | undefined, token: string) {
   if (port == null) {
     throw new Error("Review UI server did not bind to a port.");
   }
-  return `http://127.0.0.1:${port}/`;
+  return `http://127.0.0.1:${port}/#token=${encodeURIComponent(token)}`;
 }
 
 function reviewUiMessage(url: string) {
   return [`Review UI: ${url}`, `Open this URL in the browser: ${url}`].join(
     "\n",
   );
+}
+
+function authenticatedReviewRequest(
+  request: Request,
+  token: string,
+  handler: () => Promise<Response> | Response,
+) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "http://127.0.0.1",
+        "Access-Control-Allow-Headers": REVIEW_TOKEN_HEADER,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      },
+    });
+  }
+  if (request.headers.get(REVIEW_TOKEN_HEADER) !== token) {
+    return Response.json({ error: "Unauthorized." }, { status: 401 });
+  }
+  return handler();
 }
 
 async function handleReviewRequest(
@@ -1226,6 +1443,9 @@ async function handleCommentRequest(
   if (typeof payload.note !== "string" || !payload.note.trim()) {
     return Response.json({ error: "Invalid comment." }, { status: 400 });
   }
+  if (payload.note.length > MAX_COMMENT_CHARS) {
+    return Response.json({ error: "Comment is too long." }, { status: 400 });
+  }
   const claim = ctx.db
     .query<{ humanStatus: HumanStatus }, [string, string]>(
       "select humanStatus from claims where id = ? and sessionId = ?",
@@ -1317,6 +1537,23 @@ async function openBrowser(
         ? ["cmd", "/c", "start", url]
         : ["xdg-open", url];
   Bun.spawnSync(command, { stdout: "pipe", stderr: "pipe" });
+}
+
+function ensurePrivateDirectory(path: string) {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(path, 0o700);
+  } catch {
+    // Best effort for non-POSIX filesystems.
+  }
+}
+
+function ensurePrivateFile(path: string) {
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Best effort for non-POSIX filesystems.
+  }
 }
 
 function migrate(db: Database) {
@@ -1655,19 +1892,34 @@ function validateApplyPayload(value: unknown): AgentApplyPayload {
   }
   if (!Array.isArray(payload.threads))
     throw new Error("Agent result threads must be an array.");
+  if (payload.threads.length > MAX_THREADS_PER_APPLY) {
+    throw new Error(`Agent result has too many threads; max ${MAX_THREADS_PER_APPLY}.`);
+  }
   for (const thread of payload.threads) {
-    if (!thread.id || !thread.title || !Array.isArray(thread.claims)) {
+    validatePublicId(thread.id, "Thread id");
+    validateTextField(thread.title, "Thread title", MAX_TITLE_CHARS);
+    if (thread.summary != null) {
+      validateOptionalTextField(thread.summary, "Thread summary", MAX_SUMMARY_CHARS);
+    }
+    if (!Array.isArray(thread.claims)) {
       throw new Error("Each thread needs id, title, and claims.");
     }
+    if (thread.claims.length > MAX_CLAIMS_PER_THREAD) {
+      throw new Error(`Thread has too many claims; max ${MAX_CLAIMS_PER_THREAD}.`);
+    }
     for (const claim of thread.claims) {
-      if (!claim.id || !claim.threadId) {
-        throw new Error("Each claim needs id and threadId.");
-      }
+      validatePublicId(claim.id, "Claim id");
+      validatePublicId(claim.threadId, "Claim threadId");
       if ("text" in claim && (claim as { text?: unknown }).text != null) {
         throw new Error("Claim text is no longer supported; use title and description.");
       }
-      if (!normalizeClaimCopy(claim).title) {
-        throw new Error("Each claim needs title.");
+      validateTextField(claim.title, "Claim title", MAX_TITLE_CHARS);
+      if (claim.description != null) {
+        validateOptionalTextField(
+          claim.description,
+          "Claim description",
+          MAX_DESCRIPTION_CHARS,
+        );
       }
       if (!VALID_AGENT_STATUSES.has(claim.agentStatus))
         throw new Error(`Invalid agentStatus: ${claim.agentStatus}`);
@@ -1676,34 +1928,97 @@ function validateApplyPayload(value: unknown): AgentApplyPayload {
       }
       if (!Array.isArray(claim.evidences))
         throw new Error("Each claim needs evidences[].");
+      if (claim.before != null) {
+        validateOptionalTextField(claim.before, "Claim before", MAX_BEHAVIOR_COPY_CHARS);
+      }
+      if (claim.after != null) {
+        validateOptionalTextField(claim.after, "Claim after", MAX_BEHAVIOR_COPY_CHARS);
+      }
+      if (claim.evidences.length > MAX_EVIDENCES_PER_CLAIM) {
+        throw new Error(
+          `Claim has too many evidences; max ${MAX_EVIDENCES_PER_CLAIM}.`,
+        );
+      }
       for (const evidence of claim.evidences) {
-        if (
-          !evidence.filePath ||
-          !Number.isFinite(evidence.startLine) ||
-          !Number.isFinite(evidence.endLine)
-        ) {
-          throw new Error(
-            "Each evidence needs filePath, startLine, and endLine.",
-          );
-        }
+        validateEvidencePath(evidence.filePath);
+        validateEvidenceRange(evidence.startLine, evidence.endLine);
         if ("before" in evidence || "after" in evidence) {
           throw new Error(
             "Evidence before/after are no longer supported; set claim before/after and evidence change.",
           );
         }
-        if (typeof evidence.change !== "string" || !evidence.change.trim()) {
-          throw new Error("Each evidence needs a non-empty change line.");
-        }
-        if (claim.before != null && typeof claim.before !== "string") {
-          throw new Error("Claim before must be a string when provided.");
-        }
-        if (claim.after != null && typeof claim.after !== "string") {
-          throw new Error("Claim after must be a string when provided.");
-        }
+        validateTextField(
+          evidence.change,
+          "Evidence change",
+          MAX_EVIDENCE_CHANGE_CHARS,
+        );
       }
     }
   }
   return normalizeApplyPayload(payload);
+}
+
+function validatePublicId(value: unknown, label: string) {
+  validateTextField(value, label, MAX_ID_CHARS);
+  if (!/^[a-zA-Z0-9._:-]+$/.test(value as string)) {
+    throw new Error(`${label} contains unsupported characters.`);
+  }
+}
+
+function validateTextField(value: unknown, label: string, maxLength: number) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${label} must be a non-empty string.`);
+  }
+  if (value.length > maxLength) {
+    throw new Error(`${label} is too long; max ${maxLength} characters.`);
+  }
+}
+
+function validateOptionalTextField(
+  value: unknown,
+  label: string,
+  maxLength: number,
+) {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a string when provided.`);
+  }
+  if (value.length > maxLength) {
+    throw new Error(`${label} is too long; max ${maxLength} characters.`);
+  }
+}
+
+function validateEvidencePath(value: unknown) {
+  validateTextField(value, "Evidence filePath", MAX_FILE_PATH_CHARS);
+  const path = value as string;
+  if (
+    path.startsWith("/") ||
+    path.startsWith("\\") ||
+    /^[a-zA-Z]:[\\/]/.test(path) ||
+    path.split(/[\\/]+/).some((part) => part === "..")
+  ) {
+    throw new Error("Evidence filePath must be a relative repository path.");
+  }
+}
+
+function validateEvidenceRange(startLine: unknown, endLine: unknown) {
+  if (
+    typeof startLine !== "number" ||
+    typeof endLine !== "number" ||
+    !Number.isInteger(startLine) ||
+    !Number.isInteger(endLine)
+  ) {
+    throw new Error("Evidence line range is invalid.");
+  }
+  const start = startLine;
+  const end = endLine;
+  if (start < 1 || end < start || end > MAX_EVIDENCE_LINE) {
+    throw new Error("Evidence line range is invalid.");
+  }
+  if (end - start + 1 > MAX_EVIDENCE_SPAN_LINES) {
+    throw new Error(
+      `Evidence line range is too large; max ${MAX_EVIDENCE_SPAN_LINES} lines.`,
+    );
+  }
 }
 
 function normalizeNullableCopy(value: unknown): string | null {
@@ -1823,9 +2138,13 @@ function gitDiffForCurrentState(
   repoRoot: string,
   allowFail = false,
 ) {
-  return gitCommand(["diff", `${gitDiffBaseRef(base)}..HEAD`], repoRoot, {
-    allowFail,
-  });
+  return gitCommand(
+    ["diff", "-w", `${gitDiffBaseRef(base)}..HEAD`],
+    repoRoot,
+    {
+      allowFail,
+    },
+  );
 }
 
 function gitCommand(
@@ -2031,6 +2350,18 @@ function helpText() {
     "  status",
     "  sync",
     "  reset",
+    "  server start [--no-open]",
+    "  server stop",
     "  install",
+  ].join("\n");
+}
+
+function serverHelpText() {
+  return [
+    "Usage: paire server <command>",
+    "",
+    "Commands:",
+    "  start [--no-open]   Start or reuse the review UI server for the current branch",
+    "  stop                Stop the review UI server for the current branch",
   ].join("\n");
 }

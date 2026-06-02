@@ -462,7 +462,9 @@ test("review API returns threads and claims newest first", async () => {
   );
   try {
     const state = await waitForServerState(fixture.home, session!.id);
-    const reviewData = await fetch(`${state.url}api/review`).then((response) =>
+    const unauthenticated = await fetch(reviewApiUrl(state, "/api/review"));
+    expect(unauthenticated.status).toBe(401);
+    const reviewData = await reviewApiFetch(state, "/api/review").then((response) =>
       response.json(),
     );
     expect(reviewData.threads.map((thread: { id: string }) => thread.id)).toEqual([
@@ -527,7 +529,7 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
   );
   try {
     const state = await waitForServerState(fixture.home, session!.id);
-    const reviewResponse = await fetch(`${state.url}api/review`);
+    const reviewResponse = await reviewApiFetch(state, "/api/review");
     expect(reviewResponse.ok).toBe(true);
     const reviewText = await reviewResponse.text();
     expect(reviewText).not.toContain('"diff":"diff --git');
@@ -535,7 +537,7 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
     const evidence = reviewData.threads[0].claims[0].evidences[0];
     expect(evidence.claimId).toBe("claim_auth_before_create");
 
-    const reviewDiffResponse = await fetch(`${state.url}api/review/diff`);
+    const reviewDiffResponse = await reviewApiFetch(state, "/api/review/diff");
     expect(reviewDiffResponse.ok).toBe(true);
     const reviewDiffPayload = await reviewDiffResponse.json();
     expect(reviewDiffPayload.diff).toContain(
@@ -543,8 +545,9 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
     );
     expect(reviewDiffPayload.diff).toContain("throw new Error('Unauthorized')");
 
-    const diffResponse = await fetch(
-      `${state.url}api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
+    const diffResponse = await reviewApiFetch(
+      state,
+      `/api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
     );
     expect(diffResponse.ok).toBe(true);
     const diffPayload = await diffResponse.json();
@@ -739,6 +742,33 @@ test("reset re-baselines review so the next packet covers branch changes since b
   expect(incrementalDiff).toContain("featureFlag");
 });
 
+test("start baselines new sessions at baseCommit so existing branch commits are reviewed", () => {
+  const fixture = createFixtureRepo();
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  writeFileSync(
+    join(fixture.repo, "src/prestart-feature.ts"),
+    "export const prestartFeature = true;\n",
+  );
+  commitAll(fixture.repo, "add prestart feature");
+
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.stdout).toContain("Action required");
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  expect(packet.previousAppliedFingerprint).toBe(packet.baseCommit);
+  expect(
+    packet.changedFiles.some(
+      (file: { path: string }) => file.path === "src/prestart-feature.ts",
+    ),
+  ).toBe(true);
+  expect(readFileSync(packet.incrementalDiffArtifactPath, "utf8")).toContain(
+    "prestartFeature",
+  );
+});
+
 test("committed files that started untracked are included in review packets", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
@@ -863,6 +893,35 @@ test("stale apply is rejected without mutating claims or opening browser", () =>
   expect(apply.exitCode).not.toBe(0);
   expect(apply.stderr).toContain("Stale Paire review update");
   expect(existsSync(fixture.browserCapture)).toBe(false);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const claims = db
+    .query<{ count: number }, []>("select count(*) as count from claims")
+    .get();
+  expect(claims?.count).toBe(0);
+  db.close();
+});
+
+test("apply rejects unsafe evidence paths and leaves review state unchanged", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change value to two");
+
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const result = hardcodedAgentResult(packet);
+  result.threads[0]!.claims[0]!.evidences[0]!.filePath = "../secrets.txt";
+  const resultPath = join(fixture.root, "unsafe-result.json");
+  writeFileSync(resultPath, JSON.stringify(result, null, 2));
+
+  const apply = runPaire(fixture, ["review", "--apply", resultPath]);
+  expect(apply.exitCode).not.toBe(0);
+  expect(apply.stderr).toContain(
+    "Evidence filePath must be a relative repository path",
+  );
 
   const db = new Database(join(fixture.home, "paire.db"));
   const claims = db
@@ -1049,6 +1108,147 @@ test("it aliases review and status/sync avoid push or commit suggestions", () =>
   expect(sync.stdout).not.toContain("git commit");
 });
 
+test("paire server start spawns or reuses the review UI server", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  writeFileSync(fixture.browserCapture, "");
+  const start = runPaire(fixture, ["server", "start"]);
+  expect(start.exitCode).toBe(0);
+  expect(start.stdout).toContain("Review UI:");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain("http://127.0.0.1:");
+
+  const state = await waitForServerState(fixture.home, session!.id);
+  expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
+
+  writeFileSync(fixture.browserCapture, "");
+  const startAgain = runPaire(fixture, ["server", "start"]);
+  expect(startAgain.exitCode).toBe(0);
+  expect(startAgain.stdout).toContain(state.url);
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain(state.url);
+
+  writeFileSync(fixture.browserCapture, "");
+  const startNoOpen = runPaire(fixture, ["server", "start", "--no-open"]);
+  expect(startNoOpen.exitCode).toBe(0);
+  expect(startNoOpen.stdout).toContain(state.url);
+  expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
+
+  const stop = runPaire(fixture, ["server", "stop"]);
+  expect(stop.exitCode).toBe(0);
+  expect(stop.stdout).toContain("Stopped the review UI server.");
+});
+
+test("paire server stop shuts down the review UI server for the current branch", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const server = Bun.spawn(
+    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
+    {
+      cwd: fixture.repo,
+      env: { ...process.env, PAIRE_HOME: fixture.home },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const state = await waitForServerState(fixture.home, session!.id);
+    expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
+
+    const stop = runPaire(fixture, ["server", "stop"]);
+    expect(stop.exitCode).toBe(0);
+    expect(stop.stdout).toContain("Stopped the review UI server.");
+    expect(
+      existsSync(join(fixture.home, "review-servers", `${session!.id}.json`)),
+    ).toBe(false);
+    await server.exited;
+
+    const stopAgain = runPaire(fixture, ["server", "stop"]);
+    expect(stopAgain.exitCode).toBe(0);
+    expect(stopAgain.stdout).toContain("No review UI server is running for this branch.");
+  } finally {
+    if (!server.killed) {
+      server.kill();
+      await server.exited;
+    }
+  }
+});
+
+test("paire server stop removes stale review server state", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const statePath = join(fixture.home, "review-servers", `${session!.id}.json`);
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      pid: 2_147_483_647,
+      port: 59999,
+      url: "http://127.0.0.1:59999/",
+      token: "stale-token",
+      sessionId: session!.id,
+      repoRoot: fixture.repo,
+      startedAt: Date.now(),
+    }),
+  );
+
+  const stop = runPaire(fixture, ["server", "stop"]);
+  expect(stop.exitCode).toBe(0);
+  expect(stop.stdout).toContain("Review UI server was not running. Removed stale state.");
+  expect(existsSync(statePath)).toBe(false);
+});
+
+test("paire server stop does not kill unrelated process when PID was reused", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const sleeper = Bun.spawn(["sleep", "300"], { stdout: "ignore" });
+  try {
+    const statePath = join(fixture.home, "review-servers", `${session!.id}.json`);
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        pid: sleeper.pid,
+        port: 59999,
+        url: "http://127.0.0.1:59999/",
+        token: "stale-token",
+        sessionId: session!.id,
+        repoRoot: fixture.repo,
+        startedAt: Date.now(),
+      }),
+    );
+
+    const stop = runPaire(fixture, ["server", "stop"]);
+    expect(stop.exitCode).toBe(0);
+    expect(stop.stdout).toContain("Review UI server was not running. Removed stale state.");
+    expect(existsSync(statePath)).toBe(false);
+    expect(sleeper.exitCode).toBe(null);
+  } finally {
+    sleeper.kill();
+    await sleeper.exited;
+  }
+});
+
 test("compiled binary spawns review server without script path", async () => {
   const fixture = createFixtureRepo();
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
@@ -1094,7 +1294,7 @@ test("compiled binary spawns review server without script path", async () => {
   expect(session?.id).toBeTruthy();
 
   const state = await waitForServerState(fixture.home, session!.id);
-  const reviewResponse = await fetch(`${state.url}api/review`);
+  const reviewResponse = await reviewApiFetch(state, "/api/review");
   expect(reviewResponse.ok).toBe(true);
 
   if (state.pid) {
@@ -1218,12 +1418,23 @@ async function waitForServerState(home: string, sessionId: string) {
     if (existsSync(path)) {
       return JSON.parse(readFileSync(path, "utf8")) as {
         url: string;
+        token: string;
         pid?: number;
       };
     }
     await Bun.sleep(50);
   }
   throw new Error("Review server did not start.");
+}
+
+function reviewApiUrl(state: { url: string }, path: string) {
+  return new URL(path, state.url).toString();
+}
+
+function reviewApiFetch(state: { url: string; token: string }, path: string) {
+  return fetch(reviewApiUrl(state, path), {
+    headers: { "x-paire-review-token": state.token },
+  });
 }
 
 function hardcodedAgentResult(packet: {

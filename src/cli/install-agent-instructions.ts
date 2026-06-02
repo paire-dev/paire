@@ -10,7 +10,7 @@ export const PAIRE_AGENT_INSTRUCTIONS = [
   "",
   "When you **git push**, run `paire it` and follow every instruction Paire prints until the workflow is complete.",
   "",
-  "- Paire reviews **committed** code only — commit or discard worktree changes before running Paire.",
+  "- Paire reviews **committed** code only — commit worktree changes before running Paire.",
   "- When output shows **Action required**, finish all steps in order: inspect the diff, read the packet, write the review JSON, run `paire review --apply <path>`, and open the Review UI URL when printed.",
   "- Do not consider the task done until `paire review --apply` succeeds.",
   "",

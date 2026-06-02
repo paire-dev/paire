@@ -25,16 +25,20 @@ import {
   Bot,
   Check,
   ChevronRight,
+  Columns2,
   FileCode,
   Files,
   FolderTree,
+  ListOrdered,
   MessageSquare,
   Monitor,
   Moon,
   PanelRightClose,
   PanelRightOpen,
+  Rows2,
   Sun,
   ThumbsUp,
+  WrapText,
 } from "lucide-react";
 import * as React from "react";
 import { createRoot } from "react-dom/client";
@@ -43,6 +47,15 @@ import { Streamdown } from "streamdown";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
+import { ButtonGroup } from "./components/ui/button-group";
+import { Toggle } from "./components/ui/toggle";
+import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "./components/ui/tooltip";
 import {
   Card,
   CardAction,
@@ -140,6 +153,78 @@ const desktopPageClassName = cn(
 const proseClassName =
   "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
 const humanStatusOptions: Array<HumanStatus> = ["unreviewed", "accepted"];
+const REVIEW_TOKEN_STORAGE_KEY = "paire-review-token";
+const LOADING_STATE_DELAY_MS = 250;
+const reviewToken = resolveReviewToken();
+
+function resolveReviewToken() {
+  if (typeof window === "undefined") return "";
+  const urlToken = reviewTokenFromUrl();
+  if (urlToken) {
+    storeReviewToken(urlToken);
+    removeReviewTokenFromHash();
+    return urlToken;
+  }
+  return storedReviewToken();
+}
+
+function reviewTokenFromUrl() {
+  return (
+    new URLSearchParams(
+      window.location.hash.startsWith("#")
+        ? window.location.hash.slice(1)
+        : window.location.search,
+    ).get("token") ?? ""
+  );
+}
+
+function removeReviewTokenFromHash() {
+  if (!window.location.hash.startsWith("#")) return;
+  const hashParams = new URLSearchParams(window.location.hash.slice(1));
+  if (!hashParams.has("token")) return;
+  hashParams.delete("token");
+  const nextUrl = new URL(window.location.href);
+  const nextHash = hashParams.toString();
+  nextUrl.hash = nextHash ? `#${nextHash}` : "";
+  window.history.replaceState(null, "", nextUrl);
+}
+
+function storeReviewToken(token: string) {
+  try {
+    window.localStorage.setItem(REVIEW_TOKEN_STORAGE_KEY, token);
+  } catch {
+    // Storage can be disabled; the in-memory token still works for this page.
+  }
+}
+
+function storedReviewToken() {
+  try {
+    return window.localStorage.getItem(REVIEW_TOKEN_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function reviewApiHeaders(headers: Record<string, string> = {}) {
+  return {
+    ...headers,
+    "x-paire-review-token": reviewToken,
+  };
+}
+
+class ReviewApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+function shouldRetryReviewQuery(failureCount: number, error: unknown) {
+  if (error instanceof ReviewApiError && error.status === 401) return false;
+  return failureCount < 2;
+}
 
 // Returns a HTML DOM node id-friendly string for an Evidence.
 const getEvidenceId = (evidence: Evidence) => {
@@ -160,14 +245,24 @@ const getEvidenceId = (evidence: Evidence) => {
 };
 
 async function fetchReview() {
-  const response = await fetch("/api/review", { cache: "no-store" });
-  if (!response.ok) throw new Error("Failed to load review data.");
+  const response = await fetch("/api/review", {
+    cache: "no-store",
+    headers: reviewApiHeaders(),
+  });
+  if (!response.ok) {
+    throw new ReviewApiError("Failed to load review data.", response.status);
+  }
   return (await response.json()) as ReviewData;
 }
 
 async function fetchReviewDiff() {
-  const response = await fetch("/api/review/diff", { cache: "no-store" });
-  if (!response.ok) throw new Error("Failed to load review diff.");
+  const response = await fetch("/api/review/diff", {
+    cache: "no-store",
+    headers: reviewApiHeaders(),
+  });
+  if (!response.ok) {
+    throw new ReviewApiError("Failed to load review diff.", response.status);
+  }
   const payload = (await response.json()) as { diff?: string };
   return payload.diff ?? "";
 }
@@ -175,9 +270,11 @@ async function fetchReviewDiff() {
 function App() {
   return (
     <ThemeProvider>
-      <QueryClientProvider client={queryClient}>
-        <ReviewScreen />
-      </QueryClientProvider>
+      <TooltipProvider>
+        <QueryClientProvider client={queryClient}>
+          <ReviewScreen />
+        </QueryClientProvider>
+      </TooltipProvider>
     </ThemeProvider>
   );
 }
@@ -199,6 +296,21 @@ function useMediaQuery(query: string) {
   return matches;
 }
 
+function useDelayedValue(value: boolean, delayMs: number) {
+  const [delayedValue, setDelayedValue] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!value) {
+      setDelayedValue(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => setDelayedValue(true), delayMs);
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+
+  return delayedValue;
+}
+
 function ReviewScreen() {
   const isDesktopLayout = useMediaQuery("(min-width: 768px)");
   const [agentStatusFilter, setAgentStatusFilter] =
@@ -209,17 +321,24 @@ function ReviewScreen() {
   const [selectedEvidence, setSelectedEvidence] =
     React.useState<EvidenceSelection | null>(null);
   const codeViewRef = React.useRef<CodeViewHandle<undefined>>(null);
-  const { data, isLoading, isError } = useQuery({
+  const {
+    data,
+    error: reviewError,
+    isLoading,
+    isError,
+  } = useQuery({
     queryKey: ["review"],
     queryFn: fetchReview,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
+    retry: shouldRetryReviewQuery,
   });
   const { data: rawDiff = "", isError: isDiffError } = useQuery({
     queryKey: ["review-diff"],
     queryFn: fetchReviewDiff,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
+    retry: shouldRetryReviewQuery,
   });
 
   const codeItems = React.useMemo(() => parseCodeViewItems(rawDiff), [rawDiff]);
@@ -233,6 +352,7 @@ function ReviewScreen() {
       isEvidenceSelected(evidence, selectedEvidence, codeItems),
     [codeItems, selectedEvidence],
   );
+  const showLoadingState = useDelayedValue(isLoading, LOADING_STATE_DELAY_MS);
 
   const scrollToEvidence = React.useCallback(
     (evidence: Evidence) => {
@@ -257,17 +377,30 @@ function ReviewScreen() {
   );
 
   if (isLoading) {
+    if (!showLoadingState) return null;
     return (
       <main className={pageClassName}>
-        <EmptyState>Loading review...</EmptyState>
+        <EmptyState
+          title="Opening review"
+          description="Preparing the latest review state."
+        />
       </main>
     );
   }
 
   if (isError || !data) {
+    const authError =
+      reviewError instanceof ReviewApiError && reviewError.status === 401;
     return (
       <main className={pageClassName}>
-        <EmptyState>Unable to load review data.</EmptyState>
+        <EmptyState
+          title={authError ? "Review link expired" : "Review unavailable"}
+          description={
+            authError
+              ? "Open the Review UI URL printed by Paire again. The local server needs the token from that link."
+              : "Paire could not load this review. Check that the local review server is still running, then reopen the Review UI URL."
+          }
+        />
       </main>
     );
   }
@@ -950,10 +1083,23 @@ function ThreadGroup({
   );
 }
 
-function EmptyState({ children }: { children: React.ReactNode }) {
+function EmptyState({
+  children,
+  title,
+  description,
+}: {
+  children?: React.ReactNode;
+  title?: string;
+  description?: string;
+}) {
   return (
     <Card>
-      <CardContent className="text-muted-foreground">{children}</CardContent>
+      <CardContent className="space-y-1 text-muted-foreground">
+        {title ? (
+          <p className="text-sm font-medium text-foreground">{title}</p>
+        ) : null}
+        {description ? <p>{description}</p> : children}
+      </CardContent>
     </Card>
   );
 }
@@ -990,42 +1136,60 @@ function ClaimCard({
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <Card className={cn(claim.humanStatus === "accepted" ? "ring-1 ring-primary/80" : "")}>
-      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
-        <CardTitle className="flex text-xl font-medium leading-snug">
-          <span className="text-muted-foreground">{index + 1}.&nbsp;</span>
-          <AiText source={claim.title} />
-        </CardTitle>
-        <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto">
-          {claim.updatedAt ? (
-            <ClaimTimeAgo updatedAt={claim.updatedAt} />
-          ) : null}
-          <Badge variant="secondary">{statusLabel(claim.agentStatus)}</Badge>
-        </CardAction>
-      </CardHeader>
+    <Card
+      className={cn(
+        claim.humanStatus === "accepted"
+          ? "ring-1 ring-inset ring-primary/80"
+          : "",
+      )}
+    >
+      <div className="flex">
+        <span className="relative left-4 text-xl font-medium leading-snug text-muted-foreground">
+          {index + 1}.&nbsp;
+        </span>
+        <div className="w-full">
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
+            <CardTitle className="flex text-xl font-medium leading-snug">
+              <AiText source={claim.title} />
+            </CardTitle>
+            <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto">
+              {claim.updatedAt ? (
+                <ClaimTimeAgo updatedAt={claim.updatedAt} />
+              ) : null}
+              <Badge
+                variant={
+                  claim.agentStatus !== "unchanged" ? "default" : "secondary"
+                }
+              >
+                {statusLabel(claim.agentStatus)}
+              </Badge>
+            </CardAction>
+          </CardHeader>
 
-      <CardContent className="flex flex-col gap-8 px-6">
-        {claim.description ? (
-          <CardDescription className="text-base leading-relaxed">
-            <AiText source={claim.description} />
-          </CardDescription>
-        ) : null}
+          <CardContent className="flex flex-col gap-8 px-6">
+            {claim.description ? (
+              <CardDescription className="text-base leading-relaxed">
+                <AiText source={claim.description} />
+              </CardDescription>
+            ) : null}
 
-        <ClaimDeltaPanels before={claim.before} after={claim.after} />
+            <ClaimDeltaPanels before={claim.before} after={claim.after} />
 
-        {claim.evidences.length > 0 ? (
-          <div className="flex flex-col gap-2">
-            {claim.evidences.map((evidence, index) => (
-              <EvidenceBlock
-                key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
-                evidence={evidence}
-                selected={isEvidenceSelected(evidence)}
-                onSelect={onEvidenceSelect}
-              />
-            ))}
-          </div>
-        ) : null}
-      </CardContent>
+            {claim.evidences.length > 0 ? (
+              <div className="flex flex-col gap-2">
+                {claim.evidences.map((evidence, index) => (
+                  <EvidenceBlock
+                    key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
+                    evidence={evidence}
+                    selected={isEvidenceSelected(evidence)}
+                    onSelect={onEvidenceSelect}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </div>
+      </div>
 
       <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center px-6">
         <ClaimActions claim={claim} className="ml-auto" />
@@ -1112,26 +1276,6 @@ function ClaimDeltaPanels({
   );
 }
 
-function EvidenceFilePathLabel({
-  filePath,
-  startLine,
-  endLine,
-}: Pick<Evidence, "filePath" | "startLine" | "endLine">) {
-  const lastSlash = filePath.lastIndexOf("/");
-  const directory = lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : "/";
-  const fileName = lastSlash >= 0 ? filePath.slice(lastSlash + 1) : filePath;
-
-  return (
-    <span className="inline-flex items-baseline truncate font-light text-xs">
-      {/* <span className="inline-block max-w-30 truncate">{directory}</span> */}
-      <span className="inline-block font-medium">{fileName}:</span>
-      <span className="inline-block min-w-10 text-left">
-        {startLine}-{endLine}
-      </span>
-    </span>
-  );
-}
-
 function EvidenceBlock({
   evidence,
   selected,
@@ -1142,33 +1286,32 @@ function EvidenceBlock({
   onSelect: (evidence: Evidence) => void;
 }) {
   return evidence.change ? (
-    // <div className="flex gap-1 text-sm leading-relaxed text-foreground w-full before:content-['•'] before:mr-1 -ml-2 before:text-muted-foreground items-center">
-
-    <Button
-      type="button"
-      variant="ghost"
-      size="sm"
-      aria-pressed={selected}
-      className={cn(
-        "w-full justify-start text-sm font-normal hover:bg-primary/10",
-        selected
-          ? "bg-primary/30"
-          : "bg-muted/30 text-muted-foreground",
-      )}
-      onClick={() => onSelect(evidence)}
-      id={getEvidenceId(evidence)}
-    >
-      <AiText source={evidence.change} inline />
-      {/* <FileCode data-icon="inline-start" />
-        <EvidenceFilePathLabel
-          filePath={evidence.filePath}
-          startLine={evidence.startLine}
-          endLine={evidence.endLine}
-        /> */}
-      <ChevronRight className={"size-4 ml-auto text-muted-foreground"} />
-    </Button>
-  ) : // </div>
-  null;
+    <Tooltip>
+      <TooltipTrigger
+        delay={700}
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-pressed={selected}
+            className={cn(
+              "w-full justify-start text-sm font-normal hover:bg-primary/10",
+              selected ? "bg-primary/30" : "bg-muted/30 text-muted-foreground",
+            )}
+            onClick={() => onSelect(evidence)}
+            id={getEvidenceId(evidence)}
+          />
+        }
+      >
+        <AiText source={evidence.change} inline />
+        <ChevronRight className="size-4 ml-auto text-muted-foreground" />
+      </TooltipTrigger>
+      <TooltipContent side="top" align="end">
+        {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
+      </TooltipContent>
+    </Tooltip>
+  ) : null;
 }
 
 function InfoPanel({
@@ -1222,6 +1365,99 @@ function AiText({
   );
 }
 
+type DiffOverflow = "wrap" | "scroll";
+type DiffLayoutStyle = "split" | "unified";
+
+function DiffViewControls({
+  diffStyle,
+  lineNumbersEnabled,
+  overflow,
+  onDiffStyleChange,
+  onLineNumbersEnabledChange,
+  onOverflowChange,
+}: {
+  diffStyle: DiffLayoutStyle;
+  lineNumbersEnabled: boolean;
+  overflow: DiffOverflow;
+  onDiffStyleChange: (style: DiffLayoutStyle) => void;
+  onLineNumbersEnabledChange: (enabled: boolean) => void;
+  onOverflowChange: (overflow: DiffOverflow) => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      <ButtonGroup>
+        <Tooltip>
+          <TooltipTrigger
+            delay={0}
+            render={
+              <Toggle
+                variant="outline"
+                size="sm"
+                pressed={overflow === "wrap"}
+                onPressedChange={(pressed) =>
+                  onOverflowChange(pressed ? "wrap" : "scroll")
+                }
+                aria-label={
+                  overflow === "wrap"
+                    ? "Disable line wrap"
+                    : "Enable line wrap"
+                }
+              >
+                <WrapText data-icon="inline-start" />
+              </Toggle>
+            }
+          />
+          <TooltipContent>Wrap lines</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            delay={0}
+            render={
+              <Toggle
+                variant="outline"
+                size="sm"
+                pressed={lineNumbersEnabled}
+                onPressedChange={onLineNumbersEnabledChange}
+                aria-label={
+                  lineNumbersEnabled
+                    ? "Hide line numbers"
+                    : "Show line numbers"
+                }
+              >
+                <ListOrdered data-icon="inline-start" />
+              </Toggle>
+            }
+          />
+          <TooltipContent>Line numbers</TooltipContent>
+        </Tooltip>
+      </ButtonGroup>
+      <ToggleGroup
+        variant="outline"
+        size="sm"
+        spacing={0}
+        value={[diffStyle]}
+        onValueChange={(values) => {
+          const value = values[0];
+          if (value === "split" || value === "unified") {
+            onDiffStyleChange(value);
+          }
+        }}
+      >
+        <ToggleGroupItem value="split" aria-label="Split view" title="Split">
+          <Columns2 data-icon="inline-start" />
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="unified"
+          aria-label="Stacked view"
+          title="Stacked"
+        >
+          <Rows2 data-icon="inline-start" />
+        </ToggleGroupItem>
+      </ToggleGroup>
+    </div>
+  );
+}
+
 function ReviewCodePanel({
   codeViewRef,
   className,
@@ -1244,6 +1480,9 @@ function ReviewCodePanel({
   onSelectedEvidenceChange: (selection: EvidenceSelection | null) => void;
 }) {
   const [fileTreeOpen, setFileTreeOpen] = React.useState(false);
+  const [diffOverflow, setDiffOverflow] = React.useState<DiffOverflow>("wrap");
+  const [lineNumbersEnabled, setLineNumbersEnabled] = React.useState(true);
+  const [diffStyle, setDiffStyle] = React.useState<DiffLayoutStyle>("unified");
   const { resolvedTheme } = useTheme();
   const diffTheme = resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
 
@@ -1297,23 +1536,31 @@ function ReviewCodePanel({
           >
             <PanelRightClose data-icon="inline-start" />
           </Button>
-          <Files data-icon="inline-start" />
-          <p className="truncate text-sm font-medium">Code</p>
           <Badge variant="outline" className="text-muted-foreground">
             {items.length} {items.length === 1 ? "file" : "files"}
           </Badge>
         </div>
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className="size-8"
-          aria-label={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
-          title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
-          onClick={() => setFileTreeOpen((value) => !value)}
-        >
-          <FolderTree data-icon="inline-start" />
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <DiffViewControls
+            diffStyle={diffStyle}
+            lineNumbersEnabled={lineNumbersEnabled}
+            overflow={diffOverflow}
+            onDiffStyleChange={setDiffStyle}
+            onLineNumbersEnabledChange={setLineNumbersEnabled}
+            onOverflowChange={setDiffOverflow}
+          />
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="size-8"
+            aria-label={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
+            title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
+            onClick={() => setFileTreeOpen((value) => !value)}
+          >
+            <FolderTree data-icon="inline-start" />
+          </Button>
+        </div>
       </div>
 
       <div
@@ -1341,10 +1588,10 @@ function ReviewCodePanel({
               disableWorkerPool
               options={{
                 theme: diffTheme,
-                diffStyle: "unified",
-                overflow: "wrap",
+                diffStyle,
+                overflow: diffOverflow,
                 diffIndicators: "classic",
-                disableLineNumbers: false,
+                disableLineNumbers: !lineNumbersEnabled,
                 disableFileHeader: false,
                 stickyHeaders: true,
                 unsafeCSS: DIFF_SELECTED_LINE_UNSAFE_CSS,
@@ -1464,7 +1711,13 @@ function ReviewFileTree({
   );
 }
 
-function ClaimActions({ claim, className }: { claim: Claim, className?: string  }) {
+function ClaimActions({
+  claim,
+  className,
+}: {
+  claim: Claim;
+  className?: string;
+}) {
   const queryClient = useQueryClient();
   const statusMutation = useMutation({
     mutationFn: async (humanStatus: HumanStatus) => {
@@ -1472,7 +1725,7 @@ function ClaimActions({ claim, className }: { claim: Claim, className?: string  
         `/api/claims/${encodeURIComponent(claim.id)}/human-status`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: reviewApiHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ humanStatus }),
         },
       );
@@ -1489,7 +1742,7 @@ function ClaimActions({ claim, className }: { claim: Claim, className?: string  
         `/api/claims/${encodeURIComponent(claim.id)}/comment`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: reviewApiHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ note }),
         },
       );
@@ -1499,7 +1752,12 @@ function ClaimActions({ claim, className }: { claim: Claim, className?: string  
   });
 
   return (
-    <div className={cn("inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto", className)}>
+    <div
+      className={cn(
+        "inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto",
+        className,
+      )}
+    >
       <Button
         type="button"
         variant="outline"
