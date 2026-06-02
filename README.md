@@ -69,7 +69,7 @@ paire review --stdin
 ~/.paire/projects/<project-key>/current-packet.json
 ```
 
-Sessions are per Git branch. `paire start` reuses or creates the branch session; `paire it` does the same before reviewing. `paire reset` clears branch state and re-baselines to `baseCommit`. State is keyed by remote (`github/<owner>/<repo>/…`) or local folder name plus a repo-root hash.
+Sessions are per Git branch. `paire start` reuses or creates the branch session; `paire it` does the same before reviewing. `paire reset` clears branch state and re-baselines to `baseCommit`. State is keyed by remote (`github/<owner>/<repo>/…`) or local folder name plus a repo-root hash. Linked Git worktrees get different repo-root hashes, so their packet export directories and `agent-result.json` files stay isolated even when they share `PAIRE_HOME`.
 
 ---
 

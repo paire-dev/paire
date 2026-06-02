@@ -819,6 +819,67 @@ test("project keys use a GitHub owner repo prefix with an isolated packet export
   expect(packet.projectKey).toMatch(/^github\/acme\/widgets\//);
 });
 
+test("linked worktrees get distinct sessions and packet export directories", () => {
+  const fixture = createFixtureRepo();
+  const worktreeRepo = join(fixture.root, "feature-worktree");
+  run(["git", "worktree", "add", "-b", "feature", worktreeRepo, "main"], fixture.repo);
+  const worktreeFixture = { ...fixture, repo: worktreeRepo };
+
+  const mainStart = runPaire(fixture, ["start", "--base", "main"]);
+  const worktreeStart = runPaire(worktreeFixture, ["start", "--base", "main"]);
+  expect(mainStart.exitCode).toBe(0);
+  expect(worktreeStart.exitCode).toBe(0);
+
+  const mainSession = mainStart.stdout.match(/Session ID: (.+)/)?.[1];
+  const worktreeSession = worktreeStart.stdout.match(/Session ID: (.+)/)?.[1];
+  const mainProjectKey = mainStart.stdout.match(/Project key: (.+)/)?.[1];
+  const worktreeProjectKey = worktreeStart.stdout.match(/Project key: (.+)/)?.[1];
+  expect(mainSession).toBeTruthy();
+  expect(worktreeSession).toBeTruthy();
+  expect(worktreeSession).not.toBe(mainSession);
+  expect(mainProjectKey).toBeTruthy();
+  expect(worktreeProjectKey).toBeTruthy();
+  expect(worktreeProjectKey).not.toBe(mainProjectKey);
+
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change main value");
+  writeFileSync(
+    join(worktreeRepo, "src/feature.ts"),
+    "export const featureValue = 1;\n",
+  );
+  commitAll(worktreeRepo, "add feature value");
+
+  const mainReview = runPaire(fixture, ["review"]);
+  const worktreeReview = runPaire(worktreeFixture, ["review"]);
+  expect(mainReview.exitCode).toBe(0);
+  expect(worktreeReview.exitCode).toBe(0);
+  const mainPacketPath = extractPacketPath(mainReview.stdout);
+  const worktreePacketPath = extractPacketPath(worktreeReview.stdout);
+  expect(dirname(mainPacketPath)).not.toBe(dirname(worktreePacketPath));
+
+  const mainPacket = JSON.parse(readFileSync(mainPacketPath, "utf8"));
+  const worktreePacket = JSON.parse(readFileSync(worktreePacketPath, "utf8"));
+  expect(mainPacket.sessionId).toBe(mainSession);
+  expect(worktreePacket.sessionId).toBe(worktreeSession);
+  expect(mainPacket.projectKey).toBe(mainProjectKey);
+  expect(worktreePacket.projectKey).toBe(worktreeProjectKey);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const sessions = db
+    .query<{ repoRoot: string; branch: string; projectKey: string }, []>(
+      "select repoRoot, branch, projectKey from sessions order by repoRoot",
+    )
+    .all();
+  expect(sessions).toHaveLength(2);
+  expect(new Set(sessions.map((session) => session.repoRoot)).size).toBe(2);
+  expect(new Set(sessions.map((session) => session.projectKey)).size).toBe(2);
+  expect(sessions.map((session) => session.branch).sort()).toEqual([
+    "feature",
+    "main",
+  ]);
+  db.close();
+});
+
 test("claim ids are scoped per session when repositories share PAIRE_HOME", () => {
   const first = createFixtureRepo();
   const second = createFixtureRepo();
