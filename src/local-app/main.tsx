@@ -11,7 +11,6 @@ import {
   ArrowLeftFromLine,
   ArrowRightFromLine,
   Check,
-  ChevronDown,
   MessageSquare,
   Monitor,
   Moon,
@@ -33,11 +32,6 @@ import {
   CardHeader,
   CardTitle,
 } from "./components/ui/card";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "./components/ui/collapsible";
 import {
   ThemeProvider,
   useTheme,
@@ -668,46 +662,76 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
     return () => window.cancelAnimationFrame(frame);
   }, [open, diff, selectedLines]);
 
+  const patch = diff || collapsedEvidencePatch(evidence);
+  const collapsed = !open || !diff;
+  const toggleLabel = diffError
+    ? "Retry"
+    : open && !diff
+      ? "Loading..."
+      : open
+        ? "Hide"
+        : "Show";
+
+  const toggleDiff = React.useCallback(() => {
+    if (open && diff && !diffError) {
+      setOpen(false);
+      return;
+    }
+    setDiffError(false);
+    setOpen(true);
+  }, [diff, diffError, open]);
+
   return (
-    <Collapsible
-      className="overflow-hidden rounded-lg border bg-background"
-      open={open}
-      onOpenChange={setOpen}
+    <div
+      ref={panelRef}
+      className="max-h-[520px] overflow-auto rounded-lg border bg-background [&_code]:font-mono [&_pre]:font-mono"
     >
-      <CollapsibleTrigger className="flex w-full cursor-pointer items-center justify-between bg-muted px-3 py-2 text-sm font-semibold text-foreground outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [&[data-open]>svg]:rotate-180 [&[data-panel-open]>svg]:rotate-180">
-        <span>Code diff</span>
-        <ChevronDown
-          aria-hidden="true"
-          className="size-4 transition-transform"
-        />
-      </CollapsibleTrigger>
-      <CollapsibleContent
-        ref={panelRef}
-        className="max-h-[520px] overflow-auto [&_code]:font-mono [&_pre]:font-mono"
-      >
-        {diff ? (
-          <PatchDiff
-            key={diffTheme}
-            patch={diff}
-            disableWorkerPool
-            selectedLines={selectedLines}
-            options={{
-              theme: diffTheme,
-              diffStyle: "unified",
-              overflow: "wrap",
-              diffIndicators: "classic",
-              disableLineNumbers: false,
-              disableFileHeader: false,
-            }}
-          />
-        ) : (
-          <div className="p-3 text-sm text-muted-foreground">
-            {diffError ? "Unable to load code diff." : "Loading code diff..."}
-          </div>
+      <PatchDiff
+        key={`${diffTheme}:${diff ? "loaded" : "placeholder"}`}
+        patch={patch}
+        disableWorkerPool
+        selectedLines={diff ? selectedLines : null}
+        renderHeaderPrefix={() => (
+          <span className="text-sm font-semibold text-foreground">
+            Code diff
+          </span>
         )}
-      </CollapsibleContent>
-    </Collapsible>
+        renderHeaderMetadata={() => (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-xs"
+            disabled={open && !diff && !diffError}
+            onClick={toggleDiff}
+          >
+            {toggleLabel}
+          </Button>
+        )}
+        options={{
+          theme: diffTheme,
+          diffStyle: "unified",
+          overflow: "wrap",
+          diffIndicators: "classic",
+          disableLineNumbers: false,
+          disableFileHeader: false,
+          collapsed,
+        }}
+      />
+    </div>
   );
+}
+
+function collapsedEvidencePatch(evidence: Evidence) {
+  const path = evidence.filePath;
+  const line = Math.max(1, evidence.startLine);
+  return [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -${line},0 +${line},0 @@`,
+    "",
+  ].join("\n");
 }
 
 function ClaimActions({ claim }: { claim: Claim }) {
