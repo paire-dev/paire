@@ -432,14 +432,15 @@ async function applyReviewCommand(
   }
 
   const apply = ctx.db.transaction((value: AgentApplyPayload) => {
+    let applyOrder = Date.now();
     for (const thread of value.threads) {
       const threadDbId = scopedDbId(session.id, thread.id);
       const existingThread = ctx.db
         .query<
-          { title: string; summary: string },
+          { title: string; summary: string; updatedAt: number },
           [string, string]
         >(
-          "select title, summary from change_threads where id = ? and sessionId = ?",
+          "select title, summary, updatedAt from change_threads where id = ? and sessionId = ?",
         )
         .get(threadDbId, session.id);
       const preserveExistingThreadCopy =
@@ -462,7 +463,9 @@ async function applyReviewCommand(
           preserveExistingThreadCopy
             ? existingThread.summary
             : (thread.summary ?? ""),
-          Date.now(),
+          preserveExistingThreadCopy && existingThread
+            ? existingThread.updatedAt
+            : ++applyOrder,
         );
       for (const claim of thread.claims) {
         const claimDbId = scopedDbId(session.id, claim.id);
@@ -474,10 +477,11 @@ async function applyReviewCommand(
               beforeText: string | null;
               afterText: string | null;
               humanStatus: HumanStatus;
+              updatedAt: number;
             },
             [string, string]
           >(
-            "select title, description, beforeText, afterText, humanStatus from claims where id = ? and sessionId = ?",
+            "select title, description, beforeText, afterText, humanStatus, updatedAt from claims where id = ? and sessionId = ?",
           )
           .get(claimDbId, session.id);
         const claimCopy = normalizeClaimCopy(claim);
@@ -514,7 +518,9 @@ async function applyReviewCommand(
             claimAfter,
             claim.agentStatus,
             existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed",
-            Date.now(),
+            preserveClaimCopy && existingClaim
+              ? existingClaim.updatedAt
+              : ++applyOrder,
           );
         ctx.db
           .prepare("delete from claim_evidences where claimId = ?")
@@ -1250,7 +1256,7 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
       { id: string; title: string; summary: string },
       [string]
     >(
-      "select id, title, summary from change_threads where sessionId = ? order by updatedAt desc",
+      "select id, title, summary from change_threads where sessionId = ? order by updatedAt desc, rowid desc",
     )
     .all(session.id)
     .map((thread) => ({
@@ -1274,7 +1280,7 @@ function getClaimsForThread(
 ) {
   return db
     .query<AgentClaim, [string]>(
-      "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc",
+      "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc, rowid desc",
     )
     .all(threadDbId)
     .map((claim) => ({
@@ -1614,7 +1620,7 @@ function getActiveClaims(db: Database, sessionId: string) {
               claims.agentStatus, claims.humanStatus, change_threads.title as threadTitle
        from claims join change_threads on change_threads.id = claims.threadId
        where claims.sessionId = ? and claims.agentStatus != 'superseded'
-       order by change_threads.updatedAt desc, claims.updatedAt desc`,
+       order by change_threads.updatedAt desc, change_threads.rowid desc, claims.updatedAt desc, claims.rowid desc`,
     )
     .all(sessionId);
   return rows.map((claim) => ({

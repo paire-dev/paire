@@ -10,7 +10,7 @@
   --card-foreground: oklch(0.145 0.008 326);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0.008 326);
-  --primary: oklch(0.841 0.238 128.85);
+  --primary: oklch(0.8399 0.1875 202.76);
   --primary-foreground: oklch(0.405 0.101 131.063);
   --secondary: oklch(0.967 0.001 286.375);
   --secondary-foreground: oklch(0.21 0.006 285.885);
@@ -46,8 +46,8 @@
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.212 0.019 322.12);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.768 0.233 130.85);
-  --primary-foreground: oklch(0.405 0.101 131.063);
+  --primary: oklch(0.8399 0.1875 202.76);
+  --primary-foreground: oklch(0.32 0.0327 214.81);
   --secondary: oklch(0.274 0.006 286.033);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.263 0.024 320.12);
@@ -111,6 +111,10 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  /* diffs */
+  --diffs-bg-selection-override: transparent;
+  --diffs-bg-selection-number-override: var(--primary);
 }
 
 @layer base {

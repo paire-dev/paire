@@ -320,6 +320,150 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   db.close();
 });
 
+test("review API returns threads and claims newest first", async () => {
+  const fixture = createFixtureRepo();
+
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add workspace validation");
+
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "ordered-result.json");
+  writeFileSync(
+    resultPath,
+    JSON.stringify(
+      {
+        packetId: packet.packetId,
+        sessionId: packet.sessionId,
+        revisionId: packet.revisionId,
+        gitFingerprint: packet.currentFingerprint,
+        threads: [
+          {
+            id: "thread_older",
+            title: "Older thread",
+            summary: "First thread in apply order.",
+            claims: [
+              {
+                id: "claim_older",
+                threadId: "thread_older",
+                title: "Older claim",
+                description: "First claim in apply order.",
+                before: "Before older.",
+                after: "After older.",
+                agentStatus: "new",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "Older claim evidence.",
+                  },
+                ],
+              },
+              {
+                id: "claim_newer",
+                threadId: "thread_older",
+                title: "Newer claim",
+                description: "Second claim in apply order.",
+                before: "Before newer.",
+                after: "After newer.",
+                agentStatus: "new",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "Newer claim evidence.",
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            id: "thread_newer",
+            title: "Newer thread",
+            summary: "Second thread in apply order.",
+            claims: [
+              {
+                id: "claim_thread_newer",
+                threadId: "thread_newer",
+                title: "Newer thread claim",
+                description: "Only claim in the newer thread.",
+                before: "Before thread.",
+                after: "After thread.",
+                agentStatus: "new",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "Newer thread evidence.",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  expect(
+    runPaire(fixture, ["review", "--apply", resultPath, "--no-open"]).exitCode,
+  ).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const server = Bun.spawn(
+    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
+    {
+      cwd: fixture.repo,
+      env: { ...process.env, PAIRE_HOME: fixture.home },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const state = await waitForServerState(fixture.home, session!.id);
+    const reviewData = await fetch(`${state.url}api/review`).then((response) =>
+      response.json(),
+    );
+    expect(reviewData.threads.map((thread: { id: string }) => thread.id)).toEqual([
+      "thread_newer",
+      "thread_older",
+    ]);
+    expect(
+      reviewData.threads
+        .find((thread: { id: string }) => thread.id === "thread_older")
+        ?.claims.map((claim: { id: string }) => claim.id),
+    ).toEqual(["claim_newer", "claim_older"]);
+  } finally {
+    server.kill();
+    await server.exited;
+  }
+});
+
 test("review API loads without embedding raw diffs and serves evidence diffs on demand", async () => {
   const fixture = createFixtureRepo();
 

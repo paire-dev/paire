@@ -53,17 +53,24 @@ import {
   CardTitle,
 } from "./components/ui/card";
 import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "./components/ui/resizable";
-import {
   ThemeProvider,
   useTheme,
   type Theme,
 } from "./components/theme-provider";
 import { cn } from "./lib/utils";
 import "./styles.css";
+
+/** Injected into @pierre/diffs shadow DOM via `unsafeCSS`. */
+const DIFF_SELECTED_LINE_UNSAFE_CSS = `
+  [data-selected-line][data-column-number] {
+    box-shadow: inset 2px 0 0 var(--primary);
+  }
+  [data-selected-line]:is([data-line], [data-no-newline]) {
+  }
+  [data-selected-line][data-gutter-buffer] {
+
+  }
+`;
 
 type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
 type FilterValue = "all" | string;
@@ -139,6 +146,24 @@ const humanStatusOptions: Array<HumanStatus> = [
   "irrelevant",
 ];
 
+// Returns a HTML DOM node id-friendly string for an Evidence.
+const getEvidenceId = (evidence: Evidence) => {
+  // Sanitize filePath for id: replace slashes and backslashes, remove weird chars
+  // id: claim-<claimId>_<fileName>-<start>-<end>
+  const claimPart = `claim-${evidence.claimId}`;
+  const filePart = evidence.filePath
+    .replace(/[^\w\-\.]+/g, "-") // keep [a-zA-Z0-9_-\.], replace others with -
+    .replace(/^-+/, "") // don't start with hyphen
+    .replace(/-+$/, ""); // don't end with hyphen
+
+  const linesPart = `${evidence.startLine}-${evidence.endLine}`;
+  // Always start with a letter for HTML id
+  return `evid-${claimPart}_${filePart}_${linesPart}`.replace(
+    /[^a-zA-Z0-9_\-:.]/g,
+    "",
+  );
+};
+
 async function fetchReview() {
   const response = await fetch("/api/review", { cache: "no-store" });
   if (!response.ok) throw new Error("Failed to load review data.");
@@ -208,6 +233,12 @@ function ReviewScreen() {
     [codeItems, data?.git.status],
   );
 
+  const evidenceIsSelected = React.useCallback(
+    (evidence: Evidence) =>
+      isEvidenceSelected(evidence, selectedEvidence, codeItems),
+    [codeItems, selectedEvidence],
+  );
+
   const scrollToEvidence = React.useCallback(
     (evidence: Evidence) => {
       const item = findCodeViewItem(codeItems, evidence.filePath);
@@ -224,6 +255,8 @@ function ReviewScreen() {
         align: "center",
         behavior: "smooth",
       });
+
+      window.history.pushState(null, "", `#${getEvidenceId(evidence)}`);
     },
     [codeItems],
   );
@@ -270,6 +303,7 @@ function ReviewScreen() {
     <ReviewClaims
       allThreads={data.threads}
       filteredThreads={filteredThreads}
+      isEvidenceSelected={evidenceIsSelected}
       onEvidenceSelect={scrollToEvidence}
     />
   );
@@ -310,52 +344,27 @@ function ReviewScreen() {
 
       {isDesktopLayout ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          {codePanelOpen ? (
-            <ResizablePanelGroup
-              orientation="horizontal"
-              className="min-h-0 flex-1 gap-0"
-            >
-              <ResizablePanel
-                className="flex min-h-0 min-w-0 flex-col mr-4"
-                defaultSize="50%"
-              >
-                {reviewPanel}
-              </ResizablePanel>
-              {/* <ResizableHandle className="border-none" withHandle /> */}
-              <ResizablePanel
-                className="flex min-h-0 flex-col"
-                defaultSize="50%"
-                minSize="30%"
-              >
-                <ReviewCodePanel
-                  codeViewRef={codeViewRef}
-                  className="h-full min-h-0"
-                  diffError={isDiffError}
-                  gitStatus={gitStatusEntries}
-                  items={codeItems}
-                  open
-                  selectedEvidence={selectedEvidence}
-                  onOpenChange={setCodePanelOpen}
-                  onSelectedEvidenceChange={setSelectedEvidence}
-                />
-              </ResizablePanel>
-            </ResizablePanelGroup>
-          ) : (
-            <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_auto] gap-4">
-              {reviewPanel}
-              <ReviewCodePanel
-                codeViewRef={codeViewRef}
-                className="h-full min-h-0"
-                diffError={isDiffError}
-                gitStatus={gitStatusEntries}
-                items={codeItems}
-                open={false}
-                selectedEvidence={selectedEvidence}
-                onOpenChange={setCodePanelOpen}
-                onSelectedEvidenceChange={setSelectedEvidence}
-              />
-            </div>
-          )}
+          <div
+            className={cn(
+              "grid min-h-0 flex-1 gap-4",
+              codePanelOpen
+                ? "grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
+                : "grid-cols-[minmax(0,1fr)_auto]",
+            )}
+          >
+            {reviewPanel}
+            <ReviewCodePanel
+              codeViewRef={codeViewRef}
+              className="h-full min-h-0"
+              diffError={isDiffError}
+              gitStatus={gitStatusEntries}
+              items={codeItems}
+              open={codePanelOpen}
+              selectedEvidence={selectedEvidence}
+              onOpenChange={setCodePanelOpen}
+              onSelectedEvidenceChange={setSelectedEvidence}
+            />
+          </div>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
@@ -388,7 +397,7 @@ function ReviewScrollPanel({
 }) {
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-4">
         <div
           className={cn(
             "w-full max-w-3xl",
@@ -406,10 +415,12 @@ function ReviewScrollPanel({
 function ReviewClaims({
   allThreads,
   filteredThreads,
+  isEvidenceSelected,
   onEvidenceSelect,
 }: {
   allThreads: Thread[];
   filteredThreads: Thread[];
+  isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
@@ -423,6 +434,7 @@ function ReviewClaims({
           <ThreadGroup
             key={thread.id}
             thread={thread}
+            isEvidenceSelected={isEvidenceSelected}
             onEvidenceSelect={onEvidenceSelect}
           />
         ))
@@ -577,6 +589,20 @@ function evidenceSelectionRange(evidence: Evidence) {
     side: "additions" as const,
     endSide: "additions" as const,
   };
+}
+
+function isEvidenceSelected(
+  evidence: Evidence,
+  selectedEvidence: EvidenceSelection | null,
+  codeItems: CodeViewItem[],
+) {
+  if (!selectedEvidence) return false;
+  const item = findCodeViewItem(codeItems, evidence.filePath);
+  if (!item || item.id !== selectedEvidence.id) return false;
+  return (
+    selectedEvidence.range.start === evidence.startLine &&
+    selectedEvidence.range.end === evidence.endLine
+  );
 }
 
 type CodeViewScrollRequest = Parameters<
@@ -885,9 +911,11 @@ function FilterButton({
 
 function ThreadGroup({
   thread,
+  isEvidenceSelected,
   onEvidenceSelect,
 }: {
   thread: Thread;
+  isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
@@ -908,7 +936,7 @@ function ThreadGroup({
         </div>
       </div>
       {thread.summary ? (
-        <div className="text-lg leading-relaxed text-muted-foreground pb-2">
+        <div className="text-lg leading-relaxed text-muted-foreground pb-2 max-w-prose">
           <AiText source={thread.summary} />
         </div>
       ) : null}
@@ -918,6 +946,7 @@ function ThreadGroup({
             key={claim.id}
             claim={claim}
             index={index}
+            isEvidenceSelected={isEvidenceSelected}
             onEvidenceSelect={onEvidenceSelect}
           />
         ))}
@@ -957,10 +986,12 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
 function ClaimCard({
   claim,
   index,
+  isEvidenceSelected,
   onEvidenceSelect,
 }: {
   claim: Claim;
   index: number;
+  isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
@@ -993,6 +1024,7 @@ function ClaimCard({
               <EvidenceBlock
                 key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
                 evidence={evidence}
+                selected={isEvidenceSelected(evidence)}
                 onSelect={onEvidenceSelect}
               />
             ))}
@@ -1055,10 +1087,10 @@ function claimDeltaPanels(before?: string | null, after?: string | null) {
 }
 
 const deltaPanelLabelClasses: Record<DeltaPanelColor, string> = {
-  red: "text-red-600 dark:text-red-400",
-  blue: "text-blue-600 dark:text-blue-400",
-  yellow: "text-yellow-600 dark:text-yellow-400",
-  green: "text-green-600 dark:text-green-400",
+  red: "text-red-800 dark:text-red-600",
+  blue: "text-blue-800 dark:text-blue-600",
+  yellow: "text-yellow-800 dark:text-yellow-600",
+  green: "text-green-800 dark:text-green-600",
 };
 
 function ClaimDeltaPanels({
@@ -1112,19 +1144,29 @@ function EvidenceFilePathLabel({
 
 function EvidenceBlock({
   evidence,
+  selected,
   onSelect,
 }: {
   evidence: Evidence;
+  selected: boolean;
   onSelect: (evidence: Evidence) => void;
 }) {
   return evidence.change ? (
     // <div className="flex gap-1 text-sm leading-relaxed text-foreground w-full before:content-['•'] before:mr-1 -ml-2 before:text-muted-foreground items-center">
 
     <Button
+      type="button"
       variant="ghost"
       size="sm"
-      className="w-full font-normal text-muted-foreground text-sm justify-start bg-muted/30"
+      aria-pressed={selected}
+      className={cn(
+        "w-full justify-start text-sm font-normal hover:bg-primary/10",
+        selected
+          ? "bg-primary/30"
+          : "bg-muted/30 text-muted-foreground",
+      )}
       onClick={() => onSelect(evidence)}
+      id={getEvidenceId(evidence)}
     >
       <AiText source={evidence.change} inline />
       {/* <FileCode data-icon="inline-start" />
@@ -1133,7 +1175,7 @@ function EvidenceBlock({
           startLine={evidence.startLine}
           endLine={evidence.endLine}
         /> */}
-      <ChevronRight className="size-4 ml-auto text-muted-foreground" />
+      <ChevronRight className={"size-4 ml-auto text-muted-foreground"} />
     </Button>
   ) : // </div>
   null;
@@ -1315,6 +1357,7 @@ function ReviewCodePanel({
                 disableLineNumbers: false,
                 disableFileHeader: false,
                 stickyHeaders: true,
+                unsafeCSS: DIFF_SELECTED_LINE_UNSAFE_CSS,
                 layout: {
                   paddingTop: 8,
                   paddingBottom: 16,
