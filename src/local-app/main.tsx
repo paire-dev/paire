@@ -1054,26 +1054,11 @@ function claimDeltaPanels(before?: string | null, after?: string | null) {
   ];
 }
 
-const deltaPanelColorClasses: Record<
-  DeltaPanelColor,
-  { border: string; label: string }
-> = {
-  red: {
-    border: "border-red-500/30 bg-red-500/5",
-    label: "text-red-600 dark:text-red-400",
-  },
-  blue: {
-    border: "border-blue-500/30 bg-blue-500/5",
-    label: "text-blue-600 dark:text-blue-400",
-  },
-  yellow: {
-    border: "border-yellow-500/30 bg-yellow-500/5",
-    label: "text-yellow-600 dark:text-yellow-400",
-  },
-  green: {
-    border: "border-green-500/30 bg-green-500/5",
-    label: "text-green-600 dark:text-green-400",
-  },
+const deltaPanelLabelClasses: Record<DeltaPanelColor, string> = {
+  red: "text-red-600 dark:text-red-400",
+  blue: "text-blue-600 dark:text-blue-400",
+  yellow: "text-yellow-600 dark:text-yellow-400",
+  green: "text-green-600 dark:text-green-400",
 };
 
 function ClaimDeltaPanels({
@@ -1165,18 +1150,13 @@ function InfoPanel({
   direction: "left" | "right";
   text: string;
 }) {
-  const styles = deltaPanelColorClasses[color];
+  const labelClass = deltaPanelLabelClasses[color];
   return (
-    <div
-      className={cn("rounded-lg border p-4", styles.border)}
-    >
+    <div className="rounded-lg border border-border p-4">
       <div className="text-sm leading-relaxed text-muted-foreground">
         <span
           aria-hidden="true"
-          className={cn(
-            "mr-2 inline-flex items-center justify-center",
-            styles.label,
-          )}
+          className="mr-2 inline-flex items-center justify-center text-foreground"
         >
           {direction === "left" ? (
             <ArrowLeftFromLine className="relative top-0.5 size-4" />
@@ -1184,7 +1164,7 @@ function InfoPanel({
             <ArrowRightFromLine className="relative top-0.5 size-4" />
           )}
         </span>
-        <strong className={styles.label}>{label}:</strong>{" "}
+        <strong className={labelClass}>{label}:</strong>{" "}
         <AiText source={text} inline />
       </div>
     </div>
