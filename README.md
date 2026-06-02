@@ -161,11 +161,22 @@ ARCH="$(uname -m)"    # x86_64/amd64 -> x64, arm64/aarch64 -> arm64
 
 Unsupported values fail closed. The script never evaluates detected values as shell code.
 
+## Releases
+
+GitHub Actions builds all four release binaries (`paire-darwin-arm64`, `paire-darwin-x64`, `paire-linux-arm64`, `paire-linux-x64`) on native runners, merges `SHA256SUMS`, and publishes a GitHub release when you push a version tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`workflow_dispatch` on the **Release** workflow runs the same builds without publishing (useful to verify CI). Pushes to `main` run **CI** (typecheck, tests, and a linux-x64 build).
+
 ## Install
 
 ```sh
 curl -fsSLo /tmp/paire-install.sh \
-  https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh
+  https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh
 less /tmp/paire-install.sh
 bash /tmp/paire-install.sh
 ```
@@ -173,7 +184,7 @@ bash /tmp/paire-install.sh
 Or pipe directly:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh | bash
 ```
 
 The installer:
@@ -187,7 +198,7 @@ The installer:
 Pin a version or install elsewhere:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh |
+curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh |
   PAIRE_VERSION=v0.1.0 PAIRE_INSTALL_DIR="$HOME/bin" bash
 ```
 
