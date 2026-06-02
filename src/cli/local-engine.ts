@@ -426,7 +426,7 @@ async function applyReviewCommand(
   const git = getGitState(session.repoRoot);
   if (!git.clean) {
     throw new Error(
-      "Paire reviews committed code only. Commit or discard the current worktree changes, then run paire review --apply again.",
+      "Paire reviews committed code only. Commit the current worktree changes, then run paire review --apply again.",
     );
   }
   if (git.fingerprint !== payload.gitFingerprint) {
@@ -858,7 +858,7 @@ function formatStatus(db: Database, session: SessionRow, git: GitState) {
     `Review burden: ${burden}`,
     git.clean
       ? "Suggested inspection: git diff --stat"
-      : "Review blocked: Paire reviews committed code only. Commit or discard worktree changes before running paire review.",
+      : "Review blocked: Paire reviews committed code only. Commit worktree changes before running paire review.",
   ];
   if (pending?.packetJson) {
     lines.push(
@@ -939,8 +939,8 @@ function dirtyWorktreeMessage(git: GitState) {
     "",
     "Coding agent workflow — complete every step below in order. Do not skip steps.",
     "",
-    "Step 1 — Commit or discard worktree changes (required)",
-    "Commit or stash your changes, or discard them with git checkout -- .",
+    "Step 1 — Commit worktree changes (required)",
+    "Commit or stash your changes before running Paire.",
     "",
     "Step 2 — Run Paire again (required)",
     "Run: paire it",
