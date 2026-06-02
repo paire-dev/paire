@@ -18,10 +18,9 @@ import {
   ArrowRightFromLine,
   Bot,
   Check,
-  ChevronDown,
-  ChevronRight,
   FileCode,
   Files,
+  FolderTree,
   MessageSquare,
   Monitor,
   Moon,
@@ -270,8 +269,6 @@ function ReviewScreen() {
 
   return (
     <main className={isDesktopLayout ? desktopPageClassName : pageClassName}>
-      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
-
       <header
         className={cn(
           "mb-5 flex shrink-0 flex-col gap-4 sm:flex-row sm:items-end sm:justify-between",
@@ -294,6 +291,8 @@ function ReviewScreen() {
           <ModeToggle />
         </div>
       </header>
+
+      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
 
       {isDesktopLayout ? (
         <div className="flex min-h-0 flex-1 flex-col">
@@ -373,7 +372,7 @@ function ReviewScrollPanel({
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col pr-4">
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
-        <div className="mx-auto w-full max-w-4xl">
+        <div className="mr-auto w-full max-w-4xl">
           {filterBar}
           {children}
         </div>
@@ -514,9 +513,9 @@ function CopyAgentPromptButton({ text }: { text: string }) {
   return (
     <Button
       type="button"
-      size="icon"
+      size="sm"
       variant="outline"
-      className="size-7 shrink-0 border-amber-300/80 bg-amber-100/60 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60"
+      className="shrink-0 border-amber-300/80 bg-amber-100/60 h-6 px-2 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60"
       title="Copy agent prompt"
       aria-label="Copy agent prompt for coding agent"
       onClick={() => void copy()}
@@ -524,12 +523,12 @@ function CopyAgentPromptButton({ text }: { text: string }) {
       {copied ? (
         <>
           <Check className="size-3.5" aria-hidden />
-          <span>Copied</span>
+          <span className="text-xs">Copied</span>
         </>
       ) : (
         <>
           <Bot className="size-3.5" aria-hidden />
-          <span>Copy agent prompt</span>
+          <span className="text-xs">Copy agent prompt</span>
         </>
       )}
     </Button>
@@ -771,32 +770,32 @@ function ThreadGroup({
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <section className="flex flex-col gap-3">
-      <div className="flex flex-col gap-2 pt-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
+    <section className="flex flex-col gap-0">
+      <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-muted/95 backdrop-blur-sm supports-backdrop-filter:bg-muted/80">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-start justify-between gap-3">
             <h2 className="text-xl font-semibold leading-snug">
               <AiText source={thread.title || "Behavior"} inline />
             </h2>
-            {thread.summary ? (
-              <div className="mt-1 text-base leading-relaxed text-muted-foreground">
-                <AiText source={thread.summary} />
-              </div>
-            ) : null}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Badge variant="secondary">
-              {thread.claims.length}{" "}
-              {thread.claims.length === 1 ? "claim" : "claims"}
-            </Badge>
-            {thread.status ? (
-              <Badge variant="outline" className="text-muted-foreground">
-                {statusLabel(thread.status)}
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="secondary">
+                {thread.claims.length}{" "}
+                {thread.claims.length === 1 ? "claim" : "claims"}
               </Badge>
-            ) : null}
+              {thread.status ? (
+                <Badge variant="outline" className="text-muted-foreground">
+                  {statusLabel(thread.status)}
+                </Badge>
+              ) : null}
+            </div>
           </div>
         </div>
       </div>
+      {thread.summary ? (
+        <div className="text-base leading-relaxed text-muted-foreground pb-2">
+          <AiText source={thread.summary} />
+        </div>
+      ) : null}
       <div className="grid gap-3">
         {thread.claims.map((claim, index) => (
           <ClaimCard
@@ -949,23 +948,20 @@ function EvidenceBlock({
   onSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0">
+
+    <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0 w-full">
       {evidence.change ? (
-        <p className="text-sm leading-relaxed text-muted-foreground">
+        <p className="flex gap-2 text-md leading-relaxed text-muted-foreground w-full">
           <AiText source={evidence.change} inline />
+
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => onSelect(evidence)}>
+            <FileCode data-icon="inline-start" />
+            <span className="truncate text-xs">
+              {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
+            </span>
+          </Button>
         </p>
       ) : null}
-
-      <button
-        type="button"
-        className="inline-flex w-fit max-w-full items-center gap-1 rounded-md font-mono text-sm text-muted-foreground hover:text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-        onClick={() => onSelect(evidence)}
-      >
-        <FileCode data-icon="inline-start" />
-        <span className="truncate">
-          {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
-        </span>
-      </button>
     </div>
   );
 }
@@ -1082,17 +1078,11 @@ function ReviewCodePanel({
             size="icon"
             variant="ghost"
             className="size-8"
-            aria-label={
-              fileTreeOpen ? "Collapse file tree" : "Expand file tree"
-            }
-            title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
-            onClick={() => setFileTreeOpen((value) => !value)}
+            aria-label="Collapse code panel"
+            title="Collapse code panel"
+            onClick={() => onOpenChange(false)}
           >
-            {fileTreeOpen ? (
-              <ChevronDown data-icon="inline-start" />
-            ) : (
-              <ChevronRight data-icon="inline-start" />
-            )}
+            <PanelRightClose data-icon="inline-start" />
           </Button>
           <Files data-icon="inline-start" />
           <p className="truncate text-sm font-medium">Code</p>
@@ -1105,36 +1095,22 @@ function ReviewCodePanel({
           size="icon"
           variant="ghost"
           className="size-8"
-          aria-label="Collapse code panel"
-          title="Collapse code panel"
-          onClick={() => onOpenChange(false)}
+          aria-label={
+            fileTreeOpen ? "Collapse file tree" : "Expand file tree"
+          }
+          title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
+          onClick={() => setFileTreeOpen((value) => !value)}
         >
-          <PanelRightClose data-icon="inline-start" />
+          <FolderTree data-icon="inline-start" />
         </Button>
       </div>
 
       <div
         className={cn(
           "grid min-h-0 flex-1",
-          fileTreeOpen ? "grid-cols-[220px_minmax(0,1fr)]" : "grid-cols-1",
+          fileTreeOpen ? "grid-cols-[minmax(0,1fr)_220px]" : "grid-cols-1",
         )}
       >
-        {fileTreeOpen ? (
-          <FileTree
-            items={items}
-            selectedId={selectedEvidence?.id ?? null}
-            onSelect={(item) => {
-              onSelectedEvidenceChange(null);
-              requestCodeViewScroll(codeViewRef, {
-                type: "item",
-                id: item.id,
-                align: "start",
-                behavior: "smooth",
-              });
-            }}
-          />
-        ) : null}
-
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {diffError ? (
             <div className="p-4 text-sm text-muted-foreground">
@@ -1154,7 +1130,7 @@ function ReviewCodePanel({
               disableWorkerPool
               options={{
                 theme: diffTheme,
-                diffStyle: "split",
+                diffStyle: "unified",
                 overflow: "wrap",
                 diffIndicators: "classic",
                 disableLineNumbers: false,
@@ -1169,6 +1145,22 @@ function ReviewCodePanel({
             />
           )}
         </div>
+
+        {fileTreeOpen ? (
+          <FileTree
+            items={items}
+            selectedId={selectedEvidence?.id ?? null}
+            onSelect={(item) => {
+              onSelectedEvidenceChange(null);
+              requestCodeViewScroll(codeViewRef, {
+                type: "item",
+                id: item.id,
+                align: "start",
+                behavior: "smooth",
+              });
+            }}
+          />
+        ) : null}
       </div>
     </aside>
   );
@@ -1184,7 +1176,7 @@ function FileTree({
   onSelect: (item: CodeViewItem) => void;
 }) {
   return (
-    <div className="min-h-0 overflow-auto border-r bg-muted/40 p-2">
+    <div className="min-h-0 overflow-auto border-l bg-muted/40 p-2">
       <div className="flex flex-col gap-1">
         {items.map((item) => {
           const name =
@@ -1271,3 +1263,5 @@ function ClaimActions({ claim }: { claim: Claim }) {
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
+
+

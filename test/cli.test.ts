@@ -842,6 +842,63 @@ test("it aliases review and status/sync avoid push or commit suggestions", () =>
   expect(sync.stdout).not.toContain("git commit");
 });
 
+test("compiled binary spawns review server without script path", async () => {
+  const fixture = createFixtureRepo();
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const binary = join(fixture.root, "paire-bin");
+  const build = Bun.spawnSync(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "../scripts/build.ts"),
+      `--outfile=${binary}`,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(build.exitCode).toBe(0);
+
+  const env = {
+    ...process.env,
+    PAIRE_HOME: fixture.home,
+  };
+
+  expect(
+    Bun.spawnSync([binary, "start", "--base", "main"], {
+      cwd: fixture.repo,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode,
+  ).toBe(0);
+
+  const review = Bun.spawnSync([binary, "review"], {
+    cwd: fixture.repo,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(review.exitCode).toBe(0);
+  expect(text(review.stdout)).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
+  expect(text(review.stdout)).toContain("Open this URL in the browser:");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const state = await waitForServerState(fixture.home, session!.id);
+  const reviewResponse = await fetch(`${state.url}api/review`);
+  expect(reviewResponse.ok).toBe(true);
+
+  if (state.pid) {
+    try {
+      process.kill(state.pid);
+    } catch {
+      // already exited
+    }
+  }
+});
+
 test("compiled binary supports status in a fixture repo", () => {
   const fixture = createFixtureRepo();
   const binary = join(fixture.root, "paire-bin");
@@ -946,7 +1003,10 @@ async function waitForServerState(home: string, sessionId: string) {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     if (existsSync(path)) {
-      return JSON.parse(readFileSync(path, "utf8")) as { url: string };
+      return JSON.parse(readFileSync(path, "utf8")) as {
+        url: string;
+        pid?: number;
+      };
     }
     await Bun.sleep(50);
   }

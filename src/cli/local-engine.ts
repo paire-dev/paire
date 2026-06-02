@@ -929,6 +929,13 @@ async function printStatusAndOpen(
   await openReviewUi(ctx, session, git);
 }
 
+function paireCliSpawnArgs(...args: string[]): string[] {
+  if (import.meta.path.startsWith("/$bunfs/")) {
+    return [process.execPath, ...args];
+  }
+  return [process.execPath, join(import.meta.dir, "../cli.ts"), ...args];
+}
+
 async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
   if (ctx.env.PAIRE_BROWSER_HTML_CAPTURE) {
     await Bun.write(
@@ -958,8 +965,7 @@ async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
     unlinkSync(statePath);
   }
 
-  const cliPath = join(import.meta.dir, "../cli.ts");
-  Bun.spawn([process.execPath, cliPath, "_review-serve", session.id], {
+  Bun.spawn(paireCliSpawnArgs("_review-serve", session.id), {
     cwd: session.repoRoot,
     env: { ...ctx.env, PAIRE_HOME: ctx.paireHome },
     stdout: "ignore",

@@ -25,6 +25,7 @@
   "dependencies": {
     "@base-ui/react": "^1.5.0",
     "@pierre/diffs": "^1.2.5",
+    "@pierre/trees": "^1.0.0-beta.4",
     "@tanstack/react-query": "^5.100.14",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
