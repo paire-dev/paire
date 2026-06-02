@@ -140,6 +140,21 @@ const desktopPageClassName = cn(
 const proseClassName =
   "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
 const humanStatusOptions: Array<HumanStatus> = ["unreviewed", "accepted"];
+const reviewToken =
+  typeof window === "undefined"
+    ? ""
+    : new URLSearchParams(
+        window.location.hash.startsWith("#")
+          ? window.location.hash.slice(1)
+          : window.location.search,
+      ).get("token") ?? "";
+
+function reviewApiHeaders(headers: Record<string, string> = {}) {
+  return {
+    ...headers,
+    "x-paire-review-token": reviewToken,
+  };
+}
 
 // Returns a HTML DOM node id-friendly string for an Evidence.
 const getEvidenceId = (evidence: Evidence) => {
@@ -160,13 +175,19 @@ const getEvidenceId = (evidence: Evidence) => {
 };
 
 async function fetchReview() {
-  const response = await fetch("/api/review", { cache: "no-store" });
+  const response = await fetch("/api/review", {
+    cache: "no-store",
+    headers: reviewApiHeaders(),
+  });
   if (!response.ok) throw new Error("Failed to load review data.");
   return (await response.json()) as ReviewData;
 }
 
 async function fetchReviewDiff() {
-  const response = await fetch("/api/review/diff", { cache: "no-store" });
+  const response = await fetch("/api/review/diff", {
+    cache: "no-store",
+    headers: reviewApiHeaders(),
+  });
   if (!response.ok) throw new Error("Failed to load review diff.");
   const payload = (await response.json()) as { diff?: string };
   return payload.diff ?? "";
@@ -1472,7 +1493,7 @@ function ClaimActions({ claim, className }: { claim: Claim, className?: string  
         `/api/claims/${encodeURIComponent(claim.id)}/human-status`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: reviewApiHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ humanStatus }),
         },
       );
@@ -1489,7 +1510,7 @@ function ClaimActions({ claim, className }: { claim: Claim, className?: string  
         `/api/claims/${encodeURIComponent(claim.id)}/comment`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: reviewApiHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ note }),
         },
       );

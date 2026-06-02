@@ -462,7 +462,9 @@ test("review API returns threads and claims newest first", async () => {
   );
   try {
     const state = await waitForServerState(fixture.home, session!.id);
-    const reviewData = await fetch(`${state.url}api/review`).then((response) =>
+    const unauthenticated = await fetch(reviewApiUrl(state, "/api/review"));
+    expect(unauthenticated.status).toBe(401);
+    const reviewData = await reviewApiFetch(state, "/api/review").then((response) =>
       response.json(),
     );
     expect(reviewData.threads.map((thread: { id: string }) => thread.id)).toEqual([
@@ -527,7 +529,7 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
   );
   try {
     const state = await waitForServerState(fixture.home, session!.id);
-    const reviewResponse = await fetch(`${state.url}api/review`);
+    const reviewResponse = await reviewApiFetch(state, "/api/review");
     expect(reviewResponse.ok).toBe(true);
     const reviewText = await reviewResponse.text();
     expect(reviewText).not.toContain('"diff":"diff --git');
@@ -535,7 +537,7 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
     const evidence = reviewData.threads[0].claims[0].evidences[0];
     expect(evidence.claimId).toBe("claim_auth_before_create");
 
-    const reviewDiffResponse = await fetch(`${state.url}api/review/diff`);
+    const reviewDiffResponse = await reviewApiFetch(state, "/api/review/diff");
     expect(reviewDiffResponse.ok).toBe(true);
     const reviewDiffPayload = await reviewDiffResponse.json();
     expect(reviewDiffPayload.diff).toContain(
@@ -543,8 +545,9 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
     );
     expect(reviewDiffPayload.diff).toContain("throw new Error('Unauthorized')");
 
-    const diffResponse = await fetch(
-      `${state.url}api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
+    const diffResponse = await reviewApiFetch(
+      state,
+      `/api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
     );
     expect(diffResponse.ok).toBe(true);
     const diffPayload = await diffResponse.json();
@@ -872,6 +875,35 @@ test("stale apply is rejected without mutating claims or opening browser", () =>
   db.close();
 });
 
+test("apply rejects unsafe evidence paths and leaves review state unchanged", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change value to two");
+
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const result = hardcodedAgentResult(packet);
+  result.threads[0]!.claims[0]!.evidences[0]!.filePath = "../secrets.txt";
+  const resultPath = join(fixture.root, "unsafe-result.json");
+  writeFileSync(resultPath, JSON.stringify(result, null, 2));
+
+  const apply = runPaire(fixture, ["review", "--apply", resultPath]);
+  expect(apply.exitCode).not.toBe(0);
+  expect(apply.stderr).toContain(
+    "Evidence filePath must be a relative repository path",
+  );
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const claims = db
+    .query<{ count: number }, []>("select count(*) as count from claims")
+    .get();
+  expect(claims?.count).toBe(0);
+  db.close();
+});
+
 test("new git changes after apply require a fresh packet and do not open browser", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
@@ -1094,7 +1126,7 @@ test("compiled binary spawns review server without script path", async () => {
   expect(session?.id).toBeTruthy();
 
   const state = await waitForServerState(fixture.home, session!.id);
-  const reviewResponse = await fetch(`${state.url}api/review`);
+  const reviewResponse = await reviewApiFetch(state, "/api/review");
   expect(reviewResponse.ok).toBe(true);
 
   if (state.pid) {
@@ -1218,12 +1250,23 @@ async function waitForServerState(home: string, sessionId: string) {
     if (existsSync(path)) {
       return JSON.parse(readFileSync(path, "utf8")) as {
         url: string;
+        token: string;
         pid?: number;
       };
     }
     await Bun.sleep(50);
   }
   throw new Error("Review server did not start.");
+}
+
+function reviewApiUrl(state: { url: string }, path: string) {
+  return new URL(path, state.url).toString();
+}
+
+function reviewApiFetch(state: { url: string; token: string }, path: string) {
+  return fetch(reviewApiUrl(state, path), {
+    headers: { "x-paire-review-token": state.token },
+  });
 }
 
 function hardcodedAgentResult(packet: {
