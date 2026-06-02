@@ -1,9 +1,15 @@
-import { parsePatchFiles } from "@pierre/diffs";
+import { parsePatchFiles, resolveTheme } from "@pierre/diffs";
 import {
   CodeView,
   type CodeViewHandle,
   type CodeViewItem,
 } from "@pierre/diffs/react";
+import {
+  themeToTreeStyles,
+  type GitStatus,
+  type GitStatusEntry,
+} from "@pierre/trees";
+import { FileTree as PierreFileTree, useFileTree } from "@pierre/trees/react";
 import {
   QueryClient,
   QueryClientProvider,
@@ -197,6 +203,10 @@ function ReviewScreen() {
   });
 
   const codeItems = React.useMemo(() => parseCodeViewItems(rawDiff), [rawDiff]);
+  const gitStatusEntries = React.useMemo(
+    () => buildFileTreeGitStatus(codeItems, data?.git.status ?? ""),
+    [codeItems, data?.git.status],
+  );
 
   const scrollToEvidence = React.useCallback(
     (evidence: Evidence) => {
@@ -264,7 +274,12 @@ function ReviewScreen() {
     />
   );
   const reviewPanel = (
-    <ReviewScrollPanel filterBar={filterBar}>{reviewContent}</ReviewScrollPanel>
+    <ReviewScrollPanel
+      filterBar={filterBar}
+      sidebarCollapsible={isDesktopLayout}
+    >
+      {reviewContent}
+    </ReviewScrollPanel>
   );
 
   return (
@@ -319,6 +334,7 @@ function ReviewScreen() {
                   codeViewRef={codeViewRef}
                   className="h-full min-h-0"
                   diffError={isDiffError}
+                  gitStatus={gitStatusEntries}
                   items={codeItems}
                   open
                   selectedEvidence={selectedEvidence}
@@ -334,6 +350,7 @@ function ReviewScreen() {
                 codeViewRef={codeViewRef}
                 className="h-full min-h-0"
                 diffError={isDiffError}
+                gitStatus={gitStatusEntries}
                 items={codeItems}
                 open={false}
                 selectedEvidence={selectedEvidence}
@@ -350,6 +367,7 @@ function ReviewScreen() {
             codeViewRef={codeViewRef}
             className="h-[70vh]"
             diffError={isDiffError}
+            gitStatus={gitStatusEntries}
             items={codeItems}
             open={codePanelOpen}
             selectedEvidence={selectedEvidence}
@@ -365,14 +383,21 @@ function ReviewScreen() {
 function ReviewScrollPanel({
   filterBar,
   children,
+  sidebarCollapsible,
 }: {
   filterBar: React.ReactNode;
   children: React.ReactNode;
+  sidebarCollapsible: boolean;
 }) {
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col pr-4">
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
-        <div className="mr-auto w-full max-w-4xl">
+        <div
+          className={cn(
+            "w-full max-w-4xl",
+            sidebarCollapsible ? "mx-auto" : "mr-auto",
+          )}
+        >
           {filterBar}
           {children}
         </div>
@@ -422,6 +447,105 @@ function parseCodeViewItems(rawDiff: string): CodeViewItem[] {
 
 function normalizeFilePath(filePath: string) {
   return filePath.replace(/^\.\/+/, "").replace(/\\/g, "/");
+}
+
+function parseGitStatusPorcelain(porcelain: string): GitStatusEntry[] {
+  const entries: GitStatusEntry[] = [];
+
+  for (const rawLine of porcelain.split("\n")) {
+    const line = rawLine.trimEnd();
+    if (!line) continue;
+
+    if (line.startsWith("!!")) {
+      const path = normalizeFilePath(line.slice(3).trim());
+      if (path) entries.push({ path, status: "ignored" });
+      continue;
+    }
+
+    if (line.length < 4) continue;
+
+    const indexStatus = line[0] ?? " ";
+    const workTreeStatus = line[1] ?? " ";
+    let pathPart = line.slice(3).trim();
+
+    if (indexStatus === "?" && workTreeStatus === "?") {
+      const path = normalizeFilePath(pathPart);
+      if (path) entries.push({ path, status: "untracked" });
+      continue;
+    }
+
+    const renameArrow = " -> ";
+    const renameIndex = pathPart.indexOf(renameArrow);
+    if (renameIndex >= 0) {
+      pathPart = pathPart.slice(renameIndex + renameArrow.length).trim();
+    }
+
+    const path = normalizeFilePath(pathPart.replace(/^"|"$/g, ""));
+    if (!path) continue;
+
+    const status = gitStatusFromPorcelainCodes(indexStatus, workTreeStatus);
+    if (status) entries.push({ path, status });
+  }
+
+  return entries;
+}
+
+function buildFileTreeGitStatus(
+  items: CodeViewItem[],
+  porcelain: string,
+): GitStatusEntry[] {
+  const byPath = new Map<string, GitStatus>();
+
+  for (const entry of parseGitStatusPorcelain(porcelain)) {
+    byPath.set(entry.path, entry.status);
+  }
+
+  for (const item of items) {
+    if (item.type !== "diff") continue;
+    const path = normalizeFilePath(item.fileDiff.name);
+    if (byPath.has(path)) continue;
+
+    const status = gitStatusFromDiffChangeType(item.fileDiff.type);
+    if (status) byPath.set(path, status);
+  }
+
+  return [...byPath.entries()].map(([path, status]) => ({ path, status }));
+}
+
+function gitStatusFromDiffChangeType(type: string): GitStatus | null {
+  switch (type) {
+    case "new":
+      return "added";
+    case "deleted":
+      return "deleted";
+    case "rename-pure":
+    case "rename-changed":
+      return "renamed";
+    case "change":
+      return "modified";
+    default:
+      return null;
+  }
+}
+
+function gitStatusFromPorcelainCodes(
+  indexStatus: string,
+  workTreeStatus: string,
+): GitStatus | null {
+  if (indexStatus === "R" || workTreeStatus === "R") return "renamed";
+  if (indexStatus === "D" || workTreeStatus === "D") return "deleted";
+  if (indexStatus === "A" || workTreeStatus === "A") return "added";
+  if (indexStatus === "?" && workTreeStatus === "?") return "untracked";
+  if (indexStatus === "!" && workTreeStatus === "!") return "ignored";
+  if (
+    indexStatus === "M" ||
+    workTreeStatus === "M" ||
+    indexStatus === "U" ||
+    workTreeStatus === "U"
+  ) {
+    return "modified";
+  }
+  return null;
 }
 
 function filePathsMatch(left: string, right: string) {
@@ -1015,6 +1139,7 @@ function ReviewCodePanel({
   codeViewRef,
   className,
   diffError,
+  gitStatus,
   items,
   open,
   selectedEvidence,
@@ -1024,6 +1149,7 @@ function ReviewCodePanel({
   codeViewRef: React.RefObject<CodeViewHandle<undefined> | null>;
   className?: string;
   diffError: boolean;
+  gitStatus: GitStatusEntry[];
   items: CodeViewItem[];
   open: boolean;
   selectedEvidence: EvidenceSelection | null;
@@ -1108,7 +1234,7 @@ function ReviewCodePanel({
       <div
         className={cn(
           "grid min-h-0 flex-1",
-          fileTreeOpen ? "grid-cols-[minmax(0,1fr)_220px]" : "grid-cols-1",
+          fileTreeOpen ? "grid-cols-[minmax(0,1fr)_240px]" : "grid-cols-1",
         )}
       >
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1147,9 +1273,11 @@ function ReviewCodePanel({
         </div>
 
         {fileTreeOpen ? (
-          <FileTree
+          <ReviewFileTree
+            gitStatus={gitStatus}
             items={items}
             selectedId={selectedEvidence?.id ?? null}
+            themeName={diffTheme}
             onSelect={(item) => {
               onSelectedEvidenceChange(null);
               requestCodeViewScroll(codeViewRef, {
@@ -1166,37 +1294,86 @@ function ReviewCodePanel({
   );
 }
 
-function FileTree({
+function ReviewFileTree({
+  gitStatus,
   items,
   selectedId,
+  themeName,
   onSelect,
 }: {
+  gitStatus: GitStatusEntry[];
   items: CodeViewItem[];
   selectedId: string | null;
+  themeName: "pierre-dark" | "pierre-light";
   onSelect: (item: CodeViewItem) => void;
 }) {
+  const itemsRef = React.useRef(items);
+  const onSelectRef = React.useRef(onSelect);
+  itemsRef.current = items;
+  onSelectRef.current = onSelect;
+
+  const paths = React.useMemo(
+    () =>
+      items.map((item) =>
+        normalizeFilePath(
+          item.type === "diff" ? item.fileDiff.name : item.file.name,
+        ),
+      ),
+    [items],
+  );
+
+  const { model } = useFileTree({
+    paths,
+    gitStatus,
+    density: "compact",
+    flattenEmptyDirectories: true,
+    icons: { colored: true, set: "standard" },
+    initialExpansion: "open",
+    stickyFolders: true,
+    onSelectionChange: (selectedPaths) => {
+      const path = selectedPaths[0];
+      if (!path) return;
+      const item = findCodeViewItem(itemsRef.current, path);
+      if (item) onSelectRef.current(item);
+    },
+  });
+
+  const [themeStyles, setThemeStyles] = React.useState<Record<string, string>>(
+    {},
+  );
+
+  React.useEffect(() => {
+    model.resetPaths(paths);
+  }, [model, paths]);
+
+  React.useEffect(() => {
+    model.setGitStatus(gitStatus);
+  }, [model, gitStatus]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void resolveTheme(themeName).then((theme) => {
+      if (!cancelled) setThemeStyles(themeToTreeStyles(theme));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [themeName]);
+
+  React.useEffect(() => {
+    if (!selectedId) return;
+    const item = items.find((entry) => entry.id === selectedId);
+    if (!item || item.type !== "diff") return;
+    model.scrollToPath(normalizeFilePath(item.fileDiff.name), { focus: false });
+  }, [items, model, selectedId]);
+
   return (
-    <div className="min-h-0 overflow-auto border-l bg-muted/40 p-2">
-      <div className="flex flex-col gap-1">
-        {items.map((item) => {
-          const name =
-            item.type === "diff" ? item.fileDiff.name : item.file.name;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              className={cn(
-                "flex min-h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted-foreground hover:bg-background hover:text-foreground",
-                selectedId === item.id && "bg-background text-foreground",
-              )}
-              onClick={() => onSelect(item)}
-            >
-              <FileCode data-icon="inline-start" />
-              <span className="truncate">{name}</span>
-            </button>
-          );
-        })}
-      </div>
+    <div className="min-h-0 overflow-hidden border-l">
+      <PierreFileTree
+        model={model}
+        className="h-full min-h-0"
+        style={themeStyles}
+      />
     </div>
   );
 }
