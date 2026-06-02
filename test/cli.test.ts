@@ -351,6 +351,14 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
     const evidence = reviewData.threads[0].claims[0].evidences[0];
     expect(evidence.claimId).toBe("claim_auth_before_create");
 
+    const reviewDiffResponse = await fetch(`${state.url}api/review/diff`);
+    expect(reviewDiffResponse.ok).toBe(true);
+    const reviewDiffPayload = await reviewDiffResponse.json();
+    expect(reviewDiffPayload.diff).toContain(
+      "diff --git a/src/app.ts b/src/app.ts",
+    );
+    expect(reviewDiffPayload.diff).toContain("throw new Error('Unauthorized')");
+
     const diffResponse = await fetch(
       `${state.url}api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
     );

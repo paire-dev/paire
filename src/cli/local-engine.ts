@@ -919,6 +919,8 @@ function createReviewServer(session: SessionRow, ctx: Context) {
       "/": reviewApp,
       "/api/review": (request: Request) =>
         handleReviewRequest(request, session, ctx),
+      "/api/review/diff": (request: Request) =>
+        handleReviewDiffRequest(request, session, ctx),
       "/api/claims/:claimId/evidence-diff": (request: Request) =>
         handleEvidenceDiffRequest(request, session, ctx),
       "/api/claims/:claimId/human-status": (request: Request) =>
@@ -1113,6 +1115,19 @@ async function handleEvidenceDiffRequest(
     true,
   );
   return Response.json({ diff: fileToRawDiff(totalDiff, evidence.filePath) });
+}
+
+async function handleReviewDiffRequest(
+  request: Request,
+  session: SessionRow,
+  _ctx: Context,
+) {
+  if (request.method !== "GET") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  return Response.json({
+    diff: gitDiffForCurrentState(session.baseCommit, session.repoRoot, true),
+  });
 }
 
 async function handleCommentRequest(
