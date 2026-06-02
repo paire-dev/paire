@@ -742,6 +742,33 @@ test("reset re-baselines review so the next packet covers branch changes since b
   expect(incrementalDiff).toContain("featureFlag");
 });
 
+test("start baselines new sessions at baseCommit so existing branch commits are reviewed", () => {
+  const fixture = createFixtureRepo();
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  writeFileSync(
+    join(fixture.repo, "src/prestart-feature.ts"),
+    "export const prestartFeature = true;\n",
+  );
+  commitAll(fixture.repo, "add prestart feature");
+
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.stdout).toContain("Action required");
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  expect(packet.previousAppliedFingerprint).toBe(packet.baseCommit);
+  expect(
+    packet.changedFiles.some(
+      (file: { path: string }) => file.path === "src/prestart-feature.ts",
+    ),
+  ).toBe(true);
+  expect(readFileSync(packet.incrementalDiffArtifactPath, "utf8")).toContain(
+    "prestartFeature",
+  );
+});
+
 test("committed files that started untracked are included in review packets", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);

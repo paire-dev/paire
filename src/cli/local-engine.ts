@@ -328,7 +328,7 @@ async function startCommand(args: string[], ctx: Context) {
   }
 
   if (!getLastAppliedRevision(ctx.db, sessionId)) {
-    insertAppliedBaselineRevision(ctx.db, sessionId, git.head, now);
+    insertAppliedBaselineRevision(ctx.db, sessionId, baseCommit, now);
   }
 
   ctx.stdout(
@@ -1998,9 +1998,13 @@ function gitDiffForCurrentState(
   repoRoot: string,
   allowFail = false,
 ) {
-  return gitCommand(["diff", `${gitDiffBaseRef(base)}..HEAD`], repoRoot, {
-    allowFail,
-  });
+  return gitCommand(
+    ["diff", "-w", `${gitDiffBaseRef(base)}..HEAD`],
+    repoRoot,
+    {
+      allowFail,
+    },
+  );
 }
 
 function gitCommand(

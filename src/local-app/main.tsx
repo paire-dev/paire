@@ -25,16 +25,20 @@ import {
   Bot,
   Check,
   ChevronRight,
+  Columns2,
   FileCode,
   Files,
   FolderTree,
+  ListOrdered,
   MessageSquare,
   Monitor,
   Moon,
   PanelRightClose,
   PanelRightOpen,
+  Rows2,
   Sun,
   ThumbsUp,
+  WrapText,
 } from "lucide-react";
 import * as React from "react";
 import { createRoot } from "react-dom/client";
@@ -43,6 +47,9 @@ import { Streamdown } from "streamdown";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
+import { ButtonGroup } from "./components/ui/button-group";
+import { Toggle } from "./components/ui/toggle";
+import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import {
   Tooltip,
   TooltipContent,
@@ -1027,7 +1034,9 @@ function ClaimCard({
       )}
     >
       <div className="flex">
-        <span className="relative left-4 text-xl font-medium leading-snug text-muted-foreground">{index + 1}.&nbsp;</span>
+        <span className="relative left-4 text-xl font-medium leading-snug text-muted-foreground">
+          {index + 1}.&nbsp;
+        </span>
         <div>
           <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
             <CardTitle className="flex text-xl font-medium leading-snug">
@@ -1037,7 +1046,11 @@ function ClaimCard({
               {claim.updatedAt ? (
                 <ClaimTimeAgo updatedAt={claim.updatedAt} />
               ) : null}
-              <Badge variant="secondary">
+              <Badge
+                variant={
+                  claim.agentStatus === "new" ? "default" : "secondary"
+                }
+              >
                 {statusLabel(claim.agentStatus)}
               </Badge>
             </CardAction>
@@ -1053,16 +1066,18 @@ function ClaimCard({
             <ClaimDeltaPanels before={claim.before} after={claim.after} />
 
             {claim.evidences.length > 0 ? (
-              <div className="flex flex-col gap-2">
-                {claim.evidences.map((evidence, index) => (
-                  <EvidenceBlock
-                    key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
-                    evidence={evidence}
-                    selected={isEvidenceSelected(evidence)}
-                    onSelect={onEvidenceSelect}
-                  />
-                ))}
-              </div>
+              <TooltipProvider delay={700}>
+                <div className="flex flex-col gap-2">
+                  {claim.evidences.map((evidence, index) => (
+                    <EvidenceBlock
+                      key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
+                      evidence={evidence}
+                      selected={isEvidenceSelected(evidence)}
+                      onSelect={onEvidenceSelect}
+                    />
+                  ))}
+                </div>
+              </TooltipProvider>
             ) : null}
           </CardContent>
         </div>
@@ -1165,6 +1180,7 @@ function EvidenceBlock({
   return evidence.change ? (
     <Tooltip>
       <TooltipTrigger
+        delay={700}
         render={
           <Button
             type="button"
@@ -1241,6 +1257,97 @@ function AiText({
   );
 }
 
+type DiffOverflow = "wrap" | "scroll";
+type DiffLayoutStyle = "split" | "unified";
+
+function DiffViewControls({
+  diffStyle,
+  lineNumbersEnabled,
+  overflow,
+  onDiffStyleChange,
+  onLineNumbersEnabledChange,
+  onOverflowChange,
+}: {
+  diffStyle: DiffLayoutStyle;
+  lineNumbersEnabled: boolean;
+  overflow: DiffOverflow;
+  onDiffStyleChange: (style: DiffLayoutStyle) => void;
+  onLineNumbersEnabledChange: (enabled: boolean) => void;
+  onOverflowChange: (overflow: DiffOverflow) => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      <ButtonGroup>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                variant="outline"
+                size="sm"
+                pressed={overflow === "wrap"}
+                onPressedChange={(pressed) =>
+                  onOverflowChange(pressed ? "wrap" : "scroll")
+                }
+                aria-label={
+                  overflow === "wrap"
+                    ? "Disable line wrap"
+                    : "Enable line wrap"
+                }
+              >
+                <WrapText data-icon="inline-start" />
+              </Toggle>
+            }
+          />
+          <TooltipContent>Wrap lines</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                variant="outline"
+                size="sm"
+                pressed={lineNumbersEnabled}
+                onPressedChange={onLineNumbersEnabledChange}
+                aria-label={
+                  lineNumbersEnabled
+                    ? "Hide line numbers"
+                    : "Show line numbers"
+                }
+              >
+                <ListOrdered data-icon="inline-start" />
+              </Toggle>
+            }
+          />
+          <TooltipContent>Line numbers</TooltipContent>
+        </Tooltip>
+      </ButtonGroup>
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        spacing={0}
+        value={diffStyle}
+        onValueChange={(value) => {
+          if (value === "split" || value === "unified") {
+            onDiffStyleChange(value);
+          }
+        }}
+      >
+        <ToggleGroupItem value="split" aria-label="Split view" title="Split">
+          <Columns2 data-icon="inline-start" />
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="unified"
+          aria-label="Stacked view"
+          title="Stacked"
+        >
+          <Rows2 data-icon="inline-start" />
+        </ToggleGroupItem>
+      </ToggleGroup>
+    </div>
+  );
+}
+
 function ReviewCodePanel({
   codeViewRef,
   className,
@@ -1263,6 +1370,9 @@ function ReviewCodePanel({
   onSelectedEvidenceChange: (selection: EvidenceSelection | null) => void;
 }) {
   const [fileTreeOpen, setFileTreeOpen] = React.useState(false);
+  const [diffOverflow, setDiffOverflow] = React.useState<DiffOverflow>("wrap");
+  const [lineNumbersEnabled, setLineNumbersEnabled] = React.useState(true);
+  const [diffStyle, setDiffStyle] = React.useState<DiffLayoutStyle>("split");
   const { resolvedTheme } = useTheme();
   const diffTheme = resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
 
@@ -1320,17 +1430,27 @@ function ReviewCodePanel({
             {items.length} {items.length === 1 ? "file" : "files"}
           </Badge>
         </div>
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className="size-8"
-          aria-label={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
-          title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
-          onClick={() => setFileTreeOpen((value) => !value)}
-        >
-          <FolderTree data-icon="inline-start" />
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          <DiffViewControls
+            diffStyle={diffStyle}
+            lineNumbersEnabled={lineNumbersEnabled}
+            overflow={diffOverflow}
+            onDiffStyleChange={setDiffStyle}
+            onLineNumbersEnabledChange={setLineNumbersEnabled}
+            onOverflowChange={setDiffOverflow}
+          />
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="size-8"
+            aria-label={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
+            title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
+            onClick={() => setFileTreeOpen((value) => !value)}
+          >
+            <FolderTree data-icon="inline-start" />
+          </Button>
+        </div>
       </div>
 
       <div
@@ -1358,10 +1478,10 @@ function ReviewCodePanel({
               disableWorkerPool
               options={{
                 theme: diffTheme,
-                diffStyle: "unified",
-                overflow: "wrap",
+                diffStyle,
+                overflow: diffOverflow,
                 diffIndicators: "classic",
-                disableLineNumbers: false,
+                disableLineNumbers: !lineNumbersEnabled,
                 disableFileHeader: false,
                 stickyHeaders: true,
                 unsafeCSS: DIFF_SELECTED_LINE_UNSAFE_CSS,
