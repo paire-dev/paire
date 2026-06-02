@@ -89,8 +89,6 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   );
   const html = readFileSync(fixture.htmlCapture, "utf8");
   expect(html).toContain('src="./main.tsx"');
-  expect(html).not.toContain('data-human-status="concern"');
-  expect(html).not.toContain('data-human-status="irrelevant"');
   expect(html).not.toContain("cdn.tailwindcss.com");
 
   const db = new Database(join(fixture.home, "paire.db"));
@@ -216,6 +214,12 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
     "http://127.0.0.1:",
   );
 
+  const dbAfterFirstApply = new Database(join(fixture.home, "paire.db"));
+  dbAfterFirstApply
+    .prepare("update claims set humanStatus = 'accepted'")
+    .run();
+  dbAfterFirstApply.close();
+
   writeFileSync(fixture.browserCapture, "");
   const reopen = runPaire(fixture, ["review"]);
   expect(reopen.exitCode).toBe(0);
@@ -317,6 +321,18 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   expect(unchangedClaim?.afterText).toBe(
     "Project creation rejects missing users before returning data.",
   );
+  const authHumanStatus = db
+    .query<{ humanStatus: string }, []>(
+      "select humanStatus from claims where id like '%:claim_sandbox_auth_required'",
+    )
+    .get();
+  const workspaceHumanStatus = db
+    .query<{ humanStatus: string }, []>(
+      "select humanStatus from claims where id like '%:claim_sandbox_workspace_required'",
+    )
+    .get();
+  expect(authHumanStatus?.humanStatus).toBe("accepted");
+  expect(workspaceHumanStatus?.humanStatus).toBe("unreviewed");
   db.close();
 });
 

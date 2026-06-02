@@ -62,7 +62,7 @@ type ClaimStatus =
   | "invalidated"
   | "superseded";
 
-type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
+type HumanStatus = "unreviewed" | "accepted";
 
 type AgentEvidence = {
   claimId?: string;
@@ -176,12 +176,7 @@ const VALID_AGENT_STATUSES = new Set([
   "invalidated",
   "superseded",
 ]);
-const VALID_HUMAN_STATUSES = new Set([
-  "unreviewed",
-  "accepted",
-  "concern",
-  "irrelevant",
-]);
+const VALID_HUMAN_STATUSES = new Set(["unreviewed", "accepted"]);
 
 export async function runCli(argv: string[], options: CliOptions = {}) {
   const ctx = makeContext(options);
@@ -498,6 +493,10 @@ async function applyReviewCommand(
         const claimAfter = preserveClaimCopy
           ? existingClaim.afterText
           : normalizeNullableCopy(claim.after);
+        const claimHumanStatus =
+          existingClaim && !preserveClaimCopy
+            ? "unreviewed"
+            : (existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed");
         ctx.db
           .prepare(
             `insert into claims (id, threadId, sessionId, title, description, beforeText, afterText, agentStatus, humanStatus, updatedAt)
@@ -505,7 +504,7 @@ async function applyReviewCommand(
              on conflict(id) do update set threadId = excluded.threadId, title = excluded.title,
                description = excluded.description,
                beforeText = excluded.beforeText, afterText = excluded.afterText,
-               agentStatus = excluded.agentStatus, updatedAt = excluded.updatedAt`,
+               agentStatus = excluded.agentStatus, humanStatus = excluded.humanStatus, updatedAt = excluded.updatedAt`,
           )
           .run(
             claimDbId,
@@ -516,7 +515,7 @@ async function applyReviewCommand(
             claimBefore,
             claimAfter,
             claim.agentStatus,
-            existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed",
+            claimHumanStatus,
             preserveClaimCopy && existingClaim
               ? existingClaim.updatedAt
               : ++applyOrder,

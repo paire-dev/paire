@@ -72,7 +72,7 @@ const DIFF_SELECTED_LINE_UNSAFE_CSS = `
   }
 `;
 
-type HumanStatus = "unreviewed" | "accepted" | "concern" | "irrelevant";
+type HumanStatus = "unreviewed" | "accepted";
 type FilterValue = "all" | string;
 
 type Evidence = {
@@ -139,12 +139,7 @@ const desktopPageClassName = cn(
 );
 const proseClassName =
   "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
-const humanStatusOptions: Array<HumanStatus> = [
-  "unreviewed",
-  "accepted",
-  "concern",
-  "irrelevant",
-];
+const humanStatusOptions: Array<HumanStatus> = ["unreviewed", "accepted"];
 
 // Returns a HTML DOM node id-friendly string for an Evidence.
 const getEvidenceId = (evidence: Evidence) => {
@@ -397,7 +392,7 @@ function ReviewScrollPanel({
 }) {
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-4">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-8">
         <div
           className={cn(
             "w-full max-w-3xl",
@@ -995,7 +990,7 @@ function ClaimCard({
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <Card>
+    <Card className={cn(claim.humanStatus === "accepted" ? "ring-1 ring-primary/80" : "")}>
       <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
         <CardTitle className="flex text-xl font-medium leading-snug">
           <span className="text-muted-foreground">{index + 1}.&nbsp;</span>
@@ -1005,7 +1000,7 @@ function ClaimCard({
           {claim.updatedAt ? (
             <ClaimTimeAgo updatedAt={claim.updatedAt} />
           ) : null}
-          <Badge variant="destructive">{statusLabel(claim.agentStatus)}</Badge>
+          <Badge variant="secondary">{statusLabel(claim.agentStatus)}</Badge>
         </CardAction>
       </CardHeader>
 
@@ -1033,12 +1028,7 @@ function ClaimCard({
       </CardContent>
 
       <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center px-6">
-        <code className="font-mono text-sm text-muted-foreground">
-          {claim.evidences.length === 0
-            ? "No evidence span"
-            : `${claim.evidences.length} evidence ${claim.evidences.length === 1 ? "span" : "spans"}`}
-        </code>
-        <ClaimActions claim={claim} />
+        <ClaimActions claim={claim} className="ml-auto" />
       </CardFooter>
     </Card>
   );
@@ -1474,19 +1464,19 @@ function ReviewFileTree({
   );
 }
 
-function ClaimActions({ claim }: { claim: Claim }) {
+function ClaimActions({ claim, className }: { claim: Claim, className?: string  }) {
   const queryClient = useQueryClient();
-  const acceptMutation = useMutation({
-    mutationFn: async () => {
+  const statusMutation = useMutation({
+    mutationFn: async (humanStatus: HumanStatus) => {
       const response = await fetch(
         `/api/claims/${encodeURIComponent(claim.id)}/human-status`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ humanStatus: "accepted" }),
+          body: JSON.stringify({ humanStatus }),
         },
       );
-      if (!response.ok) throw new Error("Failed to accept claim.");
+      if (!response.ok) throw new Error("Failed to update claim status.");
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["review"] }),
   });
@@ -1509,7 +1499,7 @@ function ClaimActions({ claim }: { claim: Claim }) {
   });
 
   return (
-    <div className="inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto">
+    <div className={cn("inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto", className)}>
       <Button
         type="button"
         variant="outline"
@@ -1523,7 +1513,11 @@ function ClaimActions({ claim }: { claim: Claim }) {
         type="button"
         variant={claim.humanStatus === "accepted" ? "default" : "outline"}
         className="min-w-20 flex-1 rounded-none border-0 border-l shadow-none sm:flex-none"
-        onClick={() => acceptMutation.mutate()}
+        onClick={() =>
+          statusMutation.mutate(
+            claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
+          )
+        }
       >
         {claim.humanStatus === "accepted" ? (
           <Check data-icon="inline-start" />
