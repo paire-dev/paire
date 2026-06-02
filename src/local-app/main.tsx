@@ -1158,7 +1158,7 @@ function ClaimCard({
               ) : null}
               <Badge
                 variant={
-                  claim.agentStatus === "new" ? "default" : "secondary"
+                  claim.agentStatus !== "unchanged" ? "default" : "secondary"
                 }
               >
                 {statusLabel(claim.agentStatus)}
