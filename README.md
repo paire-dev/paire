@@ -92,6 +92,8 @@ paire install
 paire status
 paire sync
 paire reset
+paire server start [--no-open]
+paire server stop
 paire review --apply <file>
 paire review --stdin
 ```

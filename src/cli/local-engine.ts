@@ -213,6 +213,9 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
       case "reset":
         await resetCommand(ctx);
         return 0;
+      case "server":
+        await serverCommand(rest, ctx);
+        return 0;
       case "status":
         await statusCommand(ctx);
         return 0;
@@ -608,6 +611,65 @@ async function syncCommand(ctx: Context) {
   );
 }
 
+async function serverCommand(args: string[], ctx: Context) {
+  const [subcommand = "help", ...rest] = args;
+  switch (subcommand) {
+    case "start":
+      await serverStartCommand(rest, ctx);
+      return;
+    case "stop":
+      await serverStopCommand(ctx);
+      return;
+    case "help":
+    case "--help":
+    case "-h":
+      ctx.stdout(serverHelpText());
+      return;
+    default:
+      throw new Error(`Unknown server command: ${subcommand}\n\n${serverHelpText()}`);
+  }
+}
+
+async function serverStartCommand(args: string[], ctx: Context) {
+  const parsed = parseFlags(args);
+  const git = getGitState(ctx.cwd);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
+  if (!session) {
+    ctx.stdout(
+      `No Paire session found for branch ${git.branch}.\nRun:\npaire start --base ${detectBaseRef(git.repoRoot)}`,
+    );
+    return;
+  }
+
+  const state = await ensureReviewServer(ctx, session);
+  if (!parsed.flags.has("no-open")) {
+    await ctx.openBrowser(state.url);
+  }
+  ctx.stdout(reviewUiMessage(state.url));
+}
+
+async function serverStopCommand(ctx: Context) {
+  const git = getGitState(ctx.cwd);
+  const session = getSession(ctx.db, git.repoRoot, git.branch);
+  if (!session) {
+    ctx.stdout(
+      `No Paire session found for branch ${git.branch}.\nRun:\npaire start --base ${detectBaseRef(git.repoRoot)}`,
+    );
+    return;
+  }
+
+  const outcome = await stopReviewServerAtPath(reviewServerStatePath(ctx, session.id));
+  if (outcome === "stopped") {
+    ctx.stdout("Stopped the review UI server.");
+    return;
+  }
+  if (outcome === "stale") {
+    ctx.stdout("Review UI server was not running. Removed stale state.");
+    return;
+  }
+  ctx.stdout("No review UI server is running for this branch.");
+}
+
 async function resetCommand(ctx: Context) {
   const git = getGitState(ctx.cwd);
   const session = getSession(ctx.db, git.repoRoot, git.branch);
@@ -994,12 +1056,19 @@ async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
     return;
   }
 
+  const state = await ensureReviewServer(ctx, session);
+  await ctx.openBrowser(state.url);
+  ctx.stdout(reviewUiMessage(state.url));
+}
+
+async function ensureReviewServer(
+  ctx: Context,
+  session: SessionRow,
+): Promise<ReviewServerState> {
   const statePath = reviewServerStatePath(ctx, session.id);
   const existing = readReviewServerState(statePath);
   if (existing?.pid && existing.token && isProcessRunning(existing.pid)) {
-    await ctx.openBrowser(existing.url);
-    ctx.stdout(reviewUiMessage(existing.url));
-    return;
+    return existing;
   }
 
   if (existing) {
@@ -1015,9 +1084,7 @@ async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
     detached: true,
   }).unref();
 
-  const state = await waitForReviewServerState(statePath);
-  await ctx.openBrowser(state.url);
-  ctx.stdout(reviewUiMessage(state.url));
+  return waitForReviewServerState(statePath);
 }
 
 function createReviewServer(session: SessionRow, ctx: Context, token: string) {
@@ -1135,6 +1202,60 @@ function isProcessRunning(pid: number) {
   } catch {
     return false;
   }
+}
+
+async function stopReviewServerAtPath(
+  statePath: string,
+): Promise<"stopped" | "stale" | "missing"> {
+  if (!existsSync(statePath)) {
+    return "missing";
+  }
+
+  const state = readReviewServerState(statePath);
+  if (!state) {
+    try {
+      unlinkSync(statePath);
+    } catch {
+      // ignore
+    }
+    return "stale";
+  }
+
+  const wasRunning = isProcessRunning(state.pid);
+  if (wasRunning) {
+    try {
+      process.kill(state.pid, "SIGTERM");
+    } catch {
+      // process may have exited between checks
+    }
+
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && isProcessRunning(state.pid)) {
+      await Bun.sleep(50);
+    }
+
+    if (isProcessRunning(state.pid)) {
+      try {
+        process.kill(state.pid, "SIGKILL");
+      } catch {
+        // ignore
+      }
+      const killDeadline = Date.now() + 1_000;
+      while (Date.now() < killDeadline && isProcessRunning(state.pid)) {
+        await Bun.sleep(50);
+      }
+    }
+  }
+
+  if (existsSync(statePath)) {
+    try {
+      unlinkSync(statePath);
+    } catch {
+      // ignore
+    }
+  }
+
+  return wasRunning ? "stopped" : "stale";
 }
 
 function createReviewToken() {
@@ -2211,6 +2332,18 @@ function helpText() {
     "  status",
     "  sync",
     "  reset",
+    "  server start [--no-open]",
+    "  server stop",
     "  install",
+  ].join("\n");
+}
+
+function serverHelpText() {
+  return [
+    "Usage: paire server <command>",
+    "",
+    "Commands:",
+    "  start [--no-open]   Start or reuse the review UI server for the current branch",
+    "  stop                Stop the review UI server for the current branch",
   ].join("\n");
 }

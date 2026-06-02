@@ -1482,7 +1482,7 @@ function ReviewCodePanel({
   const [fileTreeOpen, setFileTreeOpen] = React.useState(false);
   const [diffOverflow, setDiffOverflow] = React.useState<DiffOverflow>("wrap");
   const [lineNumbersEnabled, setLineNumbersEnabled] = React.useState(true);
-  const [diffStyle, setDiffStyle] = React.useState<DiffLayoutStyle>("split");
+  const [diffStyle, setDiffStyle] = React.useState<DiffLayoutStyle>("unified");
   const { resolvedTheme } = useTheme();
   const diffTheme = resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
 

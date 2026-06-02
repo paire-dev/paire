@@ -1108,6 +1108,111 @@ test("it aliases review and status/sync avoid push or commit suggestions", () =>
   expect(sync.stdout).not.toContain("git commit");
 });
 
+test("paire server start spawns or reuses the review UI server", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  writeFileSync(fixture.browserCapture, "");
+  const start = runPaire(fixture, ["server", "start"]);
+  expect(start.exitCode).toBe(0);
+  expect(start.stdout).toContain("Review UI:");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain("http://127.0.0.1:");
+
+  const state = await waitForServerState(fixture.home, session!.id);
+  expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
+
+  writeFileSync(fixture.browserCapture, "");
+  const startAgain = runPaire(fixture, ["server", "start"]);
+  expect(startAgain.exitCode).toBe(0);
+  expect(startAgain.stdout).toContain(state.url);
+  expect(readFileSync(fixture.browserCapture, "utf8")).toContain(state.url);
+
+  writeFileSync(fixture.browserCapture, "");
+  const startNoOpen = runPaire(fixture, ["server", "start", "--no-open"]);
+  expect(startNoOpen.exitCode).toBe(0);
+  expect(startNoOpen.stdout).toContain(state.url);
+  expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
+
+  const stop = runPaire(fixture, ["server", "stop"]);
+  expect(stop.exitCode).toBe(0);
+  expect(stop.stdout).toContain("Stopped the review UI server.");
+});
+
+test("paire server stop shuts down the review UI server for the current branch", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const server = Bun.spawn(
+    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
+    {
+      cwd: fixture.repo,
+      env: { ...process.env, PAIRE_HOME: fixture.home },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const state = await waitForServerState(fixture.home, session!.id);
+    expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
+
+    const stop = runPaire(fixture, ["server", "stop"]);
+    expect(stop.exitCode).toBe(0);
+    expect(stop.stdout).toContain("Stopped the review UI server.");
+    expect(
+      existsSync(join(fixture.home, "review-servers", `${session!.id}.json`)),
+    ).toBe(false);
+    await server.exited;
+
+    const stopAgain = runPaire(fixture, ["server", "stop"]);
+    expect(stopAgain.exitCode).toBe(0);
+    expect(stopAgain.stdout).toContain("No review UI server is running for this branch.");
+  } finally {
+    if (!server.killed) {
+      server.kill();
+      await server.exited;
+    }
+  }
+});
+
+test("paire server stop removes stale review server state", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const statePath = join(fixture.home, "review-servers", `${session!.id}.json`);
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      pid: 2_147_483_647,
+      port: 59999,
+      url: "http://127.0.0.1:59999/",
+      token: "stale-token",
+      sessionId: session!.id,
+      repoRoot: fixture.repo,
+      startedAt: Date.now(),
+    }),
+  );
+
+  const stop = runPaire(fixture, ["server", "stop"]);
+  expect(stop.exitCode).toBe(0);
+  expect(stop.stdout).toContain("Review UI server was not running. Removed stale state.");
+  expect(existsSync(statePath)).toBe(false);
+});
+
 test("compiled binary spawns review server without script path", async () => {
   const fixture = createFixtureRepo();
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
