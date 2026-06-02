@@ -1067,7 +1067,12 @@ async function ensureReviewServer(
 ): Promise<ReviewServerState> {
   const statePath = reviewServerStatePath(ctx, session.id);
   const existing = readReviewServerState(statePath);
-  if (existing?.pid && existing.token && isProcessRunning(existing.pid)) {
+  if (
+    existing?.pid &&
+    existing.token &&
+    isProcessRunning(existing.pid) &&
+    (await isReviewServerAlive(existing))
+  ) {
     return existing;
   }
 
@@ -1204,6 +1209,18 @@ function isProcessRunning(pid: number) {
   }
 }
 
+async function isReviewServerAlive(state: Pick<ReviewServerState, "url" | "token">) {
+  try {
+    const response = await fetch(new URL("/api/review", state.url), {
+      headers: { [REVIEW_TOKEN_HEADER]: state.token },
+      signal: AbortSignal.timeout(1_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function stopReviewServerAtPath(
   statePath: string,
 ): Promise<"stopped" | "stale" | "missing"> {
@@ -1221,7 +1238,8 @@ async function stopReviewServerAtPath(
     return "stale";
   }
 
-  const wasRunning = isProcessRunning(state.pid);
+  const wasRunning =
+    isProcessRunning(state.pid) && (await isReviewServerAlive(state));
   if (wasRunning) {
     try {
       process.kill(state.pid, "SIGTERM");

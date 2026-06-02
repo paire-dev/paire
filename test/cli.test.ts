@@ -1213,6 +1213,42 @@ test("paire server stop removes stale review server state", async () => {
   expect(existsSync(statePath)).toBe(false);
 });
 
+test("paire server stop does not kill unrelated process when PID was reused", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const sleeper = Bun.spawn(["sleep", "300"], { stdout: "ignore" });
+  try {
+    const statePath = join(fixture.home, "review-servers", `${session!.id}.json`);
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        pid: sleeper.pid,
+        port: 59999,
+        url: "http://127.0.0.1:59999/",
+        token: "stale-token",
+        sessionId: session!.id,
+        repoRoot: fixture.repo,
+        startedAt: Date.now(),
+      }),
+    );
+
+    const stop = runPaire(fixture, ["server", "stop"]);
+    expect(stop.exitCode).toBe(0);
+    expect(stop.stdout).toContain("Review UI server was not running. Removed stale state.");
+    expect(existsSync(statePath)).toBe(false);
+    expect(sleeper.exitCode).toBe(null);
+  } finally {
+    sleeper.kill();
+    await sleeper.exited;
+  }
+});
+
 test("compiled binary spawns review server without script path", async () => {
   const fixture = createFixtureRepo();
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
