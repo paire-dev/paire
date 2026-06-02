@@ -162,20 +162,17 @@ Unsupported values fail closed. The script never evaluates detected values as sh
 
 ## Install
 
-From a private GitHub release, use a token with release asset access:
-
 ```sh
 curl -fsSLo /tmp/paire-install.sh \
   https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh
 less /tmp/paire-install.sh
-PAIRE_GITHUB_TOKEN="$GITHUB_TOKEN" bash /tmp/paire-install.sh
+bash /tmp/paire-install.sh
 ```
 
-The short form is:
+Or pipe directly:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh |
-  PAIRE_GITHUB_TOKEN="$GITHUB_TOKEN" bash
+curl -fsSL https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh | bash
 ```
 
 The installer:
@@ -190,7 +187,7 @@ Pin a version or install elsewhere:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/paire-dev/paire-cli/main/scripts/install.sh |
-  PAIRE_GITHUB_TOKEN="$GITHUB_TOKEN" PAIRE_VERSION=v0.1.0 PAIRE_INSTALL_DIR="$HOME/bin" bash
+  PAIRE_VERSION=v0.1.0 PAIRE_INSTALL_DIR="$HOME/bin" bash
 ```
 
 For local release testing:

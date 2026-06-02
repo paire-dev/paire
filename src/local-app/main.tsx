@@ -497,8 +497,6 @@ function ClaimCard({ claim }: { claim: Claim }) {
               <EvidenceBlock
                 key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
                 evidence={evidence}
-                index={index}
-                total={claim.evidences.length}
               />
             ))}
           </div>
@@ -517,27 +515,12 @@ function ClaimCard({ claim }: { claim: Claim }) {
   );
 }
 
-function EvidenceBlock({
-  evidence,
-  index,
-  total,
-}: {
-  evidence: Evidence;
-  index: number;
-  total: number;
-}) {
+function EvidenceBlock({ evidence }: { evidence: Evidence }) {
   return (
     <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <code className="font-mono text-sm text-muted-foreground">
-          {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
-        </code>
-        {total > 1 ? (
-          <Badge variant="outline" className="text-muted-foreground">
-            Evidence {index + 1} of {total}
-          </Badge>
-        ) : null}
-      </div>
+      <code className="font-mono text-sm text-muted-foreground">
+        {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
+      </code>
 
       {(evidence.before || evidence.after) && (
         <div className="grid gap-3 sm:grid-cols-2">
