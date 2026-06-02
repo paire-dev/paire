@@ -1001,6 +1001,18 @@ test("paire install skips missing agent instruction files", () => {
   expect(result.stdout).toContain("Not found (skipped): CLAUDE.md");
 });
 
+test("paire install works in a git repo before the first commit", () => {
+  const fixture = createUncommittedFixtureRepo();
+  writeFileSync(join(fixture.repo, "AGENTS.md"), "# Agent rules\n");
+
+  const result = runPaire(fixture, ["install"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("Updated: AGENTS.md");
+  expect(readFileSync(join(fixture.repo, "AGENTS.md"), "utf8")).toContain(
+    "<!-- paire -->",
+  );
+});
+
 test("it aliases review and status/sync avoid push or commit suggestions", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
@@ -1102,13 +1114,21 @@ test("compiled binary supports status in a fixture repo", () => {
   expect(text(result.stdout)).toContain("No Paire session found");
 });
 
-function createFixtureRepo(): Fixture {
+function createUncommittedFixtureRepo(): Fixture {
   const root = mkdtempSync(join(tmpdir(), "paire-cli-"));
   const repo = join(root, "repo");
   const home = join(root, "home");
   const browserCapture = join(root, "browser.txt");
   const htmlCapture = join(root, "review.html");
   run(["git", "init", "-b", "main", repo], root);
+  const fixture = { root, repo, home, browserCapture, htmlCapture };
+  fixtures.push(fixture);
+  return fixture;
+}
+
+function createFixtureRepo(): Fixture {
+  const fixture = createUncommittedFixtureRepo();
+  const { repo } = fixture;
   run(["git", "config", "user.email", "test@example.com"], repo);
   run(["git", "config", "user.name", "Test User"], repo);
   writeFileSync(join(repo, "package-lock.json"), "{}\n");
@@ -1116,8 +1136,6 @@ function createFixtureRepo(): Fixture {
   writeFileSync(join(repo, "src/app.ts"), "export const value = 1;\n");
   run(["git", "add", "."], repo);
   run(["git", "commit", "-m", "initial"], repo);
-  const fixture = { root, repo, home, browserCapture, htmlCapture };
-  fixtures.push(fixture);
   return fixture;
 }
 

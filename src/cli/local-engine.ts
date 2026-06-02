@@ -375,8 +375,7 @@ async function reviewCommand(args: string[], ctx: Context) {
 }
 
 function installCommand(ctx: Context) {
-  const git = getGitState(ctx.cwd);
-  const result = installAgentInstructions(git.repoRoot);
+  const result = installAgentInstructions(getGitRepoRoot(ctx.cwd));
   ctx.stdout(formatInstallResult(result));
 }
 
@@ -1750,8 +1749,12 @@ function normalizeStoredClaim(
   };
 }
 
+function getGitRepoRoot(cwd: string): string {
+  return gitCommand(["rev-parse", "--show-toplevel"], cwd).trim();
+}
+
 function getGitState(cwd: string): GitState {
-  const repoRoot = gitCommand(["rev-parse", "--show-toplevel"], cwd).trim();
+  const repoRoot = getGitRepoRoot(cwd);
   const branch = gitCommand(
     ["rev-parse", "--abbrev-ref", "HEAD"],
     repoRoot,
