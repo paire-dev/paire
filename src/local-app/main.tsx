@@ -583,39 +583,24 @@ function AiText({
 
 function EvidenceDiff({ evidence }: { evidence: Evidence }) {
   const [open, setOpen] = React.useState(false);
-  const [diff, setDiff] = React.useState(evidence.diff ?? "");
-  const [diffError, setDiffError] = React.useState(false);
   const panelRef = React.useRef<HTMLDivElement>(null);
   const { resolvedTheme } = useTheme();
   const diffTheme =
     resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
-
-  React.useEffect(() => {
-    setDiff(evidence.diff ?? "");
-    setDiffError(false);
-  }, [evidence.diff, evidence.filePath]);
-
-  React.useEffect(() => {
-    if (!open || diff || diffError) return;
-
-    const controller = new AbortController();
-    fetch(
-      `/api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
-      { cache: "no-store", signal: controller.signal },
-    )
-      .then((response) => {
-        if (!response.ok) throw new Error("Failed to load evidence diff.");
-        return response.json() as Promise<{ diff?: string }>;
-      })
-      .then((payload) => {
-        setDiff(payload.diff ?? "");
-      })
-      .catch((error) => {
-        if ((error as Error).name !== "AbortError") setDiffError(true);
-      });
-
-    return () => controller.abort();
-  }, [diff, diffError, evidence.claimId, evidence.filePath, open]);
+  const {
+    data: loadedDiff,
+    isError: diffError,
+    isFetching: diffFetching,
+    refetch: refetchDiff,
+  } = useQuery({
+    queryKey: ["evidence-diff", evidence.claimId, evidence.filePath],
+    queryFn: ({ signal }) => fetchEvidenceDiff(evidence, signal),
+    refetchOnMount: false,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
+  });
+  const diff = evidence.diff ?? loadedDiff ?? "";
 
   const selectedLines = React.useMemo(
     () => ({
@@ -666,20 +651,24 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
   const collapsed = !open || !diff;
   const toggleLabel = diffError
     ? "Retry"
-    : open && !diff
+    : (open && !diff) || (!diff && diffFetching)
       ? "Loading..."
       : open
         ? "Hide"
         : "Show";
 
   const toggleDiff = React.useCallback(() => {
-    if (open && diff && !diffError) {
+    if (diffError) {
+      setOpen(true);
+      void refetchDiff();
+      return;
+    }
+    if (open && diff) {
       setOpen(false);
       return;
     }
-    setDiffError(false);
     setOpen(true);
-  }, [diff, diffError, open]);
+  }, [diff, diffError, open, refetchDiff]);
 
   return (
     <div
@@ -692,11 +681,6 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
         disableWorkerPool
         selectedLines={diff ? selectedLines : null}
         renderHeaderPrefix={() => (
-          <span className="text-sm font-semibold text-foreground">
-            Code diff
-          </span>
-        )}
-        renderHeaderMetadata={() => (
           <Button
             type="button"
             size="sm"
@@ -716,6 +700,7 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
           disableLineNumbers: false,
           disableFileHeader: false,
           collapsed,
+          stickyHeader: true,
         }}
       />
     </div>
@@ -732,6 +717,16 @@ function collapsedEvidencePatch(evidence: Evidence) {
     `@@ -${line},0 +${line},0 @@`,
     "",
   ].join("\n");
+}
+
+async function fetchEvidenceDiff(evidence: Evidence, signal?: AbortSignal) {
+  const response = await fetch(
+    `/api/claims/${encodeURIComponent(evidence.claimId)}/evidence-diff?filePath=${encodeURIComponent(evidence.filePath)}`,
+    { cache: "no-store", signal },
+  );
+  if (!response.ok) throw new Error("Failed to load evidence diff.");
+  const payload = (await response.json()) as { diff?: string };
+  return payload.diff ?? "";
 }
 
 function ClaimActions({ claim }: { claim: Claim }) {
