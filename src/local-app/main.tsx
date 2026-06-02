@@ -11,12 +11,15 @@ import {
   ArrowLeftFromLine,
   ArrowRightFromLine,
   AlertTriangle,
-  Check,
+  CheRightChevronRight,
+  ChevronDown,
+  ChevronUp,
   MessageSquare,
   Monitor,
   Moon,
   Sun,
   ThumbsUp,
+  ChevronRight,
 } from "lucide-react";
 import * as React from "react";
 import { createRoot } from "react-dom/client";
@@ -24,11 +27,7 @@ import { Streamdown } from "streamdown";
 
 import { Button } from "./components/ui/button";
 import { Badge } from "./components/ui/badge";
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-} from "./components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import {
   Card,
   CardAction,
@@ -161,6 +160,8 @@ function ReviewScreen() {
 
   return (
     <main className={pageClassName}>
+      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
+
       <header className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="mb-1 text-xs font-bold uppercase text-muted-foreground">
@@ -176,8 +177,6 @@ function ReviewScreen() {
           <ModeToggle />
         </div>
       </header>
-
-      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
 
       <FilterBar
         agentStatus={agentStatusFilter}
@@ -208,10 +207,10 @@ function DirtyWorktreeAlert() {
   return (
     <Alert className="mb-4 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
       <AlertTriangle />
-      <AlertTitle>These are not the latest changes.</AlertTitle>
+      <AlertTitle>These are <strong>not</strong> the latest changes.</AlertTitle>
       <AlertDescription className="text-amber-900 dark:text-amber-200">
-        Commit your worktree changes, then run <code>paire review</code> again
-        to review the latest committed code.
+        <p>Commit your worktree changes, then run <code>paire review</code> again
+        to review the latest committed code.</p>
       </AlertDescription>
     </Alert>
   );
@@ -422,14 +421,14 @@ function FilterButton({
 function ThreadGroup({ thread }: { thread: Thread }) {
   return (
     <section className="flex flex-col gap-3">
-      <div className="flex flex-col gap-2 rounded-lg border bg-background p-4">
+      <div className="flex flex-col gap-2 pt-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="text-lg font-semibold leading-snug">
+            <h2 className="text-xl font-semibold leading-snug">
               <AiText source={thread.title || "Behavior"} inline />
             </h2>
             {thread.summary ? (
-              <div className="mt-1 text-sm leading-relaxed text-muted-foreground">
+              <div className="mt-1 text-md leading-relaxed text-muted-foreground">
                 <AiText source={thread.summary} />
               </div>
             ) : null}
@@ -448,8 +447,8 @@ function ThreadGroup({ thread }: { thread: Thread }) {
         </div>
       </div>
       <div className="grid gap-3">
-        {thread.claims.map((claim) => (
-          <ClaimCard key={claim.id} claim={claim} />
+        {thread.claims.map((claim, index) => (
+          <ClaimCard key={claim.id} claim={claim} index={index} />
         ))}
       </div>
     </section>
@@ -484,11 +483,12 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
   );
 }
 
-function ClaimCard({ claim }: { claim: Claim }) {
+function ClaimCard({ claim, index }: { claim: Claim, index: number }) {
   return (
     <Card>
       <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <CardTitle className="text-xl font-medium leading-snug">
+        <CardTitle className="flex text-xl font-medium leading-snug">
+          <span className="text-muted-foreground">{index + 1}.&nbsp;</span>
           <AiText source={claim.title} />
         </CardTitle>
         <CardAction className="flex flex-wrap items-center gap-2">
@@ -533,24 +533,21 @@ function ClaimCard({ claim }: { claim: Claim }) {
 function EvidenceBlock({ evidence }: { evidence: Evidence }) {
   return (
     <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0">
-      <code className="font-mono text-sm text-muted-foreground">
-        {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
-      </code>
 
       {(evidence.before || evidence.after) && (
         <div className="grid gap-3 sm:grid-cols-2">
           {evidence.before && (
-            <InfoPanel
-              label="Before"
-              direction="left"
-              text={evidence.before}
-            />
+            <InfoPanel label="Before" direction="left" text={evidence.before} />
           )}
           {evidence.after && (
             <InfoPanel label="After" direction="right" text={evidence.after} />
           )}
         </div>
       )}
+
+      <code className="font-mono text-sm text-muted-foreground">
+        {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
+      </code>
 
       <EvidenceDiff evidence={evidence} />
     </div>
@@ -571,12 +568,12 @@ function InfoPanel({
       <div className="text-sm leading-relaxed text-muted-foreground">
         <span
           aria-hidden="true"
-          className="mr-2 inline-flex items-center text-foreground"
+          className="mr-2 inline-flex items-center justify-center text-foreground"
         >
           {direction === "left" ? (
-            <ArrowLeftFromLine className="size-4" />
+            <ArrowLeftFromLine className="relative top-0.5 size-4" />
           ) : (
-            <ArrowRightFromLine className="size-4" />
+            <ArrowRightFromLine className="relative top-0.5 size-4" />
           )}
         </span>
         <strong>{label}:</strong> <AiText source={text} inline />
@@ -606,8 +603,7 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
   const [open, setOpen] = React.useState(false);
   const panelRef = React.useRef<HTMLDivElement>(null);
   const { resolvedTheme } = useTheme();
-  const diffTheme =
-    resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
+  const diffTheme = resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
   const {
     data: loadedDiff,
     isError: diffError,
@@ -670,13 +666,15 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
 
   const patch = diff || collapsedEvidencePatch(evidence);
   const collapsed = !open || !diff;
-  const toggleLabel = diffError
-    ? "Retry"
-    : (open && !diff) || (!diff && diffFetching)
-      ? "Loading..."
-      : open
-        ? "Hide"
-        : "Show";
+  const toggleLabel = diffError ? (
+    "Retry"
+  ) : (open && !diff) || (!diff && diffFetching) ? (
+    "Loading..."
+  ) : open ? (
+    <ChevronDown data-icon="inline-start" />
+  ) : (
+    <ChevronRight data-icon="inline-start" />
+  );
 
   const toggleDiff = React.useCallback(() => {
     if (diffError) {
@@ -694,7 +692,7 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
   return (
     <div
       ref={panelRef}
-      className="max-h-[520px] overflow-auto rounded-lg border bg-background [&_code]:font-mono [&_pre]:font-mono"
+      className="max-h-[520px] overflow-auto [&_code]:font-mono [&_pre]:font-mono"
     >
       <PatchDiff
         key={`${diffTheme}:${diff ? "loaded" : "placeholder"}`}
@@ -705,14 +703,19 @@ function EvidenceDiff({ evidence }: { evidence: Evidence }) {
           <Button
             type="button"
             size="sm"
-            variant="outline"
-            className="h-7 px-2 text-xs"
+            variant="ghost"
+            className="h-7 px-2 text-xs -ml-2"
             disabled={open && !diff && !diffError}
             onClick={toggleDiff}
           >
             {toggleLabel}
           </Button>
         )}
+        // renderHeaderMetadata={(x) => (
+        //   <code className="font-mono text-sm text-muted-foreground whitespace-pre-wrap">
+        //     {JSON.stringify(x, null, 2)}
+        //   </code>
+        // )}
         options={{
           theme: diffTheme,
           diffStyle: "unified",
