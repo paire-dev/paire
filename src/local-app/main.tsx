@@ -44,6 +44,12 @@ import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "./components/ui/tooltip";
+import {
   Card,
   CardAction,
   CardContent,
@@ -143,11 +149,11 @@ const humanStatusOptions: Array<HumanStatus> = ["unreviewed", "accepted"];
 const reviewToken =
   typeof window === "undefined"
     ? ""
-    : new URLSearchParams(
+    : (new URLSearchParams(
         window.location.hash.startsWith("#")
           ? window.location.hash.slice(1)
           : window.location.search,
-      ).get("token") ?? "";
+      ).get("token") ?? "");
 
 function reviewApiHeaders(headers: Record<string, string> = {}) {
   return {
@@ -196,9 +202,11 @@ async function fetchReviewDiff() {
 function App() {
   return (
     <ThemeProvider>
-      <QueryClientProvider client={queryClient}>
-        <ReviewScreen />
-      </QueryClientProvider>
+      <TooltipProvider>
+        <QueryClientProvider client={queryClient}>
+          <ReviewScreen />
+        </QueryClientProvider>
+      </TooltipProvider>
     </ThemeProvider>
   );
 }
@@ -1011,42 +1019,54 @@ function ClaimCard({
   onEvidenceSelect: (evidence: Evidence) => void;
 }) {
   return (
-    <Card className={cn(claim.humanStatus === "accepted" ? "ring-1 ring-primary/80" : "")}>
-      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
-        <CardTitle className="flex text-xl font-medium leading-snug">
-          <span className="text-muted-foreground">{index + 1}.&nbsp;</span>
-          <AiText source={claim.title} />
-        </CardTitle>
-        <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto">
-          {claim.updatedAt ? (
-            <ClaimTimeAgo updatedAt={claim.updatedAt} />
-          ) : null}
-          <Badge variant="secondary">{statusLabel(claim.agentStatus)}</Badge>
-        </CardAction>
-      </CardHeader>
+    <Card
+      className={cn(
+        claim.humanStatus === "accepted"
+          ? "ring-1 ring-inset ring-primary/80"
+          : "",
+      )}
+    >
+      <div className="flex">
+        <span className="relative left-4 text-xl font-medium leading-snug text-muted-foreground">{index + 1}.&nbsp;</span>
+        <div>
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
+            <CardTitle className="flex text-xl font-medium leading-snug">
+              <AiText source={claim.title} />
+            </CardTitle>
+            <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto">
+              {claim.updatedAt ? (
+                <ClaimTimeAgo updatedAt={claim.updatedAt} />
+              ) : null}
+              <Badge variant="secondary">
+                {statusLabel(claim.agentStatus)}
+              </Badge>
+            </CardAction>
+          </CardHeader>
 
-      <CardContent className="flex flex-col gap-8 px-6">
-        {claim.description ? (
-          <CardDescription className="text-base leading-relaxed">
-            <AiText source={claim.description} />
-          </CardDescription>
-        ) : null}
+          <CardContent className="flex flex-col gap-8 px-6">
+            {claim.description ? (
+              <CardDescription className="text-base leading-relaxed">
+                <AiText source={claim.description} />
+              </CardDescription>
+            ) : null}
 
-        <ClaimDeltaPanels before={claim.before} after={claim.after} />
+            <ClaimDeltaPanels before={claim.before} after={claim.after} />
 
-        {claim.evidences.length > 0 ? (
-          <div className="flex flex-col gap-2">
-            {claim.evidences.map((evidence, index) => (
-              <EvidenceBlock
-                key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
-                evidence={evidence}
-                selected={isEvidenceSelected(evidence)}
-                onSelect={onEvidenceSelect}
-              />
-            ))}
-          </div>
-        ) : null}
-      </CardContent>
+            {claim.evidences.length > 0 ? (
+              <div className="flex flex-col gap-2">
+                {claim.evidences.map((evidence, index) => (
+                  <EvidenceBlock
+                    key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
+                    evidence={evidence}
+                    selected={isEvidenceSelected(evidence)}
+                    onSelect={onEvidenceSelect}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </div>
+      </div>
 
       <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center px-6">
         <ClaimActions claim={claim} className="ml-auto" />
@@ -1133,26 +1153,6 @@ function ClaimDeltaPanels({
   );
 }
 
-function EvidenceFilePathLabel({
-  filePath,
-  startLine,
-  endLine,
-}: Pick<Evidence, "filePath" | "startLine" | "endLine">) {
-  const lastSlash = filePath.lastIndexOf("/");
-  const directory = lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : "/";
-  const fileName = lastSlash >= 0 ? filePath.slice(lastSlash + 1) : filePath;
-
-  return (
-    <span className="inline-flex items-baseline truncate font-light text-xs">
-      {/* <span className="inline-block max-w-30 truncate">{directory}</span> */}
-      <span className="inline-block font-medium">{fileName}:</span>
-      <span className="inline-block min-w-10 text-left">
-        {startLine}-{endLine}
-      </span>
-    </span>
-  );
-}
-
 function EvidenceBlock({
   evidence,
   selected,
@@ -1163,33 +1163,31 @@ function EvidenceBlock({
   onSelect: (evidence: Evidence) => void;
 }) {
   return evidence.change ? (
-    // <div className="flex gap-1 text-sm leading-relaxed text-foreground w-full before:content-['•'] before:mr-1 -ml-2 before:text-muted-foreground items-center">
-
-    <Button
-      type="button"
-      variant="ghost"
-      size="sm"
-      aria-pressed={selected}
-      className={cn(
-        "w-full justify-start text-sm font-normal hover:bg-primary/10",
-        selected
-          ? "bg-primary/30"
-          : "bg-muted/30 text-muted-foreground",
-      )}
-      onClick={() => onSelect(evidence)}
-      id={getEvidenceId(evidence)}
-    >
-      <AiText source={evidence.change} inline />
-      {/* <FileCode data-icon="inline-start" />
-        <EvidenceFilePathLabel
-          filePath={evidence.filePath}
-          startLine={evidence.startLine}
-          endLine={evidence.endLine}
-        /> */}
-      <ChevronRight className={"size-4 ml-auto text-muted-foreground"} />
-    </Button>
-  ) : // </div>
-  null;
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-pressed={selected}
+            className={cn(
+              "w-full justify-start text-sm font-normal hover:bg-primary/10",
+              selected ? "bg-primary/30" : "bg-muted/30 text-muted-foreground",
+            )}
+            onClick={() => onSelect(evidence)}
+            id={getEvidenceId(evidence)}
+          />
+        }
+      >
+        <AiText source={evidence.change} inline />
+        <ChevronRight className="size-4 ml-auto text-muted-foreground" />
+      </TooltipTrigger>
+      <TooltipContent side="top" align="end">
+        {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
+      </TooltipContent>
+    </Tooltip>
+  ) : null;
 }
 
 function InfoPanel({
@@ -1318,8 +1316,6 @@ function ReviewCodePanel({
           >
             <PanelRightClose data-icon="inline-start" />
           </Button>
-          <Files data-icon="inline-start" />
-          <p className="truncate text-sm font-medium">Code</p>
           <Badge variant="outline" className="text-muted-foreground">
             {items.length} {items.length === 1 ? "file" : "files"}
           </Badge>
@@ -1485,7 +1481,13 @@ function ReviewFileTree({
   );
 }
 
-function ClaimActions({ claim, className }: { claim: Claim, className?: string  }) {
+function ClaimActions({
+  claim,
+  className,
+}: {
+  claim: Claim;
+  className?: string;
+}) {
   const queryClient = useQueryClient();
   const statusMutation = useMutation({
     mutationFn: async (humanStatus: HumanStatus) => {
@@ -1520,7 +1522,12 @@ function ClaimActions({ claim, className }: { claim: Claim, className?: string  
   });
 
   return (
-    <div className={cn("inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto", className)}>
+    <div
+      className={cn(
+        "inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto",
+        className,
+      )}
+    >
       <Button
         type="button"
         variant="outline"
