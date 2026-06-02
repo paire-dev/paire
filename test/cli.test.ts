@@ -61,9 +61,11 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   const review = runPaire(fixture, ["review"]);
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("Action required");
-  expect(review.stdout).toContain("Follow this steps:");
+  expect(review.stdout).toContain("Step 1 — Inspect the git diff (required)");
+  expect(review.stdout).toContain("Step 5 — Open the Review UI (required)");
+  expect(review.stdout).toContain("Do not skip steps");
   expect(review.stdout).toContain(
-    "After any `paire review` command prints a Review UI URL, and open that URL in the browser.",
+    "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
   );
   expect(existsSync(fixture.browserCapture)).toBe(false);
 
@@ -118,17 +120,23 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
     .get();
   expect(claims?.count).toBe(1);
   expect(evidences?.count).toBe(1);
-  const evidence = db
+  const claim = db
     .query<
       { beforeText: string | null; afterText: string | null },
       []
-    >("select beforeText, afterText from claim_evidences limit 1")
+    >("select beforeText, afterText from claims limit 1")
     .get();
-  expect(evidence?.beforeText).toBe(
-    "Project creation accepted any user input.",
-  );
-  expect(evidence?.afterText).toBe(
+  expect(claim?.beforeText).toBe("Project creation accepted any user input.");
+  expect(claim?.afterText).toBe(
     "Project creation rejects missing users before returning data.",
+  );
+  const evidence = db
+    .query<{ changeText: string | null }, []>(
+      "select changeText from claim_evidences limit 1",
+    )
+    .get();
+  expect(evidence?.changeText).toBe(
+    "Throw when `createProject` receives a null user.",
   );
   db.close();
 
@@ -265,6 +273,8 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
           "The model tried to rewrite an unchanged claim even though the status is unchanged.",
         authClaimDescription:
           "This rewritten description should also be ignored for unchanged claims.",
+        authClaimBefore: "This rewritten before should be ignored.",
+        authClaimAfter: "This rewritten after should be ignored.",
       }),
       null,
       2,
@@ -281,8 +291,16 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
     )
     .get();
   const unchangedClaim = db
-    .query<{ title: string; description: string }, []>(
-      "select title, description from claims where id like '%:claim_sandbox_auth_required'",
+    .query<
+      {
+        title: string;
+        description: string;
+        beforeText: string | null;
+        afterText: string | null;
+      },
+      []
+    >(
+      "select title, description, beforeText, afterText from claims where id like '%:claim_sandbox_auth_required'",
     )
     .get();
   expect(unchangedThread?.title).toBe("Auth validation");
@@ -292,6 +310,12 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   expect(unchangedClaim?.title).toBe("Reject missing users before create");
   expect(unchangedClaim?.description).toBe(
     "Project creation rejects missing users before returning project data.",
+  );
+  expect(unchangedClaim?.beforeText).toBe(
+    "Project creation accepted any user input.",
+  );
+  expect(unchangedClaim?.afterText).toBe(
+    "Project creation rejects missing users before returning data.",
   );
   db.close();
 });
@@ -383,6 +407,10 @@ test("dirty worktree opens review UI with committed-state warning", () => {
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
   expect(review.stdout).toContain("Paire reviews committed code only");
+  expect(review.stdout).toContain(
+    "commit changes; paire it; and follow all the instructions to review and apply.",
+  );
+  expect(review.stdout).toContain("Step 2 — Run Paire again (required)");
   expect(review.stdout).toContain("Open this URL in the browser:");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
@@ -900,27 +928,14 @@ function text(value: Uint8Array) {
 }
 
 function extractPacketPath(stdout: string) {
-  const lines = stdout.split("\n");
-  const marker = lines.findIndex(
-    (line) =>
-      line.trim() === "Analyze this packet:" ||
-      line.trim() === "Analyze the current canonical packet exported at:",
-  );
-  if (marker < 0) {
-    throw new Error(`Packet path missing from output:\n${stdout}`);
-  }
-  const nextLine = lines[marker + 1]?.trim() ?? "";
-  if (nextLine && nextLine !== "Then run:") {
-    return nextLine;
-  }
-  for (let i = marker + 1; i < lines.length; i++) {
-    const line = lines[i]?.trim() ?? "";
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
     if (
-      line.startsWith("/") &&
-      line.endsWith(".json") &&
-      !line.includes("--apply")
+      trimmed.startsWith("/") &&
+      trimmed.endsWith("current-packet.json") &&
+      !trimmed.includes("--apply")
     ) {
-      return line;
+      return trimmed;
     }
   }
   throw new Error(`Packet path missing from output:\n${stdout}`);
@@ -963,6 +978,9 @@ function hardcodedAgentResult(packet: {
             title: "Reject missing users before create",
             description:
               "Project creation rejects missing users before returning project data.",
+            before: "Project creation accepted any user input.",
+            after:
+              "Project creation rejects missing users before returning data.",
             agentStatus: "new",
             humanStatus: "unreviewed",
             evidences: [
@@ -971,9 +989,7 @@ function hardcodedAgentResult(packet: {
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
-                before: "Project creation accepted any user input.",
-                after:
-                  "Project creation rejects missing users before returning data.",
+                change: "Throw when `createProject` receives a null user.",
               },
             ],
           },
@@ -996,6 +1012,8 @@ function sandboxAgentResult(
     authThreadSummary?: string;
     authClaimTitle?: string;
     authClaimDescription?: string;
+    authClaimBefore?: string;
+    authClaimAfter?: string;
   } = {},
 ) {
   return {
@@ -1020,6 +1038,12 @@ function sandboxAgentResult(
             description:
               overrides.authClaimDescription ??
               "Project creation rejects missing users before returning project data.",
+            before:
+              overrides.authClaimBefore ??
+              "Project creation accepted any user input.",
+            after:
+              overrides.authClaimAfter ??
+              "Project creation rejects missing users before returning data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
             humanStatus: "unreviewed",
             evidences: [
@@ -1028,9 +1052,7 @@ function sandboxAgentResult(
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
-                before: "Project creation accepted any user input.",
-                after:
-                  "Project creation rejects missing users before returning data.",
+                change: "Throw when `createProject` receives a null user.",
               },
             ],
           },
@@ -1056,6 +1078,14 @@ function sandboxAgentResult(
               workspaceStatus === "new"
                 ? "Workspace validation rejects inputs without a workspace name."
                 : "Workspace validation rejects inputs without a workspace name and exposes a validation version marker.",
+            before:
+              workspaceStatus === "new"
+                ? "Workspace inputs were accepted without a name check."
+                : "Workspace validation rejected missing names only.",
+            after:
+              workspaceStatus === "new"
+                ? "Workspace validation rejects inputs without a workspace name."
+                : "Workspace validation rejects missing names and exposes a version marker.",
             agentStatus: workspaceStatus,
             humanStatus: "unreviewed",
             evidences: [
@@ -1064,14 +1094,10 @@ function sandboxAgentResult(
                 startLine: 1,
                 endLine: workspaceStatus === "new" ? 6 : 8,
                 symbol: "validateWorkspace",
-                before:
+                change:
                   workspaceStatus === "new"
-                    ? "Workspace inputs were accepted without a name check."
-                    : "Workspace validation rejected missing names only.",
-                after:
-                  workspaceStatus === "new"
-                    ? "Workspace validation rejects inputs without a workspace name."
-                    : "Workspace validation rejects missing names and exposes a version marker.",
+                    ? "Reject workspace inputs when the workspace name is missing."
+                    : "Expose `workspaceValidationVersion` after validating the workspace name.",
               },
             ],
           },

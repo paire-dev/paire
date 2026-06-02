@@ -68,8 +68,7 @@ type AgentEvidence = {
   symbol?: string;
   fingerprint?: string;
   revisionId?: string;
-  before?: string;
-  after?: string;
+  change: string;
 };
 
 type AgentClaim = {
@@ -77,8 +76,8 @@ type AgentClaim = {
   threadId: string;
   title: string;
   description?: string;
-  /** @deprecated Use title and description. Accepted for backward compatibility on apply. */
-  text?: string;
+  before?: string | null;
+  after?: string | null;
   agentStatus: ClaimStatus;
   humanStatus?: HumanStatus;
   updatedAt?: number;
@@ -360,29 +359,12 @@ async function reviewCommand(args: string[], ctx: Context) {
     ? `last applied commit ${diffFrom}`
     : `base commit ${diffFrom}`;
   ctx.stdout(
-    [
-      "Action required",
-      "",
-      "Follow this steps:",
-      "",
-      `Since there were changes since the last applied revision (${lastApplied?.id ?? "none"}).`,
-      `Spot the difference in git (${diffFromLabel}..HEAD):`,
-      `git diff ${diffFrom}..HEAD`,
-      "",
-      "Analyze this packet:",
-      "Then run:",
-      `paire review --apply ${packet.resultPath}`,
-      "",
-      "After any `paire review` command prints a Review UI URL, and open that URL in the browser.",
-      packet.path,
-      "",
-      "Packet preview:",
-      packet.preview,
-      "",
-      "Write the review update JSON to:",
-      packet.resultPath,
-      "",
-    ].join("\n"),
+    reviewActionRequiredMessage({
+      diffFrom,
+      diffFromLabel,
+      lastAppliedId: lastApplied?.id ?? null,
+      packet,
+    }),
   );
 }
 
@@ -477,27 +459,40 @@ async function applyReviewCommand(
         const claimDbId = scopedDbId(session.id, claim.id);
         const existingClaim = ctx.db
           .query<
-            { title: string; description: string; text: string; humanStatus: HumanStatus },
+            {
+              title: string;
+              description: string;
+              beforeText: string | null;
+              afterText: string | null;
+              humanStatus: HumanStatus;
+            },
             [string, string]
           >(
-            "select title, description, text, humanStatus from claims where id = ? and sessionId = ?",
+            "select title, description, beforeText, afterText, humanStatus from claims where id = ? and sessionId = ?",
           )
           .get(claimDbId, session.id);
         const claimCopy = normalizeClaimCopy(claim);
-        const claimTitle =
-          existingClaim && claim.agentStatus === "unchanged"
-            ? existingClaim.title || existingClaim.text
-            : claimCopy.title;
-        const claimDescription =
-          existingClaim && claim.agentStatus === "unchanged"
-            ? existingClaim.description
-            : claimCopy.description;
+        const preserveClaimCopy =
+          !!existingClaim && claim.agentStatus === "unchanged";
+        const claimTitle = preserveClaimCopy
+          ? existingClaim.title
+          : claimCopy.title;
+        const claimDescription = preserveClaimCopy
+          ? existingClaim.description
+          : claimCopy.description;
+        const claimBefore = preserveClaimCopy
+          ? existingClaim.beforeText
+          : normalizeNullableCopy(claim.before);
+        const claimAfter = preserveClaimCopy
+          ? existingClaim.afterText
+          : normalizeNullableCopy(claim.after);
         ctx.db
           .prepare(
-            `insert into claims (id, threadId, sessionId, title, description, text, agentStatus, humanStatus, updatedAt)
-             values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `insert into claims (id, threadId, sessionId, title, description, beforeText, afterText, agentStatus, humanStatus, updatedAt)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              on conflict(id) do update set threadId = excluded.threadId, title = excluded.title,
-               description = excluded.description, text = excluded.text,
+               description = excluded.description,
+               beforeText = excluded.beforeText, afterText = excluded.afterText,
                agentStatus = excluded.agentStatus, updatedAt = excluded.updatedAt`,
           )
           .run(
@@ -506,7 +501,8 @@ async function applyReviewCommand(
             session.id,
             claimTitle,
             claimDescription,
-            claimTitle,
+            claimBefore,
+            claimAfter,
             claim.agentStatus,
             existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed",
             Date.now(),
@@ -517,8 +513,8 @@ async function applyReviewCommand(
         for (const evidence of claim.evidences) {
           ctx.db
             .prepare(
-              `insert into claim_evidences (id, claimId, revisionId, filePath, startLine, endLine, symbol, fingerprint, beforeText, afterText)
-               values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              `insert into claim_evidences (id, claimId, revisionId, filePath, startLine, endLine, symbol, fingerprint, changeText)
+               values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               `ev_${crypto.randomUUID()}`,
@@ -529,8 +525,7 @@ async function applyReviewCommand(
               evidence.endLine,
               evidence.symbol ?? null,
               evidence.fingerprint ?? null,
-              evidence.before ?? null,
-              evidence.after ?? null,
+              evidence.change.trim(),
             );
         }
       }
@@ -694,7 +689,7 @@ async function createPendingPacket(
       revisionId: "string",
       gitFingerprint: "string",
       threads:
-        "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, title, description?, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, before?, after? }> }> }>",
+        "Array<{ id, title, summary?, status?, claims: Array<{ id, threadId, title, description?, before?, after?, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }> }> }>",
     },
     rules: [
       "Group related claims into area threads. Treat each thread as one review area with a short area title, not as a single diff line or file.",
@@ -704,7 +699,7 @@ async function createPendingPacket(
       "Update existing claims before creating new ones.",
       "Do not create new claims for line movement, formatting, renames, or helper extraction unless meaning changed.",
       "Set agentStatus to one of: new, unchanged, evidence_moved, amended, invalidated, superseded.",
-      "For unchanged claims, keep the existing thread title, thread summary, claim title, and claim description byte-for-byte. Only update evidence spans if the code moved.",
+      "For unchanged claims, keep the existing thread title, thread summary, claim title, claim description, claim before, and claim after byte-for-byte. Only update evidence spans and evidence change lines if the code moved.",
       "Put every evidence span under the claim that depends on it. Use multiple files and ranges to cover the entire change.",
       "Evidence startLine/endLine are 1-based line numbers in the post-change file (HEAD). Copy them from the N| prefixes in touchedSnippets.text.",
       "Prefer multiple narrow evidence spans over one hunk-wide span when a claim depends on distinct changed regions. Use touchedSnippets.addedRanges as a guide for contiguous added-line groups.",
@@ -713,7 +708,8 @@ async function createPendingPacket(
       "Keep claim titles short and direct.",
       "Use claim description only to add detail that complements the title; do not restate the same point.",
       "Aim for clarity with progressive disclosure: each new detail should build on the previous one and avoid repetition.",
-      "On each evidence span, set before and after to short high-level descriptions of the behavior impact; do not mention code locations or line numbers.",
+      "On each claim, set optional before and after to high-level behavior summaries for the whole claim; use null when not applicable (pure addition: null before; pure removal: null after). Do not mention file paths or line numbers.",
+      "On each evidence span, set change to a required imperative line describing what this span does; verb-first, concise, and may name symbols or APIs.",
     ],
   };
   const packetJson = JSON.stringify(packet, null, 2);
@@ -837,6 +833,62 @@ function formatStatus(db: Database, session: SessionRow, git: GitState) {
   return lines.join("\n");
 }
 
+const AGENT_DIRTY_WORKTREE_ONE_LINER =
+  "commit changes; paire it; and follow all the instructions to review and apply.";
+
+function reviewActionRequiredMessage({
+  diffFrom,
+  diffFromLabel,
+  lastAppliedId,
+  packet,
+}: {
+  diffFrom: string;
+  diffFromLabel: string;
+  lastAppliedId: string | null;
+  packet: { path: string; resultPath: string; preview: string };
+}) {
+  return [
+    "Action required",
+    "",
+    "Coding agent workflow — complete every step below in order.",
+    "Do not skip steps. Do not stop after step 1 or 2. The task is incomplete until step 5 succeeds.",
+    "",
+    "Step 1 — Inspect the git diff (required)",
+    `Changes since the last applied revision (${lastAppliedId ?? "none"}). Run and read the full output:`,
+    `git diff ${diffFrom}..HEAD`,
+    `(${diffFromLabel})`,
+    "",
+    "Step 2 — Read the full packet (required)",
+    "Analyze this packet:",
+    "Read the entire exported packet JSON at this path (use the preview below only as a shortcut):",
+    packet.path,
+    "",
+    "Step 3 — Write the review update JSON (required)",
+    "Write the review update JSON to:",
+    packet.resultPath,
+    "Follow packet.rules and resultSchema exactly.",
+    "",
+    "Step 4 — Apply the review (required)",
+    "Then run:",
+    `paire review --apply ${packet.resultPath}`,
+    "Do not consider the review done until this command exits 0.",
+    "",
+    "Step 5 — Open the Review UI (required)",
+    "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
+    "",
+    "Before you stop, confirm every item:",
+    "[ ] git diff inspected",
+    "[ ] full packet read from the exported path",
+    `[ ] JSON written to ${packet.resultPath}`,
+    "[ ] paire review --apply succeeded",
+    "[ ] Review UI opened when a URL was printed",
+    "",
+    "Packet preview:",
+    packet.preview,
+    "",
+  ].join("\n");
+}
+
 function dirtyWorktreeMessage(git: GitState) {
   return [
     "PAIRE_NEEDS_COMMITTED_CHANGES",
@@ -845,16 +897,26 @@ function dirtyWorktreeMessage(git: GitState) {
     "The current worktree has uncommitted changes, so Paire will not create a review packet from dirty files.",
     "Opening the existing review UI. It shows committed review state, not the latest worktree changes.",
     "",
+    "Coding agent workflow — complete every step below in order. Do not skip steps.",
+    "",
+    "Step 1 — Commit or discard worktree changes (required)",
+    "Commit or stash your changes, or discard them with git checkout -- .",
+    "",
+    "Step 2 — Run Paire again (required)",
+    "Run: paire it",
+    "(or: commit, then paire review)",
+    "",
+    "Step 3 — Follow every printed instruction through apply (required)",
+    AGENT_DIRTY_WORKTREE_ONE_LINER,
+    "When paire review prints Action required, complete all five steps through paire review --apply.",
+    "Do not stop until apply succeeds and you opened the Review UI URL when printed.",
+    "",
     `Current branch: ${git.branch}`,
     `Current HEAD: ${git.head}`,
     "",
     "Safe inspection:",
     "`git status --short`",
     "`git diff --stat`",
-    "",
-    "Commit or discard the worktree changes, then run:",
-    "`paire review`",
-    "then follow the instructions to apply the review changes",
   ].join("\n");
 }
 
@@ -1197,7 +1259,7 @@ function getClaimsForThread(
 ) {
   return db
     .query<AgentClaim, [string]>(
-      "select id, threadId, title, description, text, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc",
+      "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc",
     )
     .all(threadDbId)
     .map((claim) => ({
@@ -1209,7 +1271,7 @@ function getClaimsForThread(
         .query<
         AgentEvidence & { revisionId: string },
         [string]
-      >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, beforeText as before, afterText as after from claim_evidences where claimId = ? order by filePath, startLine")
+      >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, changeText as change from claim_evidences where claimId = ? order by filePath, startLine")
         .all(claim.id)
         .map((evidence) => ({
           ...evidence,
@@ -1279,7 +1341,10 @@ function migrate(db: Database) {
       id text primary key,
       threadId text not null,
       sessionId text not null,
-      text text not null,
+      title text not null,
+      description text not null default '',
+      beforeText text,
+      afterText text,
       agentStatus text not null,
       humanStatus text not null,
       updatedAt integer not null
@@ -1313,18 +1378,14 @@ function migrate(db: Database) {
   addNullableColumn(db, "revisions", "packetExportPath", "text");
   addNullableColumn(db, "revisions", "resultPath", "text");
   addNullableColumn(db, "revisions", "totalDiffArtifactId", "text");
-  addNullableColumn(db, "claim_evidences", "beforeText", "text");
-  addNullableColumn(db, "claim_evidences", "afterText", "text");
   addNullableColumn(db, "claims", "title", "text");
   addNullableColumn(db, "claims", "description", "text");
-  db.exec(`
-    update claims
-       set title = text
-     where title is null or trim(title) = '';
-    update claims
-       set description = ''
-     where description is null;
-  `);
+  addNullableColumn(db, "claims", "beforeText", "text");
+  addNullableColumn(db, "claims", "afterText", "text");
+  addNullableColumn(db, "claim_evidences", "changeText", "text");
+  migrateClaimsDropLegacyTextColumn(db);
+  dropColumnIfExists(db, "claim_evidences", "beforeText");
+  dropColumnIfExists(db, "claim_evidences", "afterText");
   migrateSessionsToBranchScope(db);
   scopeReviewIds(db);
 }
@@ -1372,6 +1433,54 @@ function addNullableColumn(
   } catch {
     // SQLite throws when the column already exists.
   }
+}
+
+function tableHasColumn(db: Database, table: string, column: string) {
+  return db
+    .query<{ name: string }, []>(`pragma table_info(${table})`)
+    .all()
+    .some((row) => row.name === column);
+}
+
+function dropColumnIfExists(db: Database, table: string, column: string) {
+  if (!tableHasColumn(db, table, column)) return;
+  db.exec(`alter table ${table} drop column ${column}`);
+}
+
+function migrateClaimsDropLegacyTextColumn(db: Database) {
+  if (!tableHasColumn(db, "claims", "text")) return;
+  db.exec(`
+    create table claims_next (
+      id text primary key,
+      threadId text not null,
+      sessionId text not null,
+      title text not null,
+      description text not null default '',
+      beforeText text,
+      afterText text,
+      agentStatus text not null,
+      humanStatus text not null,
+      updatedAt integer not null
+    );
+    insert into claims_next (
+      id, threadId, sessionId, title, description, beforeText, afterText,
+      agentStatus, humanStatus, updatedAt
+    )
+    select
+      id,
+      threadId,
+      sessionId,
+      coalesce(nullif(trim(title), ''), text),
+      coalesce(description, ''),
+      beforeText,
+      afterText,
+      agentStatus,
+      humanStatus,
+      updatedAt
+    from claims;
+    drop table claims;
+    alter table claims_next rename to claims;
+  `);
 }
 
 function scopeReviewIds(db: Database) {
@@ -1485,7 +1594,9 @@ function reviewBurden(db: Database, sessionId: string) {
 function getActiveClaims(db: Database, sessionId: string) {
   const rows = db
     .query<AgentClaim & { threadTitle: string }, [string]>(
-      `select claims.id, claims.threadId, claims.title, claims.description, claims.text, claims.agentStatus, claims.humanStatus, change_threads.title as threadTitle
+      `select claims.id, claims.threadId, claims.title, claims.description,
+              claims.beforeText as before, claims.afterText as after,
+              claims.agentStatus, claims.humanStatus, change_threads.title as threadTitle
        from claims join change_threads on change_threads.id = claims.threadId
        where claims.sessionId = ? and claims.agentStatus != 'superseded'
        order by change_threads.updatedAt desc, claims.updatedAt desc`,
@@ -1500,7 +1611,7 @@ function getActiveClaims(db: Database, sessionId: string) {
       .query<
       AgentEvidence & { revisionId: string },
       [string]
-    >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, beforeText as before, afterText as after from claim_evidences where claimId = ? order by filePath, startLine")
+    >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, changeText as change from claim_evidences where claimId = ? order by filePath, startLine")
       .all(claim.id),
   }));
 }
@@ -1533,8 +1644,11 @@ function validateApplyPayload(value: unknown): AgentApplyPayload {
       if (!claim.id || !claim.threadId) {
         throw new Error("Each claim needs id and threadId.");
       }
+      if ("text" in claim && (claim as { text?: unknown }).text != null) {
+        throw new Error("Claim text is no longer supported; use title and description.");
+      }
       if (!normalizeClaimCopy(claim).title) {
-        throw new Error("Each claim needs title (or legacy text).");
+        throw new Error("Each claim needs title.");
       }
       if (!VALID_AGENT_STATUSES.has(claim.agentStatus))
         throw new Error(`Invalid agentStatus: ${claim.agentStatus}`);
@@ -1553,28 +1667,60 @@ function validateApplyPayload(value: unknown): AgentApplyPayload {
             "Each evidence needs filePath, startLine, and endLine.",
           );
         }
-        if (evidence.before != null && typeof evidence.before !== "string") {
-          throw new Error("Evidence before must be a string when provided.");
+        if ("before" in evidence || "after" in evidence) {
+          throw new Error(
+            "Evidence before/after are no longer supported; set claim before/after and evidence change.",
+          );
         }
-        if (evidence.after != null && typeof evidence.after !== "string") {
-          throw new Error("Evidence after must be a string when provided.");
+        if (typeof evidence.change !== "string" || !evidence.change.trim()) {
+          throw new Error("Each evidence needs a non-empty change line.");
+        }
+        if (claim.before != null && typeof claim.before !== "string") {
+          throw new Error("Claim before must be a string when provided.");
+        }
+        if (claim.after != null && typeof claim.after !== "string") {
+          throw new Error("Claim after must be a string when provided.");
         }
       }
     }
   }
-  return payload;
+  return normalizeApplyPayload(payload);
 }
 
-function normalizeClaimCopy(claim: Pick<AgentClaim, "title" | "description" | "text">) {
-  const title = claim.title?.trim() || claim.text?.trim() || "";
+function normalizeNullableCopy(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function normalizeApplyPayload(payload: AgentApplyPayload): AgentApplyPayload {
   return {
-    title,
+    ...payload,
+    threads: payload.threads.map((thread) => ({
+      ...thread,
+      claims: thread.claims.map((claim) => ({
+        ...claim,
+        before: normalizeNullableCopy(claim.before),
+        after: normalizeNullableCopy(claim.after),
+        evidences: claim.evidences.map((evidence) => ({
+          ...evidence,
+          change: evidence.change.trim(),
+        })),
+      })),
+    })),
+  };
+}
+
+function normalizeClaimCopy(claim: Pick<AgentClaim, "title" | "description">) {
+  return {
+    title: claim.title.trim(),
     description: claim.description?.trim() ?? "",
   };
 }
 
 function normalizeStoredClaim(
-  claim: Pick<AgentClaim, "title" | "description" | "text">,
+  claim: Pick<AgentClaim, "title" | "description">,
 ) {
   const copy = normalizeClaimCopy(claim);
   return {

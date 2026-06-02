@@ -152,27 +152,14 @@ function text(value: Uint8Array) {
 }
 
 function extractPacketPath(stdout: string) {
-  const lines = stdout.split("\n");
-  const marker = lines.findIndex(
-    (line) =>
-      line.trim() === "Analyze this packet:" ||
-      line.trim() === "Analyze the current canonical packet exported at:",
-  );
-  if (marker < 0) {
-    throw new Error(`Packet path missing from output:\n${stdout}`);
-  }
-  const nextLine = lines[marker + 1]?.trim() ?? "";
-  if (nextLine && nextLine !== "Then run:") {
-    return nextLine;
-  }
-  for (let i = marker + 1; i < lines.length; i++) {
-    const line = lines[i]?.trim() ?? "";
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
     if (
-      line.startsWith("/") &&
-      line.endsWith(".json") &&
-      !line.includes("--apply")
+      trimmed.startsWith("/") &&
+      trimmed.endsWith("current-packet.json") &&
+      !trimmed.includes("--apply")
     ) {
-      return line;
+      return trimmed;
     }
   }
   throw new Error(`Packet path missing from output:\n${stdout}`);
@@ -208,6 +195,9 @@ function agentResult(
             title: "Reject missing users before create",
             description:
               "Project creation rejects missing users before returning project data.",
+            before: "Project creation accepted any user input.",
+            after:
+              "Project creation rejects missing users before returning data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
             humanStatus: "unreviewed",
             evidences: [
@@ -216,9 +206,7 @@ function agentResult(
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
-                before: "Project creation accepted any user input.",
-                after:
-                  "Project creation rejects missing users before returning data.",
+                change: "Throw when `createProject` receives a null user.",
               },
             ],
           },
@@ -233,6 +221,14 @@ function agentResult(
               workspaceStatus === "new"
                 ? "Workspace validation rejects inputs without a workspace name."
                 : "Workspace validation rejects missing names and exposes a version marker.",
+            before:
+              workspaceStatus === "new"
+                ? "Workspace inputs were accepted without a name check."
+                : "Workspace validation rejected missing names only.",
+            after:
+              workspaceStatus === "new"
+                ? "Workspace validation rejects inputs without a workspace name."
+                : "Workspace validation rejects missing names and exposes a version marker.",
             agentStatus: workspaceStatus,
             humanStatus: "unreviewed",
             evidences: [
@@ -241,14 +237,10 @@ function agentResult(
                 startLine: 1,
                 endLine: workspaceStatus === "new" ? 6 : 8,
                 symbol: "validateWorkspace",
-                before:
+                change:
                   workspaceStatus === "new"
-                    ? "Workspace inputs were accepted without a name check."
-                    : "Workspace validation rejected missing names only.",
-                after:
-                  workspaceStatus === "new"
-                    ? "Workspace validation rejects inputs without a workspace name."
-                    : "Workspace validation rejects missing names and exposes a version marker.",
+                    ? "Reject workspace inputs when the workspace name is missing."
+                    : "Expose `workspaceValidationVersion` after validating the workspace name.",
               },
             ],
           },

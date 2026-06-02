@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   ArrowLeftFromLine,
   ArrowRightFromLine,
+  Bot,
   Check,
   ChevronDown,
   ChevronRight,
@@ -68,14 +69,15 @@ type Evidence = {
   endLine: number;
   symbol?: string;
   diff?: string;
-  before?: string;
-  after?: string;
+  change: string;
 };
 
 type Claim = {
   id: string;
   title: string;
   description?: string;
+  before?: string | null;
+  after?: string | null;
   agentStatus: string;
   humanStatus: HumanStatus;
   updatedAt?: number;
@@ -281,10 +283,10 @@ function ReviewScreen() {
             Paire Review
           </p>
           <div className="flex flex-wrap gap-2">
-          <h1 className="text-2xl font-semibold leading-tight tracking-normal">
-            {data.session.goal ?? data.session.projectKey}
-          </h1>
-          <Badge variant="outline">{data.git.branch}</Badge>
+            <h1 className="text-2xl font-semibold leading-tight tracking-normal">
+              {data.session.goal ?? data.session.projectKey}
+            </h1>
+            <Badge variant="outline">{data.git.branch}</Badge>
           </div>
         </div>
         <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
@@ -307,16 +309,16 @@ function ReviewScreen() {
               >
                 {reviewPanel}
               </ResizablePanel>
-              <ResizableHandle withHandle />
+              {/* <ResizableHandle className="border-none" withHandle /> */}
               <ResizablePanel
                 className="flex min-h-0 flex-col"
-                defaultSize="28%"
-                minSize="22%"
-                maxSize="45%"
+                defaultSize="50%"
+                minSize="30%"
+                maxSize="70%"
               >
                 <ReviewCodePanel
                   codeViewRef={codeViewRef}
-                  className="ml-4 h-full min-h-0"
+                  className="h-full min-h-0"
                   diffError={isDiffError}
                   items={codeItems}
                   open
@@ -497,6 +499,37 @@ function requestCodeViewScroll(
   return () => window.cancelAnimationFrame(frame);
 }
 
+const DIRTY_WORKTREE_AGENT_PROMPT =
+  "commit changes; paire it; and follow all the instructions to review and apply.";
+
+function CopyAgentPromptButton({ text }: { text: string }) {
+  const [copied, setCopied] = React.useState(false);
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <Button
+      type="button"
+      size="icon"
+      variant="outline"
+      className="size-7 shrink-0 border-amber-300/80 bg-amber-100/60 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60"
+      title="Copy agent prompt"
+      aria-label="Copy agent prompt for coding agent"
+      onClick={() => void copy()}
+    >
+      {copied ? (
+        <Check className="size-3.5" aria-hidden />
+      ) : (
+        <Bot className="size-3.5" aria-hidden />
+      )}
+    </Button>
+  );
+}
+
 function DirtyWorktreeAlert() {
   return (
     <Alert className="mb-4 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
@@ -505,10 +538,13 @@ function DirtyWorktreeAlert() {
         These are <strong>not</strong> the latest changes.
       </AlertTitle>
       <AlertDescription className="text-amber-900 dark:text-amber-200">
-        <p>
-          Commit your worktree changes, then run <code>paire review</code> again
-          to review the latest committed code.
-        </p>
+        <div className="flex flex-wrap items-start gap-2">
+          <p className="min-w-0 flex-1">
+            Commit your worktree changes, then run <code>paire review</code>{" "}
+            again to review the latest committed code.
+          </p>
+          <CopyAgentPromptButton text={DIRTY_WORKTREE_AGENT_PROMPT} />
+        </div>
       </AlertDescription>
     </Alert>
   );
@@ -813,7 +849,7 @@ function ClaimCard({
           <span className="text-muted-foreground">{index + 1}.&nbsp;</span>
           <AiText source={claim.title} />
         </CardTitle>
-        <CardAction className="flex flex-wrap items-center gap-2">
+        <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto">
           {claim.updatedAt ? (
             <ClaimTimeAgo updatedAt={claim.updatedAt} />
           ) : null}
@@ -827,6 +863,8 @@ function ClaimCard({
             <AiText source={claim.description} />
           </CardDescription>
         ) : null}
+
+        <ClaimDeltaPanels before={claim.before} after={claim.after} />
 
         {claim.evidences.length > 0 ? (
           <div className="flex flex-col gap-4">
@@ -853,6 +891,50 @@ function ClaimCard({
   );
 }
 
+function claimDeltaPanels(before?: string | null, after?: string | null) {
+  const hasBefore = before != null && before !== "";
+  const hasAfter = after != null && after !== "";
+  if (!hasBefore && !hasAfter) return null;
+  if (!hasBefore && hasAfter) {
+    return [{ label: "New", direction: "right" as const, text: after! }];
+  }
+  if (hasBefore && !hasAfter) {
+    return [{ label: "Was", direction: "left" as const, text: before! }];
+  }
+  return [
+    { label: "Before", direction: "left" as const, text: before! },
+    { label: "After", direction: "right" as const, text: after! },
+  ];
+}
+
+function ClaimDeltaPanels({
+  before,
+  after,
+}: {
+  before?: string | null;
+  after?: string | null;
+}) {
+  const panels = claimDeltaPanels(before, after);
+  if (!panels) return null;
+  return (
+    <div
+      className={cn(
+        "grid gap-3",
+        panels.length === 2 ? "sm:grid-cols-2" : "sm:grid-cols-1",
+      )}
+    >
+      {panels.map((panel) => (
+        <InfoPanel
+          key={panel.label}
+          label={panel.label}
+          direction={panel.direction}
+          text={panel.text}
+        />
+      ))}
+    </div>
+  );
+}
+
 function EvidenceBlock({
   evidence,
   onSelect,
@@ -862,16 +944,11 @@ function EvidenceBlock({
 }) {
   return (
     <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0">
-      {(evidence.before || evidence.after) && (
-        <div className="grid gap-3 sm:grid-cols-2">
-          {evidence.before && (
-            <InfoPanel label="Before" direction="left" text={evidence.before} />
-          )}
-          {evidence.after && (
-            <InfoPanel label="After" direction="right" text={evidence.after} />
-          )}
-        </div>
-      )}
+      {evidence.change ? (
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          <AiText source={evidence.change} inline />
+        </p>
+      ) : null}
 
       <button
         type="button"
@@ -999,7 +1076,9 @@ function ReviewCodePanel({
             size="icon"
             variant="ghost"
             className="size-8"
-            aria-label={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
+            aria-label={
+              fileTreeOpen ? "Collapse file tree" : "Expand file tree"
+            }
             title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
             onClick={() => setFileTreeOpen((value) => !value)}
           >
@@ -1102,7 +1181,8 @@ function FileTree({
     <div className="min-h-0 overflow-auto border-r bg-muted/40 p-2">
       <div className="flex flex-col gap-1">
         {items.map((item) => {
-          const name = item.type === "diff" ? item.fileDiff.name : item.file.name;
+          const name =
+            item.type === "diff" ? item.fileDiff.name : item.file.name;
           return (
             <button
               key={item.id}
