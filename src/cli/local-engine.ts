@@ -174,7 +174,7 @@ const MAX_FILE_PATH_CHARS = 1_000;
 const MAX_EVIDENCE_LINE = 1_000_000;
 const MAX_EVIDENCE_SPAN_LINES = 5_000;
 const REVIEW_PORT = 22222;
-const FALLBACK_REVIEW_PORT = 0;
+const MAX_REVIEW_PORT_ATTEMPTS = 100;
 const REVIEW_SERVER_START_TIMEOUT_MS = 5_000;
 const REVIEW_TOKEN_BYTES = 16;
 const REVIEW_TOKEN_HEADER = "x-paire-review-token";
@@ -1101,14 +1101,20 @@ async function ensureReviewServer(
 }
 
 function createReviewServer(session: SessionRow, ctx: Context, token: string) {
-  try {
-    return serveReviewUi(session, ctx, token, REVIEW_PORT);
-  } catch (error) {
-    if (!isAddressInUseError(error)) {
-      throw error;
+  for (let attempt = 0; attempt < MAX_REVIEW_PORT_ATTEMPTS; attempt++) {
+    const port = REVIEW_PORT + attempt;
+    try {
+      return serveReviewUi(session, ctx, token, port);
+    } catch (error) {
+      if (!isAddressInUseError(error)) {
+        throw error;
+      }
     }
-    return serveReviewUi(session, ctx, token, FALLBACK_REVIEW_PORT);
   }
+  const lastPort = REVIEW_PORT + MAX_REVIEW_PORT_ATTEMPTS - 1;
+  throw new Error(
+    `Could not bind review UI server on ports ${REVIEW_PORT}-${lastPort}.`,
+  );
 }
 
 function serveReviewUi(

@@ -1263,7 +1263,7 @@ test("paire server start falls back to an open port when the preferred port is o
     expect(start.stdout).toContain("Review UI:");
 
     const state = await waitForServerState(fixture.home, session!.id);
-    expect(state.port).not.toBe(PREFERRED_REVIEW_PORT);
+    expect(state.port).toBe(PREFERRED_REVIEW_PORT + 1);
     expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
 
     const stop = runPaire(fixture, ["server", "stop"]);
