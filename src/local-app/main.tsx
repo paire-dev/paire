@@ -30,10 +30,11 @@ import {
   FileCode,
   Files,
   FolderTree,
+  Highlighter,
   ListOrdered,
-  MessageSquare,
   Monitor,
   Moon,
+  PaintBucket,
   PanelRightClose,
   PanelRightOpen,
   Rows2,
@@ -1330,19 +1331,28 @@ function AiText({
 
 type DiffOverflow = "wrap" | "scroll";
 type DiffLayoutStyle = "split" | "unified";
+type LineDiffType = "word-alt" | "none";
 
 function DiffViewControls({
+  backgroundEnabled,
   diffStyle,
+  lineDiffType,
   lineNumbersEnabled,
   overflow,
+  onBackgroundEnabledChange,
   onDiffStyleChange,
+  onLineDiffTypeChange,
   onLineNumbersEnabledChange,
   onOverflowChange,
 }: {
+  backgroundEnabled: boolean;
   diffStyle: DiffLayoutStyle;
+  lineDiffType: LineDiffType;
   lineNumbersEnabled: boolean;
   overflow: DiffOverflow;
+  onBackgroundEnabledChange: (enabled: boolean) => void;
   onDiffStyleChange: (style: DiffLayoutStyle) => void;
+  onLineDiffTypeChange: (lineDiffType: LineDiffType) => void;
   onLineNumbersEnabledChange: (enabled: boolean) => void;
   onOverflowChange: (overflow: DiffOverflow) => void;
 }) {
@@ -1392,6 +1402,52 @@ function DiffViewControls({
             }
           />
           <TooltipContent>Line numbers</TooltipContent>
+        </Tooltip>
+      </ButtonGroup>
+      <ButtonGroup>
+        <Tooltip>
+          <TooltipTrigger
+            delay={0}
+            render={
+              <Toggle
+                variant="outline"
+                size="sm"
+                pressed={backgroundEnabled}
+                onPressedChange={onBackgroundEnabledChange}
+                aria-label={
+                  backgroundEnabled
+                    ? "Hide diff backgrounds"
+                    : "Show diff backgrounds"
+                }
+              >
+                <PaintBucket data-icon="inline-start" />
+              </Toggle>
+            }
+          />
+          <TooltipContent>Diff backgrounds</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            delay={0}
+            render={
+              <Toggle
+                variant="outline"
+                size="sm"
+                pressed={lineDiffType === "word-alt"}
+                onPressedChange={(pressed) =>
+                  onLineDiffTypeChange(pressed ? "word-alt" : "none")
+                }
+                aria-label={
+                  lineDiffType === "word-alt"
+                    ? "Hide word-level highlights"
+                    : "Show word-level highlights"
+                }
+              >
+                <Highlighter data-icon="inline-start" />
+              </Toggle>
+            }
+          />
+          <TooltipContent>Word highlights</TooltipContent>
         </Tooltip>
       </ButtonGroup>
       <ToggleGroup
@@ -1445,7 +1501,9 @@ function ReviewCodePanel({
   const [fileTreeOpen, setFileTreeOpen] = React.useState(false);
   const [diffOverflow, setDiffOverflow] = React.useState<DiffOverflow>("wrap");
   const [lineNumbersEnabled, setLineNumbersEnabled] = React.useState(true);
+  const [backgroundEnabled, setBackgroundEnabled] = React.useState(true);
   const [diffStyle, setDiffStyle] = React.useState<DiffLayoutStyle>("unified");
+  const [lineDiffType, setLineDiffType] = React.useState<LineDiffType>("word-alt");
   const { resolvedTheme } = useTheme();
   const diffTheme = resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
 
@@ -1505,10 +1563,14 @@ function ReviewCodePanel({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <DiffViewControls
+            backgroundEnabled={backgroundEnabled}
             diffStyle={diffStyle}
+            lineDiffType={lineDiffType}
             lineNumbersEnabled={lineNumbersEnabled}
             overflow={diffOverflow}
+            onBackgroundEnabledChange={setBackgroundEnabled}
             onDiffStyleChange={setDiffStyle}
+            onLineDiffTypeChange={setLineDiffType}
             onLineNumbersEnabledChange={setLineNumbersEnabled}
             onOverflowChange={setDiffOverflow}
           />
@@ -1552,8 +1614,11 @@ function ReviewCodePanel({
               options={{
                 theme: diffTheme,
                 diffStyle,
+                lineDiffType,
                 overflow: diffOverflow,
                 diffIndicators: "classic",
+                hunkSeparators: "simple",
+                disableBackground: !backgroundEnabled,
                 disableLineNumbers: !lineNumbersEnabled,
                 disableFileHeader: false,
                 stickyHeaders: true,
@@ -1700,23 +1765,6 @@ function ClaimActions({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["review"] }),
   });
 
-  const commentMutation = useMutation({
-    mutationFn: async () => {
-      const note = window.prompt("Comment");
-      if (!note) return;
-      const response = await fetch(
-        `/api/claims/${encodeURIComponent(claim.id)}/comment`,
-        {
-          method: "POST",
-          headers: reviewApiHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ note }),
-        },
-      );
-      if (!response.ok) throw new Error("Failed to save comment.");
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["review"] }),
-  });
-
   return (
     <div
       className={cn(
@@ -1726,17 +1774,8 @@ function ClaimActions({
     >
       <Button
         type="button"
-        variant="outline"
-        className="flex-1 rounded-none border-0 shadow-none sm:flex-none"
-        onClick={() => commentMutation.mutate()}
-      >
-        <MessageSquare data-icon="inline-start" />
-        Comment
-      </Button>
-      <Button
-        type="button"
         variant={claim.humanStatus === "accepted" ? "default" : "outline"}
-        className="min-w-20 flex-1 rounded-none border-0 border-l shadow-none sm:flex-none"
+        className="min-w-20 flex-1 rounded-none border-0 shadow-none sm:flex-none"
         onClick={() =>
           statusMutation.mutate(
             claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
