@@ -31,6 +31,8 @@ import {
   Files,
   FolderTree,
   Highlighter,
+  ListChevronsDownUp,
+  ListChevronsUpDown,
   ListOrdered,
   Monitor,
   Moon,
@@ -50,6 +52,11 @@ import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { ButtonGroup } from "./components/ui/button-group";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "./components/ui/collapsible";
 import { Toggle } from "./components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import {
@@ -316,6 +323,12 @@ function ReviewScreen() {
   const isDesktopLayout = useMediaQuery("(min-width: 768px)");
   const [humanStatusFilter, setHumanStatusFilter] =
     React.useState<FilterValue>("all");
+  const [openThreads, setOpenThreads] = React.useState<Record<string, boolean>>(
+    {},
+  );
+  const [openClaims, setOpenClaims] = React.useState<Record<string, boolean>>(
+    {},
+  );
   const [codePanelOpen, setCodePanelOpen] = React.useState(false);
   const [selectedEvidence, setSelectedEvidence] =
     React.useState<EvidenceSelection | null>(null);
@@ -352,6 +365,40 @@ function ReviewScreen() {
     [codeItems, selectedEvidence],
   );
   const showLoadingState = useDelayedValue(isLoading, LOADING_STATE_DELAY_MS);
+  const filteredThreads = React.useMemo(
+    () => (data ? filterThreads(data.threads, humanStatusFilter) : []),
+    [data, humanStatusFilter],
+  );
+  const allReviewItemsOpen =
+    filteredThreads.length > 0 &&
+    filteredThreads.every(
+      (thread) =>
+        openThreads[thread.id] === true &&
+        thread.claims.every((claim) => openClaims[claim.id] === true),
+    );
+  const setThreadOpen = React.useCallback((threadId: string, open: boolean) => {
+    setOpenThreads((current) => ({ ...current, [threadId]: open }));
+  }, []);
+  const setClaimOpen = React.useCallback((claimId: string, open: boolean) => {
+    setOpenClaims((current) => ({ ...current, [claimId]: open }));
+  }, []);
+  const setAllReviewItemsOpen = React.useCallback(
+    (open: boolean) => {
+      setOpenThreads((current) => {
+        const next = { ...current };
+        for (const thread of filteredThreads) next[thread.id] = open;
+        return next;
+      });
+      setOpenClaims((current) => {
+        const next = { ...current };
+        for (const thread of filteredThreads) {
+          for (const claim of thread.claims) next[claim.id] = open;
+        }
+        return next;
+      });
+    },
+    [filteredThreads],
+  );
 
   const scrollToEvidence = React.useCallback(
     (evidence: Evidence) => {
@@ -404,13 +451,16 @@ function ReviewScreen() {
     );
   }
 
-  const filteredThreads = filterThreads(data.threads, humanStatusFilter);
   const reviewContent = (
     <ReviewClaims
       allThreads={data.threads}
       filteredThreads={filteredThreads}
+      openClaims={openClaims}
+      openThreads={openThreads}
       isEvidenceSelected={evidenceIsSelected}
       onEvidenceSelect={scrollToEvidence}
+      onClaimOpenChange={setClaimOpen}
+      onThreadOpenChange={setThreadOpen}
     />
   );
   const reviewPanel = (
@@ -436,7 +486,9 @@ function ReviewScreen() {
         </div>
         <HumanFilterNav
           value={humanStatusFilter}
+          allReviewItemsOpen={allReviewItemsOpen}
           onChange={setHumanStatusFilter}
+          onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
         />
         <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
           <Badge variant="outline">{data.burden}</Badge>
@@ -551,14 +603,23 @@ function ProjectAvatar({ project }: { project: ProjectKeyInfo }) {
 }
 
 function HumanFilterNav({
+  allReviewItemsOpen,
   value,
   onChange,
+  onToggleAll,
 }: {
+  allReviewItemsOpen: boolean;
   value: FilterValue;
   onChange: (value: FilterValue) => void;
+  onToggleAll: () => void;
 }) {
+  const toggleLabel = allReviewItemsOpen ? "Collapse all" : "Expand all";
+  const ToggleIcon = allReviewItemsOpen
+    ? ListChevronsDownUp
+    : ListChevronsUpDown;
+
   return (
-    <div className="flex justify-start sm:justify-center">
+    <div className="flex justify-start gap-2 sm:justify-center">
       <div
         className="inline-flex overflow-hidden rounded-md border bg-background"
         role="group"
@@ -583,6 +644,24 @@ function HumanFilterNav({
           Accepted
         </HumanFilterButton>
       </div>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              className="size-7"
+              aria-label={toggleLabel}
+              aria-pressed={allReviewItemsOpen}
+              onClick={onToggleAll}
+            >
+              <ToggleIcon aria-hidden />
+            </Button>
+          }
+        />
+        <TooltipContent>{toggleLabel}</TooltipContent>
+      </Tooltip>
     </div>
   );
 }
@@ -636,14 +715,116 @@ function ReviewScrollPanel({
 function ReviewClaims({
   allThreads,
   filteredThreads,
+  openClaims,
+  openThreads,
   isEvidenceSelected,
   onEvidenceSelect,
+  onClaimOpenChange,
+  onThreadOpenChange,
 }: {
   allThreads: Thread[];
   filteredThreads: Thread[];
+  openClaims: Record<string, boolean>;
+  openThreads: Record<string, boolean>;
   isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
+  onClaimOpenChange: (claimId: string, open: boolean) => void;
+  onThreadOpenChange: (threadId: string, open: boolean) => void;
 }) {
+  const claimButtonRefs = React.useRef(new Map<string, HTMLButtonElement>());
+  const filteredClaims = React.useMemo(
+    () =>
+      filteredThreads.flatMap((thread) =>
+        thread.claims.map((claim) => ({ claim, threadId: thread.id })),
+      ),
+    [filteredThreads],
+  );
+  const setClaimButtonRef = React.useCallback(
+    (claimId: string, button: HTMLButtonElement | null) => {
+      if (button) {
+        claimButtonRefs.current.set(claimId, button);
+      } else {
+        claimButtonRefs.current.delete(claimId);
+      }
+    },
+    [],
+  );
+
+  const focusClaimAt = React.useCallback(
+    (index: number) => {
+      const target = filteredClaims[index];
+      if (!target) return;
+
+      onThreadOpenChange(target.threadId, true);
+      if (target.claim.humanStatus !== "accepted") {
+        onClaimOpenChange(target.claim.id, true);
+      }
+
+      window.requestAnimationFrame(() => {
+        claimButtonRefs.current.get(target.claim.id)?.focus();
+      });
+    },
+    [filteredClaims, onClaimOpenChange, onThreadOpenChange],
+  );
+
+  const navigateWithShortcut = React.useCallback(
+    (
+      event: Pick<KeyboardEvent, "key" | "target"> & {
+        preventDefault: () => void;
+      },
+    ) => {
+      if (event.key.toLowerCase() !== "j" && event.key.toLowerCase() !== "k") {
+        return;
+      }
+      if (filteredClaims.length === 0) return;
+
+      if (
+        event.target instanceof HTMLElement &&
+        (event.target.isContentEditable ||
+          event.target.matches("input, textarea, select"))
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      const activeClaimId = (
+        event.target instanceof Element
+          ? event.target.closest<HTMLElement>("[data-claim-id]")?.dataset
+              .claimId
+          : undefined
+      );
+      const activeIndex = filteredClaims.findIndex(
+        ({ claim }) => claim.id === activeClaimId,
+      );
+      const fallbackIndex = event.key.toLowerCase() === "j" ? -1 : 0;
+      const nextIndex =
+        event.key.toLowerCase() === "j"
+          ? Math.min(
+              filteredClaims.length - 1,
+              (activeIndex >= 0 ? activeIndex : fallbackIndex) + 1,
+            )
+          : Math.max(
+              0,
+              (activeIndex >= 0 ? activeIndex : fallbackIndex) - 1,
+            );
+
+      focusClaimAt(nextIndex);
+    },
+    [filteredClaims, focusClaimAt],
+  );
+
+  React.useEffect(() => {
+    const onWindowKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) {
+        return;
+      }
+      navigateWithShortcut(event);
+    };
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [navigateWithShortcut]);
+
   return (
     <section className="grid gap-3.5">
       {allThreads.length === 0 ? (
@@ -655,8 +836,13 @@ function ReviewClaims({
           <ThreadGroup
             key={thread.id}
             thread={thread}
+            open={openThreads[thread.id] === true}
+            openClaims={openClaims}
             isEvidenceSelected={isEvidenceSelected}
             onEvidenceSelect={onEvidenceSelect}
+            onClaimOpenChange={onClaimOpenChange}
+            onClaimTriggerRef={setClaimButtonRef}
+            onThreadOpenChange={onThreadOpenChange}
           />
         ))
       )}
@@ -1003,20 +1189,49 @@ function statusLabel(status: string) {
 
 function ThreadGroup({
   thread,
+  open,
+  openClaims,
   isEvidenceSelected,
   onEvidenceSelect,
+  onClaimOpenChange,
+  onClaimTriggerRef,
+  onThreadOpenChange,
 }: {
   thread: Thread;
+  open: boolean;
+  openClaims: Record<string, boolean>;
   isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
+  onClaimOpenChange: (claimId: string, open: boolean) => void;
+  onClaimTriggerRef: (
+    claimId: string,
+    button: HTMLButtonElement | null,
+  ) => void;
+  onThreadOpenChange: (threadId: string, open: boolean) => void;
 }) {
   return (
-    <section className="flex flex-col gap-1">
+    <Collapsible
+      open={open}
+      onOpenChange={(nextOpen) => onThreadOpenChange(thread.id, nextOpen)}
+      className="flex flex-col gap-1"
+    >
+      <section className="contents">
       <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-muted/95 backdrop-blur-sm supports-backdrop-filter:bg-muted/80">
         <div className="min-w-0">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <h2 className="text-3xl font-light leading-snug">
-              <AiText source={thread.title || "Behavior"} inline />
+            <h2 className="min-w-0 text-3xl font-light leading-snug">
+              <CollapsibleTrigger className="group -ml-1 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted">
+                <ChevronRight
+                  className={cn(
+                    "size-7 shrink-0 text-muted-foreground transition-transform",
+                    open && "rotate-90",
+                  )}
+                  aria-hidden
+                />
+                <span className="min-w-0">
+                  <AiText source={thread.title || "Behavior"} inline />
+                </span>
+              </CollapsibleTrigger>
             </h2>
             <div className="flex flex-wrap gap-2">
               <Badge variant="secondary">
@@ -1027,23 +1242,35 @@ function ThreadGroup({
           </div>
         </div>
       </div>
-      {thread.summary ? (
-        <div className="text-lg leading-relaxed text-muted-foreground pb-2 max-w-prose">
-          <AiText source={thread.summary} />
+      <CollapsibleContent className="flex flex-col gap-1">
+        {thread.summary ? (
+          <div className="text-lg leading-relaxed text-muted-foreground pb-2 max-w-prose">
+            <AiText source={thread.summary} />
+          </div>
+        ) : null}
+        <div className="grid gap-3">
+          {thread.claims.map((claim) => (
+            <ClaimCard
+              key={claim.id}
+              claim={claim}
+              open={openClaims[claim.id] === true}
+              isEvidenceSelected={isEvidenceSelected}
+              onEvidenceSelect={onEvidenceSelect}
+              onOpenChange={(nextOpen) =>
+                onClaimOpenChange(claim.id, nextOpen)
+              }
+              onStatusChange={(humanStatus) => {
+                if (humanStatus === "accepted") {
+                  onClaimOpenChange(claim.id, false);
+                }
+              }}
+              onTriggerRef={(button) => onClaimTriggerRef(claim.id, button)}
+            />
+          ))}
         </div>
-      ) : null}
-      <div className="grid gap-3">
-        {thread.claims.map((claim, index) => (
-          <ClaimCard
-            key={claim.id}
-            claim={claim}
-            index={index}
-            isEvidenceSelected={isEvidenceSelected}
-            onEvidenceSelect={onEvidenceSelect}
-          />
-        ))}
-      </div>
-    </section>
+      </CollapsibleContent>
+      </section>
+    </Collapsible>
   );
 }
 
@@ -1090,47 +1317,84 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
 
 function ClaimCard({
   claim,
-  index,
+  open,
   isEvidenceSelected,
   onEvidenceSelect,
+  onOpenChange,
+  onStatusChange,
+  onTriggerRef,
 }: {
   claim: Claim;
-  index: number;
+  open: boolean;
   isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
+  onOpenChange: (open: boolean) => void;
+  onStatusChange: (humanStatus: HumanStatus) => void;
+  onTriggerRef: (button: HTMLButtonElement | null) => void;
 }) {
   return (
-    <Card
-      className={cn(
-        claim.humanStatus === "accepted"
-          ? "ring-1 ring-inset ring-primary/80"
-          : "",
-      )}
+    <Collapsible
+      open={open}
+      onOpenChange={onOpenChange}
+      data-claim-id={claim.id}
     >
-      <div className="flex">
-        <span className="relative left-4 text-xl font-medium leading-snug text-muted-foreground">
-          {index + 1}.&nbsp;
-        </span>
-        <div className="flex flex-col gap-6 w-full">
-          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
-            <CardTitle className="flex text-xl font-medium leading-snug">
-              <AiText source={claim.title} />
-            </CardTitle>
-            <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto">
-              {claim.updatedAt ? (
-                <ClaimTimeAgo updatedAt={claim.updatedAt} />
-              ) : null}
-              <Badge
-                variant={
-                  claim.agentStatus !== "unchanged" ? "default" : "secondary"
-                }
+      <Card
+        className={cn(
+          "gap-0 py-0",
+          claim.humanStatus === "accepted"
+            ? "ring-1 ring-inset ring-primary/35"
+            : "",
+        )}
+      >
+        <CardHeader className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-6">
+          <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug">
+            <CollapsibleTrigger
+              ref={onTriggerRef}
+              className="group -ml-1 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/70 focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                onOpenChange(!open);
+              }}
+            >
+              <ChevronRight
+                className={cn(
+                  "size-5 shrink-0 text-muted-foreground transition-transform",
+                  open && "rotate-90",
+                )}
+                aria-hidden
+              />
+              <span className="min-w-0">
+                <AiText source={claim.title} />
+              </span>
+            </CollapsibleTrigger>
+          </CardTitle>
+          <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto">
+            {claim.updatedAt ? (
+              <ClaimTimeAgo updatedAt={claim.updatedAt} />
+            ) : null}
+            <Badge
+              variant={
+                claim.agentStatus !== "unchanged" ? "default" : "secondary"
+              }
+            >
+              {statusLabel(claim.agentStatus)}
+            </Badge>
+            {claim.humanStatus === "accepted" && !open ? (
+              <span
+                className="inline-flex h-7 items-center gap-1 rounded-md border bg-background px-2 text-sm font-medium text-foreground"
+                aria-label="Approved"
+                title="Approved"
               >
-                {statusLabel(claim.agentStatus)}
-              </Badge>
-            </CardAction>
-          </CardHeader>
+                <Check className="size-3.5" aria-hidden />
+                <ThumbsUp className="size-3.5" aria-hidden />
+              </span>
+            ) : null}
+          </CardAction>
+        </CardHeader>
 
-          <CardContent className="flex flex-col gap-8 px-6">
+        <CollapsibleContent>
+          <CardContent className="flex flex-col gap-8 px-4 pb-4 sm:px-6">
             {claim.description ? (
               <CardDescription className="text-base leading-relaxed">
                 <AiText source={claim.description} />
@@ -1152,13 +1416,16 @@ function ClaimCard({
               </div>
             ) : null}
           </CardContent>
-        </div>
-      </div>
-
-      <CardFooter className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center px-6">
-        <ClaimActions claim={claim} className="ml-auto" />
-      </CardFooter>
-    </Card>
+          <CardFooter className="flex flex-col items-start justify-between gap-3 px-4 pb-4 sm:flex-row sm:items-center sm:px-6 sm:pb-6">
+            <ClaimActions
+              claim={claim}
+              className="ml-auto"
+              onStatusChange={onStatusChange}
+            />
+          </CardFooter>
+        </CollapsibleContent>
+      </Card>
+    </Collapsible>
   );
 }
 
@@ -1745,9 +2012,11 @@ function ReviewFileTree({
 function ClaimActions({
   claim,
   className,
+  onStatusChange,
 }: {
   claim: Claim;
   className?: string;
+  onStatusChange?: (humanStatus: HumanStatus) => void;
 }) {
   const queryClient = useQueryClient();
   const statusMutation = useMutation({
@@ -1761,8 +2030,12 @@ function ClaimActions({
         },
       );
       if (!response.ok) throw new Error("Failed to update claim status.");
+      return humanStatus;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["review"] }),
+    onSuccess: (humanStatus) => {
+      onStatusChange?.(humanStatus);
+      return queryClient.invalidateQueries({ queryKey: ["review"] });
+    },
   });
 
   return (
