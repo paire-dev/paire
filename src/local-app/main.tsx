@@ -1467,8 +1467,8 @@ function ReviewCodePanel({
         <Button
           type="button"
           size="icon"
-          variant="outline"
-          className="h-10 w-10"
+          variant="ghost"
+          className="h-10 w-10 hover:bg-secondary/10"
           aria-label="Open code panel"
           title="Open code panel"
           onClick={() => onOpenChange(true)}
@@ -1558,6 +1558,9 @@ function ReviewCodePanel({
                 disableFileHeader: false,
                 stickyHeaders: true,
                 unsafeCSS: DIFF_SELECTED_LINE_UNSAFE_CSS,
+                itemMetrics: {
+                  lineHeight: 24,
+                },
                 layout: {
                   paddingTop: 8,
                   paddingBottom: 16,

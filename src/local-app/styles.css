@@ -115,6 +115,7 @@
   /* diffs */
   --diffs-bg-selection-override: transparent;
   --diffs-bg-selection-number-override: var(--primary);
+  --diffs-font-size: 12px;
 }
 
 @layer base {
