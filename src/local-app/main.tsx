@@ -1110,7 +1110,7 @@ function ClaimCard({
         <span className="relative left-4 text-xl font-medium leading-snug text-muted-foreground">
           {index + 1}.&nbsp;
         </span>
-        <div className="w-full">
+        <div className="flex flex-col gap-6 w-full">
           <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between px-6">
             <CardTitle className="flex text-xl font-medium leading-snug">
               <AiText source={claim.title} />
@@ -1259,7 +1259,7 @@ function EvidenceBlock({
             size="sm"
             aria-pressed={selected}
             className={cn(
-              "w-full justify-start text-sm font-normal hover:bg-primary/10",
+              "w-full justify-start text-sm font-normal hover:bg-primary/10 h-auto py-2 text-left",
               selected ? "bg-primary/30" : "bg-muted/30 text-muted-foreground",
             )}
             onClick={() => onSelect(evidence)}
@@ -1267,7 +1267,7 @@ function EvidenceBlock({
           />
         }
       >
-        <AiText source={evidence.change} inline />
+        <AiText className="w-full flex justify-start" source={evidence.change} inline />
         <ChevronRight className="size-4 ml-auto text-muted-foreground" />
       </TooltipTrigger>
       <TooltipContent side="top" align="end">
