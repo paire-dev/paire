@@ -81,13 +81,13 @@ type AgentClaim = {
   id: string;
   threadId: string;
   title: string;
-  description?: string;
-  before?: string | null;
-  after?: string | null;
   agentStatus: ClaimStatus;
   humanStatus?: HumanStatus;
-  updatedAt?: number;
   evidences: AgentEvidence[];
+  before?: string | null;
+  after?: string | null;
+  description?: string;
+  updatedAt?: number;
 };
 
 type AgentThread = {
@@ -796,7 +796,7 @@ async function createPendingPacket(
       revisionId: "string",
       gitFingerprint: "string",
       threads:
-        "Array<{ id, title, summary?, claims: Array<{ id, threadId, title, description?, before?, after?, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }> }> }>",
+        "Array<{ id, title, summary?, claims: Array<{ id, threadId, title, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }>, before?, after?, description? }> }>",
     },
     rules: [
       "Group related claims into area threads. Treat each thread as one review area with a short area title, not as a single diff line or file.",
@@ -815,6 +815,7 @@ async function createPendingPacket(
       "Keep claim titles short and direct.",
       "Use claim description only to add detail that complements the title; do not restate the same point.",
       "Aim for clarity with progressive disclosure: each new detail should build on the previous one and avoid repetition.",
+      "In agent-result.json, write each claim object with keys in this order: id, threadId, title, agentStatus, humanStatus (if set), evidences, before, after, description — ground the claim in code spans first, then behavior deltas, then the longer description.",
       "On each claim, set optional before and after to high-level behavior summaries for the whole claim; use null when not applicable (pure addition: null before; pure removal: null after). Do not mention file paths or line numbers.",
       "On each evidence span, set change to a required imperative line describing what this span does; verb-first, concise, and may name symbols or APIs.",
     ],
@@ -986,11 +987,11 @@ function reviewActionRequiredMessage({
     "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
     "",
     "Before you stop, confirm every item:",
-    "[ ] git diff inspected",
-    "[ ] full packet read from the exported path",
-    `[ ] JSON written to ${packet.resultPath}`,
-    "[ ] paire review --apply succeeded",
-    "[ ] Review UI opened when a URL was printed",
+    "- git diff inspected",
+    "- full packet read from the exported path",
+    `- JSON written to ${packet.resultPath}`,
+    "- paire review --apply succeeded",
+    "- Review UI opened when a URL was printed",
     "",
     "Packet preview:",
     packet.preview,
@@ -1888,18 +1889,44 @@ function getActiveClaims(db: Database, sessionId: string) {
        order by change_threads.updatedAt desc, change_threads.rowid desc, claims.updatedAt desc, claims.rowid desc`,
     )
     .all(sessionId);
-  return rows.map((claim) => ({
-    ...claim,
-    ...normalizeStoredClaim(claim),
-    id: publicDbId(sessionId, claim.id),
-    threadId: publicDbId(sessionId, claim.threadId),
-    evidences: db
-      .query<
-      AgentEvidence & { revisionId: string },
-      [string]
-    >("select filePath, startLine, endLine, symbol, fingerprint, revisionId, changeText as change from claim_evidences where claimId = ? order by filePath, startLine")
-      .all(claim.id),
-  }));
+  return rows.map((claim) =>
+    formatAgentClaimForExport({
+      ...claim,
+      ...normalizeStoredClaim(claim),
+      id: publicDbId(sessionId, claim.id),
+      threadId: publicDbId(sessionId, claim.threadId),
+      evidences: db
+        .query<
+        AgentEvidence & { revisionId: string },
+        [string]
+      >(
+        "select filePath, startLine, endLine, symbol, fingerprint, revisionId, changeText as change from claim_evidences where claimId = ? order by filePath, startLine",
+      )
+        .all(claim.id),
+    }),
+  );
+}
+
+function formatAgentClaimForExport<T extends AgentClaim & { threadTitle?: string }>(
+  claim: T,
+): T {
+  const { threadTitle, ...rest } = claim;
+  const formatted: AgentClaim & { threadTitle?: string } = {
+    id: rest.id,
+    threadId: rest.threadId,
+    title: rest.title,
+    agentStatus: rest.agentStatus,
+    ...(rest.humanStatus != null ? { humanStatus: rest.humanStatus } : {}),
+    evidences: rest.evidences,
+    before: rest.before ?? null,
+    after: rest.after ?? null,
+    ...(rest.description?.trim() ? { description: rest.description.trim() } : {}),
+    ...(rest.updatedAt != null ? { updatedAt: rest.updatedAt } : {}),
+  };
+  if (threadTitle != null) {
+    formatted.threadTitle = threadTitle;
+  }
+  return formatted as T;
 }
 
 function scopedDbId(sessionId: string, publicId: string) {
