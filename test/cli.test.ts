@@ -1045,6 +1045,14 @@ test("new git changes after apply require a fresh packet and do not open browser
   expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
 });
 
+test("version command reports dev when running from source", () => {
+  const fixture = createFixtureRepo();
+  const version = runPaire(fixture, ["--version"]);
+
+  expect(version.exitCode).toBe(0);
+  expect(version.stdout.trim()).toBe("dev");
+});
+
 test("incremental packet after an applied commit only includes changes since the last Paire apply", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
@@ -1450,6 +1458,30 @@ test("compiled binary supports status in a fixture repo", () => {
   });
   expect(result.exitCode).toBe(0);
   expect(text(result.stdout)).toContain("No Paire session found");
+});
+
+test("compiled binary embeds the build version", () => {
+  const fixture = createFixtureRepo();
+  const binary = join(fixture.root, "paire-bin");
+  const build = Bun.spawnSync(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "../scripts/build.ts"),
+      `--outfile=${binary}`,
+      "--version=v9.8.7",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(build.exitCode).toBe(0);
+
+  const result = Bun.spawnSync([binary, "--version"], {
+    cwd: fixture.repo,
+    env: testEnv(fixture),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  expect(text(result.stdout).trim()).toBe("v9.8.7");
 });
 
 function createUncommittedFixtureRepo(): Fixture {

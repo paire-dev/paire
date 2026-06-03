@@ -49,4 +49,6 @@ jobs:
         run: bash scripts/build-release.sh
 
       - name: Smoke test binary
-        run: dist/releases/paire-linux-x64 --help
+        run: |
+          dist/releases/paire-linux-x64 --help
+          dist/releases/paire-linux-x64 --version

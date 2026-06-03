@@ -3,6 +3,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 OUT_DIR="${PAIRE_RELEASE_DIR:-dist/releases}"
+VERSION="${PAIRE_VERSION:-}"
 
 fail() {
   printf 'paire release build: %s\n' "$*" >&2
@@ -49,7 +50,11 @@ ARCH="$(detect_arch)"
 ASSET="paire-${OS}-${ARCH}"
 
 mkdir -p "$OUT_DIR"
-bun scripts/build.ts --outfile="${OUT_DIR}/${ASSET}"
+if [[ -n "$VERSION" ]]; then
+  bun scripts/build.ts --outfile="${OUT_DIR}/${ASSET}" --version="$VERSION"
+else
+  bun scripts/build.ts --outfile="${OUT_DIR}/${ASSET}"
+fi
 chmod 0755 "${OUT_DIR}/${ASSET}"
 
 (

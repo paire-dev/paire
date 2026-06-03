@@ -17,6 +17,7 @@ import {
   formatInstallResult,
   installAgentInstructions,
 } from "./install-agent-instructions";
+import { PAIRE_VERSION } from "./version";
 import reviewApp from "../local-app/index.html";
 
 export type CliOptions = {
@@ -225,6 +226,11 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         return 0;
       case "install":
         installCommand(ctx);
+        return 0;
+      case "version":
+      case "--version":
+      case "-v":
+        ctx.stdout(PAIRE_VERSION);
         return 0;
       case "_review-serve": {
         const sessionId = rest[0];
@@ -2377,6 +2383,7 @@ function helpText() {
     "  server start [--no-open]",
     "  server stop",
     "  install",
+    "  version",
   ].join("\n");
 }
 
