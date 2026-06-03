@@ -24,7 +24,7 @@ import {
   ArrowLeftFromLine,
   ArrowRightFromLine,
   Bot,
-  Check,
+  SquareCheckBig,
   ChevronRight,
   Columns2,
   FileCode,
@@ -41,7 +41,7 @@ import {
   PanelRightOpen,
   Rows2,
   Sun,
-  ThumbsUp,
+  Square,
   WrapText,
 } from "lucide-react";
 import * as React from "react";
@@ -1391,16 +1391,28 @@ function ClaimCard({
             >
               {statusLabel(claim.agentStatus)}
             </Badge>
-            {claim.humanStatus === "accepted" && !open ? (
+            {!open && (
               <span
-                className="inline-flex h-7 items-center gap-1 rounded-md border bg-background px-2 text-sm font-medium text-foreground"
-                aria-label="Approved"
-                title="Approved"
+                className={cn(
+                  "inline-flex h-7 items-center gap-1 rounded-md border px-2 text-sm font-medium",
+                  claim.humanStatus === "accepted"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-secondary text-secondary-foreground",
+                )}
+                aria-label={
+                  claim.humanStatus === "accepted" ? "Approved" : "Not approved"
+                }
+                title={
+                  claim.humanStatus === "accepted" ? "Approved" : "Not approved"
+                }
               >
-                <Check className="size-3.5" aria-hidden />
-                <ThumbsUp className="size-3.5" aria-hidden />
+                {claim.humanStatus === "accepted" ? (
+                  <SquareCheckBig className="size-3.5" aria-hidden />
+                ) : (
+                  <Square className="size-3.5" aria-hidden />
+                )}
               </span>
-            ) : null}
+            )}
           </CardAction>
         </CardHeader>
 
@@ -1427,7 +1439,7 @@ function ClaimCard({
               </div>
             ) : null}
           </CardContent>
-          <CardFooter className="flex flex-col items-start justify-between gap-3 px-4 pb-4 sm:flex-row sm:items-center sm:px-6 sm:pb-6">
+          <CardFooter className="flex flex-col items-start justify-between gap-3 pb-4 sm:flex-row sm:items-center sm:pb-6 px-4 sm:px-6">
             <ClaimActions
               claim={claim}
               className="ml-auto"
@@ -2050,16 +2062,10 @@ function ClaimActions({
   });
 
   return (
-    <div
-      className={cn(
-        "inline-flex w-full overflow-hidden rounded-lg border bg-background sm:w-auto",
-        className,
-      )}
-    >
+    <div className={cn("inline-flex w-full sm:w-auto", className)}>
       <Button
         type="button"
         variant={claim.humanStatus === "accepted" ? "default" : "outline"}
-        className="min-w-20 flex-1 rounded-none border-0 shadow-none focus-visible:relative focus-visible:z-10 sm:flex-none"
         onClick={() =>
           statusMutation.mutate(
             claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
@@ -2067,10 +2073,16 @@ function ClaimActions({
         }
       >
         {claim.humanStatus === "accepted" ? (
-          <Check data-icon="inline-start" />
-        ) : null}
-        Ok
-        <ThumbsUp data-icon="inline-end" />
+          <>
+            Accepted
+            <SquareCheckBig data-icon="inline-start" />
+          </>
+        ) : (
+          <>
+            Accept
+            <Square data-icon="inline-end" />
+          </>
+        )}
       </Button>
     </div>
   );
