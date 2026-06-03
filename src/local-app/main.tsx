@@ -1346,9 +1346,9 @@ function ClaimCard({
     >
       <Card
         className={cn(
-          "gap-0 py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring/60",
+          "gap-0 py-0 transition-[background-color,box-shadow] focus-within:outline-3 focus-within:-outline-offset-1 focus-within:outline-ring/60",
           claim.humanStatus === "accepted"
-            ? "bg-yellow-50/70 ring-1 ring-inset ring-yellow-200"
+            ? "ring-3 ring-inset ring-primary/35"
             : "",
         )}
       >
@@ -1383,12 +1383,17 @@ function ClaimCard({
               variant={
                 claim.agentStatus !== "unchanged" ? "default" : "secondary"
               }
+              className={
+                claim.agentStatus !== "unchanged"
+                  ? "border-yellow-200 bg-yellow-100/80 text-yellow-950"
+                  : undefined
+              }
             >
               {statusLabel(claim.agentStatus)}
             </Badge>
             {claim.humanStatus === "accepted" && !open ? (
               <span
-                className="inline-flex h-7 items-center gap-1 rounded-md border border-yellow-200 bg-yellow-100/70 px-2 text-sm font-medium text-yellow-950"
+                className="inline-flex h-7 items-center gap-1 rounded-md border bg-background px-2 text-sm font-medium text-foreground"
                 aria-label="Approved"
                 title="Approved"
               >
@@ -2053,13 +2058,8 @@ function ClaimActions({
     >
       <Button
         type="button"
-        variant="outline"
-        className={cn(
-          "min-w-20 flex-1 rounded-none border-0 shadow-none focus-visible:relative focus-visible:z-10 sm:flex-none",
-          claim.humanStatus === "accepted"
-            ? "bg-yellow-100/80 text-yellow-950 hover:bg-yellow-100"
-            : "",
-        )}
+        variant={claim.humanStatus === "accepted" ? "default" : "outline"}
+        className="min-w-20 flex-1 rounded-none border-0 shadow-none focus-visible:relative focus-visible:z-10 sm:flex-none"
         onClick={() =>
           statusMutation.mutate(
             claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
