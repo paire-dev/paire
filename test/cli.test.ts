@@ -19,6 +19,7 @@ type Fixture = {
 };
 
 let fixtures: Fixture[] = [];
+const PREFERRED_REVIEW_PORT = 22222;
 
 beforeEach(() => {
   fixtures = [];
@@ -1185,6 +1186,8 @@ test("paire server start spawns or reuses the review UI server", async () => {
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain("http://127.0.0.1:");
 
   const state = await waitForServerState(fixture.home, session!.id);
+  expect(state.port).toBe(PREFERRED_REVIEW_PORT);
+  expect(state.url).toContain(`http://127.0.0.1:${PREFERRED_REVIEW_PORT}/`);
   expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
 
   writeFileSync(fixture.browserCapture, "");
@@ -1202,6 +1205,36 @@ test("paire server start spawns or reuses the review UI server", async () => {
   const stop = runPaire(fixture, ["server", "stop"]);
   expect(stop.exitCode).toBe(0);
   expect(stop.stdout).toContain("Stopped the review UI server.");
+});
+
+test("paire server start falls back to an open port when the preferred port is occupied", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  const occupyingServer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: PREFERRED_REVIEW_PORT,
+    fetch: () => new Response("occupied"),
+  });
+  try {
+    const start = runPaire(fixture, ["server", "start", "--no-open"]);
+    expect(start.exitCode).toBe(0);
+    expect(start.stdout).toContain("Review UI:");
+
+    const state = await waitForServerState(fixture.home, session!.id);
+    expect(state.port).not.toBe(PREFERRED_REVIEW_PORT);
+    expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
+
+    const stop = runPaire(fixture, ["server", "stop"]);
+    expect(stop.exitCode).toBe(0);
+  } finally {
+    occupyingServer.stop();
+  }
 });
 
 test("paire server stop shuts down the review UI server for the current branch", async () => {
@@ -1480,6 +1513,7 @@ async function waitForServerState(home: string, sessionId: string) {
       return JSON.parse(readFileSync(path, "utf8")) as {
         url: string;
         token: string;
+        port: number;
         pid?: number;
       };
     }

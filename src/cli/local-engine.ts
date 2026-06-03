@@ -172,7 +172,8 @@ const MAX_COMMENT_CHARS = 4_000;
 const MAX_FILE_PATH_CHARS = 1_000;
 const MAX_EVIDENCE_LINE = 1_000_000;
 const MAX_EVIDENCE_SPAN_LINES = 5_000;
-const REVIEW_PORT = 0;
+const REVIEW_PORT = 22222;
+const FALLBACK_REVIEW_PORT = 0;
 const REVIEW_SERVER_START_TIMEOUT_MS = 5_000;
 const REVIEW_TOKEN_BYTES = 16;
 const REVIEW_TOKEN_HEADER = "x-paire-review-token";
@@ -1093,9 +1094,25 @@ async function ensureReviewServer(
 }
 
 function createReviewServer(session: SessionRow, ctx: Context, token: string) {
+  try {
+    return serveReviewUi(session, ctx, token, REVIEW_PORT);
+  } catch (error) {
+    if (!isAddressInUseError(error)) {
+      throw error;
+    }
+    return serveReviewUi(session, ctx, token, FALLBACK_REVIEW_PORT);
+  }
+}
+
+function serveReviewUi(
+  session: SessionRow,
+  ctx: Context,
+  token: string,
+  port: number,
+) {
   return Bun.serve({
     hostname: "127.0.0.1",
-    port: REVIEW_PORT,
+    port,
     routes: {
       "/": reviewApp,
       "/api/review": (request: Request) =>
@@ -1120,6 +1137,13 @@ function createReviewServer(session: SessionRow, ctx: Context, token: string) {
         ),
     },
   });
+}
+
+function isAddressInUseError(error: unknown) {
+  return (
+    error instanceof Error &&
+    ("code" in error ? error.code === "EADDRINUSE" : false)
+  );
 }
 
 async function reviewServeCommand(sessionId: string, ctx: Context) {
