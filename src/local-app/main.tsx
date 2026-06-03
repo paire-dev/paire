@@ -761,7 +761,13 @@ function ReviewClaims({
       }
 
       window.requestAnimationFrame(() => {
-        claimButtonRefs.current.get(target.claim.id)?.focus();
+        const button = claimButtonRefs.current.get(target.claim.id);
+        button?.focus();
+        window.requestAnimationFrame(() => {
+          button
+            ?.closest("[data-claim-id]")
+            ?.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
       });
     },
     [filteredClaims, onClaimOpenChange, onThreadOpenChange],
@@ -815,7 +821,7 @@ function ReviewClaims({
 
   React.useEffect(() => {
     const onWindowKeyDown = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) {
+      if (event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) {
         return;
       }
       navigateWithShortcut(event);
@@ -836,7 +842,7 @@ function ReviewClaims({
           <ThreadGroup
             key={thread.id}
             thread={thread}
-            open={openThreads[thread.id] === true}
+            open={openThreads[thread.id] !== false}
             openClaims={openClaims}
             isEvidenceSelected={isEvidenceSelected}
             onEvidenceSelect={onEvidenceSelect}
@@ -1220,7 +1226,7 @@ function ThreadGroup({
         <div className="min-w-0">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <h2 className="min-w-0 text-3xl font-light leading-snug">
-              <CollapsibleTrigger className="group -ml-1 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted">
+              <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted">
                 <ChevronRight
                   className={cn(
                     "size-7 shrink-0 text-muted-foreground transition-transform",
@@ -1340,9 +1346,9 @@ function ClaimCard({
     >
       <Card
         className={cn(
-          "gap-0 py-0",
+          "gap-0 py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring/60",
           claim.humanStatus === "accepted"
-            ? "ring-1 ring-inset ring-primary/35"
+            ? "bg-yellow-50/70 ring-1 ring-inset ring-yellow-200"
             : "",
         )}
       >
@@ -1350,7 +1356,7 @@ function ClaimCard({
           <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug">
             <CollapsibleTrigger
               ref={onTriggerRef}
-              className="group -ml-1 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/70 focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+              className="group -ml-3 flex min-w-0 items-center gap-1 rounded-md px-1 text-left"
               onKeyDown={(event) => {
                 if (event.key !== "Enter" && event.key !== " ") return;
                 event.preventDefault();
@@ -1382,7 +1388,7 @@ function ClaimCard({
             </Badge>
             {claim.humanStatus === "accepted" && !open ? (
               <span
-                className="inline-flex h-7 items-center gap-1 rounded-md border bg-background px-2 text-sm font-medium text-foreground"
+                className="inline-flex h-7 items-center gap-1 rounded-md border border-yellow-200 bg-yellow-100/70 px-2 text-sm font-medium text-yellow-950"
                 aria-label="Approved"
                 title="Approved"
               >
@@ -2047,8 +2053,13 @@ function ClaimActions({
     >
       <Button
         type="button"
-        variant={claim.humanStatus === "accepted" ? "default" : "outline"}
-        className="min-w-20 flex-1 rounded-none border-0 shadow-none sm:flex-none"
+        variant="outline"
+        className={cn(
+          "min-w-20 flex-1 rounded-none border-0 shadow-none focus-visible:relative focus-visible:z-10 sm:flex-none",
+          claim.humanStatus === "accepted"
+            ? "bg-yellow-100/80 text-yellow-950 hover:bg-yellow-100"
+            : "",
+        )}
         onClick={() =>
           statusMutation.mutate(
             claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
