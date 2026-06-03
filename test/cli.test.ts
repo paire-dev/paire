@@ -770,6 +770,34 @@ test("start baselines new sessions at baseCommit so existing branch commits are 
   );
 });
 
+test("start baselines dirty new sessions at baseCommit instead of head", () => {
+  const fixture = createFixtureRepo();
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  writeFileSync(
+    join(fixture.repo, "src/prestart-feature.ts"),
+    "export const prestartFeature = true;\n",
+  );
+  commitAll(fixture.repo, "add prestart feature");
+  writeFileSync(
+    join(fixture.repo, "src/dirty-work.ts"),
+    "export const dirtyWork = true;\n",
+  );
+  const head = gitOutput(["rev-parse", "HEAD"], fixture.repo);
+  const baseCommit = gitOutput(["merge-base", "HEAD", "main"], fixture.repo);
+
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const revision = db
+    .query<{ gitFingerprint: string }, []>(
+      "select gitFingerprint from revisions where number = 0 and state = 'applied'",
+    )
+    .get();
+  db.close();
+  expect(revision?.gitFingerprint).toBe(baseCommit);
+  expect(revision?.gitFingerprint).not.toBe(head);
+});
+
 test("committed files that started untracked are included in review packets", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
@@ -1480,6 +1508,18 @@ function run(args: string[], cwd: string) {
   if (result.exitCode !== 0) {
     throw new Error(`${args.join(" ")} failed: ${text(result.stderr)}`);
   }
+}
+
+function gitOutput(args: string[], cwd: string) {
+  const result = Bun.spawnSync(["git", ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${text(result.stderr)}`);
+  }
+  return text(result.stdout).trim();
 }
 
 function commitAll(repo: string, message: string) {
