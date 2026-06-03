@@ -5,6 +5,9 @@ IFS=$'\n\t'
 REPO="${PAIRE_REPO:-paire-dev/paire}"
 VERSION="${PAIRE_VERSION:-latest}"
 INSTALL_DIR="${PAIRE_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR_WAS_SET="${PAIRE_INSTALL_DIR+x}"
+GLOBAL_LINK_DIR="${PAIRE_GLOBAL_LINK_DIR:-/usr/local/bin}"
+SKIP_GLOBAL_LINK="${PAIRE_SKIP_GLOBAL_LINK:-0}"
 BASE_URL="${PAIRE_BASE_URL:-}"
 
 fail() {
@@ -50,6 +53,60 @@ download() {
   curl --fail --location --silent --show-error "$url" --output "$output"
 }
 
+link_global_command() {
+  local target="$1"
+  local link_dir="$GLOBAL_LINK_DIR"
+  local link="$link_dir/paire"
+
+  if [[ "$SKIP_GLOBAL_LINK" == "1" ]]; then
+    return
+  fi
+
+  if [[ -n "$INSTALL_DIR_WAS_SET" && -z "${PAIRE_GLOBAL_LINK_DIR+x}" ]]; then
+    return
+  fi
+
+  if [[ "$INSTALL_DIR" == "$link_dir" ]]; then
+    return
+  fi
+
+  if [[ -e "$link" && ! -L "$link" ]]; then
+    printf 'Global command already exists at %s; leaving it unchanged.\n' "$link"
+    return
+  fi
+
+  if [[ ! -d "$link_dir" ]]; then
+    if ! mkdir -p "$link_dir" 2>/dev/null; then
+      if command -v sudo >/dev/null 2>&1; then
+        sudo mkdir -p "$link_dir" || {
+          printf 'Installed paire, but could not create %s.\n' "$link" >&2
+          return
+        }
+      else
+        printf 'Installed paire, but could not create %s because sudo is unavailable.\n' "$link" >&2
+        return
+      fi
+    fi
+  fi
+
+  if [[ -w "$link_dir" ]]; then
+    ln -sfn "$target" "$link" || {
+      printf 'Installed paire, but could not link %s.\n' "$link" >&2
+      return
+    }
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo ln -sfn "$target" "$link" || {
+      printf 'Installed paire, but could not link %s.\n' "$link" >&2
+      return
+    }
+  else
+    printf 'Installed paire, but could not link %s because sudo is unavailable.\n' "$link" >&2
+    return
+  fi
+
+  printf 'Linked paire to %s\n' "$link"
+}
+
 need uname
 need curl
 need mktemp
@@ -89,4 +146,5 @@ else
 fi
 
 printf 'Installed paire to %s\n' "$INSTALL_DIR/paire"
+link_global_command "$INSTALL_DIR/paire"
 printf 'Run: paire --help\n'

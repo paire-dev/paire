@@ -19,11 +19,25 @@ less /tmp/paire-install.sh
 bash /tmp/paire-install.sh
 ```
 
-Installs to `~/.local/bin/paire` by default. Pin a version or change the target:
+Installs to `~/.local/bin/paire` by default and links `paire` into
+`/usr/local/bin` when possible. The link makes the command visible to coding
+agents and GUI apps that do not load your shell startup files.
+
+Pin a version or change the target:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh |
   PAIRE_VERSION=v0.1.0 PAIRE_INSTALL_DIR="$HOME/bin" bash
+```
+
+Change or skip the global link:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh |
+  PAIRE_GLOBAL_LINK_DIR="$HOME/bin" bash
+
+curl -fsSL https://raw.githubusercontent.com/paire-dev/paire/main/scripts/install.sh |
+  PAIRE_SKIP_GLOBAL_LINK=1 bash
 ```
 
 ## Usage
