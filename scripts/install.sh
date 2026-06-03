@@ -2,6 +2,8 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+printf 'Installing paire...\n' >&2
+
 REPO="${PAIRE_REPO:-paire-dev/paire}"
 VERSION="${PAIRE_VERSION:-latest}"
 INSTALL_DIR="${PAIRE_INSTALL_DIR:-$HOME/.local/bin}"
@@ -182,4 +184,5 @@ fi
 
 printf 'Installed paire to %s\n' "$INSTALL_DIR/paire"
 link_global_command "$INSTALL_DIR/paire"
+printf 'paire %s\n' "$("$INSTALL_DIR/paire" --version)"
 printf 'Run: paire --help\n'
