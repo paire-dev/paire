@@ -17,6 +17,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { SiGithub } from "@icons-pack/react-simple-icons";
 import { formatDistanceToNow } from "date-fns";
 import {
   AlertTriangle,
@@ -145,14 +146,13 @@ const queryClient = new QueryClient({
   },
 });
 
-const pageClassName = "mx-auto w-full px-3 pt-5 sm:px-5 sm:pt-6";
+const pageClassName = "mx-auto w-full px-3 sm:px-5";
 const desktopPageClassName = cn(
   pageClassName,
   "flex h-dvh max-h-dvh flex-col overflow-hidden",
 );
 const proseClassName =
   "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
-const humanStatusOptions: Array<HumanStatus> = ["unreviewed", "accepted"];
 const REVIEW_TOKEN_STORAGE_KEY = "paire-review-token";
 const LOADING_STATE_DELAY_MS = 250;
 const reviewToken = resolveReviewToken();
@@ -313,8 +313,6 @@ function useDelayedValue(value: boolean, delayMs: number) {
 
 function ReviewScreen() {
   const isDesktopLayout = useMediaQuery("(min-width: 768px)");
-  const [agentStatusFilter, setAgentStatusFilter] =
-    React.useState<FilterValue>("all");
   const [humanStatusFilter, setHumanStatusFilter] =
     React.useState<FilterValue>("all");
   const [codePanelOpen, setCodePanelOpen] = React.useState(false);
@@ -405,28 +403,7 @@ function ReviewScreen() {
     );
   }
 
-  const agentStatusOptions = getAgentStatusOptions(data.threads);
-  const filteredThreads = filterThreads(
-    data.threads,
-    agentStatusFilter,
-    humanStatusFilter,
-  );
-  const totalClaimCount = countClaims(data.threads);
-  const filteredClaimCount = countClaims(filteredThreads);
-  const filtersAreDefault =
-    agentStatusFilter === "all" && humanStatusFilter === "all";
-  const filterBar = (
-    <FilterBar
-      agentStatus={agentStatusFilter}
-      humanStatus={humanStatusFilter}
-      agentStatusOptions={agentStatusOptions}
-      totalClaimCount={totalClaimCount}
-      filteredClaimCount={filteredClaimCount}
-      sticky={!filtersAreDefault}
-      onAgentStatusChange={setAgentStatusFilter}
-      onHumanStatusChange={setHumanStatusFilter}
-    />
-  );
+  const filteredThreads = filterThreads(data.threads, humanStatusFilter);
   const reviewContent = (
     <ReviewClaims
       allThreads={data.threads}
@@ -436,10 +413,7 @@ function ReviewScreen() {
     />
   );
   const reviewPanel = (
-    <ReviewScrollPanel
-      filterBar={filterBar}
-      sidebarCollapsible={!codePanelOpen}
-    >
+    <ReviewScrollPanel sidebarCollapsible={!codePanelOpen}>
       {!data.git.clean ? <DirtyWorktreeAlert /> : null}
       {reviewContent}
     </ReviewScrollPanel>
@@ -449,22 +423,21 @@ function ReviewScreen() {
     <main className={isDesktopLayout ? desktopPageClassName : pageClassName}>
       <header
         className={cn(
-          "mb-5 flex shrink-0 flex-col gap-4 sm:flex-row sm:items-end sm:justify-between",
+          "mb-5 grid shrink-0 gap-4 p-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center",
           isDesktopLayout && "mb-4",
         )}
       >
-        <div>
-          <p className="mb-1 text-xs font-bold uppercase text-muted-foreground">
-            Paire Review
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <h1 className="text-2xl font-semibold leading-tight tracking-normal">
-              {data.session.goal ?? data.session.projectKey}
-            </h1>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <ProjectIdentity projectKey={data.session.projectKey} />
             <Badge variant="outline">{data.git.branch}</Badge>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
+        <HumanFilterNav
+          value={humanStatusFilter}
+          onChange={setHumanStatusFilter}
+        />
+        <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
           <Badge variant="outline">{data.burden}</Badge>
           <ModeToggle />
         </div>
@@ -514,12 +487,132 @@ function ReviewScreen() {
   );
 }
 
+function ProjectIdentity({ projectKey }: { projectKey: string }) {
+  const project = parseProjectKey(projectKey);
+
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <ProjectAvatar project={project} />
+      <span className="min-w-0 truncate text-base font-semibold leading-tight">
+        {project.repo}
+      </span>
+      {project.hash ? (
+        <span className="shrink-0 font-mono text-[11px] leading-none text-muted-foreground">
+          {project.hash}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function parseProjectKey(projectKey: string) {
+  const parts = projectKey.split("/").filter(Boolean);
+  if (parts[0] === "github" && parts.length >= 4) {
+    return {
+      provider: "github",
+      owner: parts[1] ?? "",
+      repo: parts[2] ?? projectKey,
+      hash: parts[3] ?? "",
+    };
+  }
+  if (parts[0] === "local" && parts.length >= 3) {
+    return {
+      provider: "local",
+      owner: "",
+      repo: parts[1] ?? projectKey,
+      hash: parts[2] ?? "",
+    };
+  }
+  return { provider: "unknown", owner: "", repo: projectKey, hash: "" };
+}
+
+type ProjectKeyInfo = ReturnType<typeof parseProjectKey>;
+
+function ProjectAvatar({ project }: { project: ProjectKeyInfo }) {
+  const [failed, setFailed] = React.useState(false);
+
+  if (project.provider !== "github") return null;
+
+  if (!project.owner || failed) {
+    return <SiGithub className="size-5 shrink-0 text-foreground" aria-hidden />;
+  }
+
+  return (
+    <img
+      className="size-6 shrink-0 rounded-md border border-border bg-background"
+      src={`https://github.com/${encodeURIComponent(project.owner)}.png?size=64`}
+      alt={`${project.owner} avatar`}
+      loading="lazy"
+      decoding="async"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+function HumanFilterNav({
+  value,
+  onChange,
+}: {
+  value: FilterValue;
+  onChange: (value: FilterValue) => void;
+}) {
+  return (
+    <div className="flex justify-start sm:justify-center">
+      <div
+        className="inline-flex overflow-hidden rounded-md border bg-background"
+        role="group"
+        aria-label="Human status"
+      >
+        <HumanFilterButton
+          active={value === "all"}
+          onClick={() => onChange("all")}
+        >
+          All
+        </HumanFilterButton>
+        <HumanFilterButton
+          active={value === "unreviewed"}
+          onClick={() => onChange("unreviewed")}
+        >
+          Unreviewed
+        </HumanFilterButton>
+        <HumanFilterButton
+          active={value === "accepted"}
+          onClick={() => onChange("accepted")}
+        >
+          Accepted
+        </HumanFilterButton>
+      </div>
+    </div>
+  );
+}
+
+function HumanFilterButton({
+  active,
+  children,
+  onClick,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant={active ? "default" : "ghost"}
+      className="h-7 rounded-none border-0 px-2.5 text-xs shadow-none"
+      aria-pressed={active}
+      onClick={onClick}
+    >
+      {children}
+    </Button>
+  );
+}
+
 function ReviewScrollPanel({
-  filterBar,
   children,
   sidebarCollapsible,
 }: {
-  filterBar: React.ReactNode;
   children: React.ReactNode;
   sidebarCollapsible: boolean;
 }) {
@@ -532,7 +625,6 @@ function ReviewScrollPanel({
             sidebarCollapsible ? "mx-auto" : "mx-auto",
           )}
         >
-          {filterBar}
           {children}
         </div>
       </div>
@@ -893,148 +985,19 @@ function ThemeButton({
   );
 }
 
-function getAgentStatusOptions(threads: Thread[]) {
-  const statuses = new Set<string>();
-  for (const thread of threads) {
-    for (const claim of thread.claims) {
-      statuses.add(claim.agentStatus);
-    }
-  }
-  return [...statuses].sort((a, b) =>
-    statusLabel(a).localeCompare(statusLabel(b)),
-  );
-}
-
-function filterThreads(
-  threads: Thread[],
-  agentStatus: FilterValue,
-  humanStatus: FilterValue,
-) {
+function filterThreads(threads: Thread[], humanStatus: FilterValue) {
   return threads
     .map((thread) => ({
       ...thread,
       claims: thread.claims.filter((claim) => {
-        const agentMatches =
-          agentStatus === "all" || claim.agentStatus === agentStatus;
-        const humanMatches =
-          humanStatus === "all" || claim.humanStatus === humanStatus;
-        return agentMatches && humanMatches;
+        return humanStatus === "all" || claim.humanStatus === humanStatus;
       }),
     }))
     .filter((thread) => thread.claims.length > 0);
 }
 
-function countClaims(threads: Thread[]) {
-  return threads.reduce((total, thread) => total + thread.claims.length, 0);
-}
-
 function statusLabel(status: string) {
   return status.replaceAll("_", " ");
-}
-
-function FilterBar({
-  agentStatus,
-  humanStatus,
-  agentStatusOptions,
-  totalClaimCount,
-  filteredClaimCount,
-  sticky,
-  onAgentStatusChange,
-  onHumanStatusChange,
-}: {
-  agentStatus: FilterValue;
-  humanStatus: FilterValue;
-  agentStatusOptions: string[];
-  totalClaimCount: number;
-  filteredClaimCount: number;
-  sticky: boolean;
-  onAgentStatusChange: (status: FilterValue) => void;
-  onHumanStatusChange: (status: FilterValue) => void;
-}) {
-  return (
-    <div
-      className={cn(
-        "mb-4 flex flex-wrap items-center gap-x-4 gap-y-2",
-        sticky &&
-          "sticky top-0 z-10 border-b border-border/70 bg-muted/95 pb-3 pt-1 backdrop-blur-sm supports-backdrop-filter:bg-muted/80",
-      )}
-    >
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
-        <FilterGroup
-          label="Claim"
-          value={agentStatus}
-          options={agentStatusOptions}
-          onChange={onAgentStatusChange}
-        />
-        <FilterGroup
-          label="Human"
-          value={humanStatus}
-          options={humanStatusOptions}
-          onChange={onHumanStatusChange}
-        />
-      </div>
-      <p className="ml-auto shrink-0 text-xs text-muted-foreground">
-        {filteredClaimCount}/{totalClaimCount} claims
-      </p>
-    </div>
-  );
-}
-
-function FilterGroup({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: FilterValue;
-  options: string[];
-  onChange: (value: FilterValue) => void;
-}) {
-  return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-      <p className="mr-0.5 text-xs font-medium text-muted-foreground">
-        {label}
-      </p>
-      <div className="flex flex-wrap gap-1.5" role="group" aria-label={label}>
-        <FilterButton active={value === "all"} onClick={() => onChange("all")}>
-          All
-        </FilterButton>
-        {options.map((option) => (
-          <FilterButton
-            key={option}
-            active={value === option}
-            onClick={() => onChange(option)}
-          >
-            {statusLabel(option)}
-          </FilterButton>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function FilterButton({
-  active,
-  children,
-  onClick,
-}: {
-  active: boolean;
-  children: React.ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <Button
-      type="button"
-      size="sm"
-      variant={active ? "default" : "outline"}
-      className="h-6 rounded-md px-2 text-xs"
-      aria-pressed={active}
-      onClick={onClick}
-    >
-      {children}
-    </Button>
-  );
 }
 
 function ThreadGroup({
