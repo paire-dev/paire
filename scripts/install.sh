@@ -53,6 +53,46 @@ download() {
   curl --fail --location --silent --show-error "$url" --output "$output"
 }
 
+shell_quote() {
+  printf '%q' "$1"
+}
+
+offer_manual_global_link() {
+  local target="$1"
+  local link_dir="$2"
+  local link="$link_dir/paire"
+  local answer=""
+
+  printf 'Installed paire, but %s is not writable.\n' "$link_dir" >&2
+  printf 'To make paire visible to coding agents and GUI apps, run:\n' >&2
+  printf '  sudo mkdir -p %s && sudo ln -sfn %s %s\n' \
+    "$(shell_quote "$link_dir")" \
+    "$(shell_quote "$target")" \
+    "$(shell_quote "$link")" >&2
+
+  if ! { true </dev/tty >/dev/tty; } 2>/dev/null; then
+    return
+  fi
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    return
+  fi
+
+  printf '\nWant me to run the sudo command? Y/n ' >/dev/tty
+  read -r answer </dev/tty || answer="n"
+  case "$answer" in
+    "" | [Yy] | [Yy][Ee][Ss])
+      if sudo mkdir -p "$link_dir" && sudo ln -sfn "$target" "$link"; then
+        printf 'Linked paire to %s\n' "$link"
+      else
+        printf 'Installed paire, but could not link %s.\n' "$link" >&2
+      fi
+      ;;
+    *)
+      ;;
+  esac
+}
+
 link_global_command() {
   local target="$1"
   local link_dir="$GLOBAL_LINK_DIR"
@@ -70,6 +110,11 @@ link_global_command() {
     return
   fi
 
+  if [[ -L "$link" && "$(readlink "$link")" == "$target" ]]; then
+    printf 'Global command already linked at %s\n' "$link"
+    return
+  fi
+
   if [[ -e "$link" && ! -L "$link" ]]; then
     printf 'Global command already exists at %s; leaving it unchanged.\n' "$link"
     return
@@ -77,16 +122,14 @@ link_global_command() {
 
   if [[ ! -d "$link_dir" ]]; then
     if ! mkdir -p "$link_dir" 2>/dev/null; then
-      if command -v sudo >/dev/null 2>&1; then
-        sudo mkdir -p "$link_dir" || {
-          printf 'Installed paire, but could not create %s.\n' "$link" >&2
-          return
-        }
-      else
-        printf 'Installed paire, but could not create %s because sudo is unavailable.\n' "$link" >&2
-        return
-      fi
+      offer_manual_global_link "$target" "$link_dir"
+      return
     fi
+  fi
+
+  if [[ ! -w "$link_dir" ]]; then
+    offer_manual_global_link "$target" "$link_dir"
+    return
   fi
 
   if [[ -w "$link_dir" ]]; then
@@ -94,14 +137,6 @@ link_global_command() {
       printf 'Installed paire, but could not link %s.\n' "$link" >&2
       return
     }
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo ln -sfn "$target" "$link" || {
-      printf 'Installed paire, but could not link %s.\n' "$link" >&2
-      return
-    }
-  else
-    printf 'Installed paire, but could not link %s because sudo is unavailable.\n' "$link" >&2
-    return
   fi
 
   printf 'Linked paire to %s\n' "$link"

@@ -20,8 +20,10 @@ bash /tmp/paire-install.sh
 ```
 
 Installs to `~/.local/bin/paire` by default and links `paire` into
-`/usr/local/bin` when possible. The link makes the command visible to coding
-agents and GUI apps that do not load your shell startup files.
+`/usr/local/bin` when that directory is writable. If `/usr/local/bin` is not
+writable, the installer prints the optional `sudo` command and, when running in
+an interactive terminal, asks before running it. The link makes the command
+visible to coding agents and GUI apps that do not load your shell startup files.
 
 Pin a version or change the target:
 
