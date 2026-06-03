@@ -275,6 +275,38 @@ async function fetchReviewDiff() {
   return payload.diff ?? "";
 }
 
+async function postClaimHumanStatus(claimId: string, humanStatus: HumanStatus) {
+  const response = await fetch(
+    `/api/claims/${encodeURIComponent(claimId)}/human-status`,
+    {
+      method: "POST",
+      headers: reviewApiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ humanStatus }),
+    },
+  );
+  if (!response.ok) throw new Error("Failed to update claim status.");
+  return humanStatus;
+}
+
+function getActiveClaimId(target: EventTarget | null) {
+  const fromTarget =
+    target instanceof Element
+      ? target.closest<HTMLElement>("[data-claim-id]")?.dataset.claimId
+      : undefined;
+  const fromFocus = document.activeElement?.closest<HTMLElement>(
+    "[data-claim-id]",
+  )?.dataset.claimId;
+  return fromTarget ?? fromFocus;
+}
+
+function isTypingTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      target.matches("input, textarea, select"))
+  );
+}
+
 function App() {
   return (
     <ThemeProvider>
@@ -399,6 +431,24 @@ function ReviewScreen() {
     },
     [filteredThreads],
   );
+
+  React.useEffect(() => {
+    const onWindowKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key.toLowerCase() !== "b" ||
+        !event.metaKey ||
+        event.altKey ||
+        event.ctrlKey
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setCodePanelOpen((open) => !open);
+    };
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, []);
 
   const scrollToEvidence = React.useCallback(
     (evidence: Evidence) => {
@@ -731,6 +781,7 @@ function ReviewClaims({
   onClaimOpenChange: (claimId: string, open: boolean) => void;
   onThreadOpenChange: (threadId: string, open: boolean) => void;
 }) {
+  const queryClient = useQueryClient();
   const claimButtonRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const filteredClaims = React.useMemo(
     () =>
@@ -773,6 +824,79 @@ function ReviewClaims({
     [filteredClaims, onClaimOpenChange, onThreadOpenChange],
   );
 
+  const focusNextUnapprovedAfter = React.useCallback(
+    (approvedClaimId: string) => {
+      const currentIndex = filteredClaims.findIndex(
+        ({ claim }) => claim.id === approvedClaimId,
+      );
+      if (currentIndex < 0) return;
+
+      const isNextCandidate = (index: number) => {
+        const entry = filteredClaims[index];
+        if (!entry || entry.claim.id === approvedClaimId) return false;
+        return entry.claim.humanStatus !== "accepted";
+      };
+
+      for (let index = currentIndex + 1; index < filteredClaims.length; index++) {
+        if (isNextCandidate(index)) {
+          focusClaimAt(index);
+          return;
+        }
+      }
+      for (let index = 0; index < currentIndex; index++) {
+        if (isNextCandidate(index)) {
+          focusClaimAt(index);
+          return;
+        }
+      }
+    },
+    [filteredClaims, focusClaimAt],
+  );
+
+  const toggleApprovalMutation = useMutation({
+    mutationFn: ({
+      claimId,
+      humanStatus,
+    }: {
+      claimId: string;
+      humanStatus: HumanStatus;
+    }) => postClaimHumanStatus(claimId, humanStatus),
+    onSuccess: (humanStatus, { claimId }) => {
+      if (humanStatus === "accepted") {
+        onClaimOpenChange(claimId, false);
+        focusNextUnapprovedAfter(claimId);
+      }
+      return queryClient.invalidateQueries({ queryKey: ["review"] });
+    },
+  });
+
+  const toggleFocusedClaimApproval = React.useCallback(
+    (
+      event: Pick<KeyboardEvent, "key" | "target"> & {
+        preventDefault: () => void;
+      },
+    ) => {
+      if (event.key.toLowerCase() !== "a") return;
+      if (isTypingTarget(event.target)) return;
+
+      const activeClaimId = getActiveClaimId(event.target);
+      if (!activeClaimId) return;
+
+      const target = filteredClaims.find(
+        ({ claim }) => claim.id === activeClaimId,
+      );
+      if (!target) return;
+
+      event.preventDefault();
+      toggleApprovalMutation.mutate({
+        claimId: activeClaimId,
+        humanStatus:
+          target.claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
+      });
+    },
+    [filteredClaims, toggleApprovalMutation],
+  );
+
   const navigateWithShortcut = React.useCallback(
     (
       event: Pick<KeyboardEvent, "key" | "target"> & {
@@ -783,22 +907,10 @@ function ReviewClaims({
         return;
       }
       if (filteredClaims.length === 0) return;
-
-      if (
-        event.target instanceof HTMLElement &&
-        (event.target.isContentEditable ||
-          event.target.matches("input, textarea, select"))
-      ) {
-        return;
-      }
+      if (isTypingTarget(event.target)) return;
 
       event.preventDefault();
-      const activeClaimId = (
-        event.target instanceof Element
-          ? event.target.closest<HTMLElement>("[data-claim-id]")?.dataset
-              .claimId
-          : undefined
-      );
+      const activeClaimId = getActiveClaimId(event.target);
       const activeIndex = filteredClaims.findIndex(
         ({ claim }) => claim.id === activeClaimId,
       );
@@ -809,10 +921,7 @@ function ReviewClaims({
               filteredClaims.length - 1,
               (activeIndex >= 0 ? activeIndex : fallbackIndex) + 1,
             )
-          : Math.max(
-              0,
-              (activeIndex >= 0 ? activeIndex : fallbackIndex) - 1,
-            );
+          : Math.max(0, (activeIndex >= 0 ? activeIndex : fallbackIndex) - 1);
 
       focusClaimAt(nextIndex);
     },
@@ -825,11 +934,12 @@ function ReviewClaims({
         return;
       }
       navigateWithShortcut(event);
+      toggleFocusedClaimApproval(event);
     };
 
     window.addEventListener("keydown", onWindowKeyDown);
     return () => window.removeEventListener("keydown", onWindowKeyDown);
-  }, [navigateWithShortcut]);
+  }, [navigateWithShortcut, toggleFocusedClaimApproval]);
 
   return (
     <section className="grid gap-3.5">
@@ -846,6 +956,7 @@ function ReviewClaims({
             openClaims={openClaims}
             isEvidenceSelected={isEvidenceSelected}
             onEvidenceSelect={onEvidenceSelect}
+            onClaimApproved={focusNextUnapprovedAfter}
             onClaimOpenChange={onClaimOpenChange}
             onClaimTriggerRef={setClaimButtonRef}
             onThreadOpenChange={onThreadOpenChange}
@@ -1082,7 +1193,7 @@ function CopyAgentPromptButton({ text }: { text: string }) {
     >
       {copied ? (
         <>
-          <Check className="size-3.5" aria-hidden />
+          <SquareCheckBig className="size-3.5" aria-hidden />
           <span className="text-xs">Copied</span>
         </>
       ) : (
@@ -1199,6 +1310,7 @@ function ThreadGroup({
   openClaims,
   isEvidenceSelected,
   onEvidenceSelect,
+  onClaimApproved,
   onClaimOpenChange,
   onClaimTriggerRef,
   onThreadOpenChange,
@@ -1208,6 +1320,7 @@ function ThreadGroup({
   openClaims: Record<string, boolean>;
   isEvidenceSelected: (evidence: Evidence) => boolean;
   onEvidenceSelect: (evidence: Evidence) => void;
+  onClaimApproved: (claimId: string) => void;
   onClaimOpenChange: (claimId: string, open: boolean) => void;
   onClaimTriggerRef: (
     claimId: string,
@@ -1222,59 +1335,60 @@ function ThreadGroup({
       className="flex flex-col gap-1"
     >
       <section className="contents">
-      <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-muted/95 backdrop-blur-sm supports-backdrop-filter:bg-muted/80">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <h2 className="min-w-0 text-3xl font-light leading-snug">
-              <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted">
-                <ChevronRight
-                  className={cn(
-                    "size-7 shrink-0 text-muted-foreground transition-transform",
-                    open && "rotate-90",
-                  )}
-                  aria-hidden
-                />
-                <span className="min-w-0">
-                  <AiText source={thread.title || "Behavior"} inline />
-                </span>
-              </CollapsibleTrigger>
-            </h2>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="secondary">
-                {thread.claims.length}{" "}
-                {thread.claims.length === 1 ? "claim" : "claims"}
-              </Badge>
+        <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-linear-to-b from-muted to-transparent backdrop-blur-xs supports-backdrop-filter:bg-muted/80">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <h2 className="min-w-0 text-3xl font-light leading-snug">
+                <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted">
+                  <ChevronRight
+                    className={cn(
+                      "size-7 shrink-0 text-muted-foreground transition-transform",
+                      open && "rotate-90",
+                    )}
+                    aria-hidden
+                  />
+                  <span className="min-w-0">
+                    <AiText source={thread.title || "Behavior"} inline />
+                  </span>
+                </CollapsibleTrigger>
+              </h2>
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="secondary">
+                  {thread.claims.length}{" "}
+                  {thread.claims.length === 1 ? "claim" : "claims"}
+                </Badge>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-      <CollapsibleContent className="flex flex-col gap-1">
-        {thread.summary ? (
-          <div className="text-lg leading-relaxed text-muted-foreground pb-2 max-w-prose">
-            <AiText source={thread.summary} />
-          </div>
-        ) : null}
-        <div className="grid gap-3">
-          {thread.claims.map((claim) => (
-            <ClaimCard
-              key={claim.id}
-              claim={claim}
-              open={openClaims[claim.id] === true}
-              isEvidenceSelected={isEvidenceSelected}
-              onEvidenceSelect={onEvidenceSelect}
-              onOpenChange={(nextOpen) =>
-                onClaimOpenChange(claim.id, nextOpen)
-              }
-              onStatusChange={(humanStatus) => {
-                if (humanStatus === "accepted") {
-                  onClaimOpenChange(claim.id, false);
+        <CollapsibleContent className="flex flex-col gap-1 sm:pl-8">
+          {thread.summary ? (
+            <div className="text-lg leading-relaxed text-muted-foreground pb-2 max-w-prose">
+              <AiText source={thread.summary} />
+            </div>
+          ) : null}
+          <div className="grid gap-3">
+            {thread.claims.map((claim) => (
+              <ClaimCard
+                key={claim.id}
+                claim={claim}
+                open={openClaims[claim.id] === true}
+                isEvidenceSelected={isEvidenceSelected}
+                onEvidenceSelect={onEvidenceSelect}
+                onOpenChange={(nextOpen) =>
+                  onClaimOpenChange(claim.id, nextOpen)
                 }
-              }}
-              onTriggerRef={(button) => onClaimTriggerRef(claim.id, button)}
-            />
-          ))}
-        </div>
-      </CollapsibleContent>
+                onStatusChange={(humanStatus) => {
+                  if (humanStatus === "accepted") {
+                    onClaimOpenChange(claim.id, false);
+                    onClaimApproved(claim.id);
+                  }
+                }}
+                onTriggerRef={(button) => onClaimTriggerRef(claim.id, button)}
+              />
+            ))}
+          </div>
+        </CollapsibleContent>
       </section>
     </Collapsible>
   );
@@ -1346,13 +1460,13 @@ function ClaimCard({
     >
       <Card
         className={cn(
-          "gap-0 py-0 transition-[background-color,box-shadow] focus-within:outline-3 focus-within:-outline-offset-1 focus-within:outline-ring/60",
-          claim.humanStatus === "accepted"
-            ? "ring-3 ring-inset ring-primary/35"
-            : "",
+          "gap-0 py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
+          // claim.humanStatus === "accepted"
+          //   ? "ring-2 ring-inset ring-primary/35"
+          //   : "",
         )}
       >
-        <CardHeader className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-6">
+        <CardHeader className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start sm:justify-between px-4 sm:px-6">
           <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug">
             <CollapsibleTrigger
               ref={onTriggerRef}
@@ -1375,7 +1489,7 @@ function ClaimCard({
               </span>
             </CollapsibleTrigger>
           </CardTitle>
-          <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto">
+          <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto shrink">
             {claim.updatedAt ? (
               <ClaimTimeAgo updatedAt={claim.updatedAt} />
             ) : null}
@@ -1558,7 +1672,11 @@ function EvidenceBlock({
           />
         }
       >
-        <AiText className="w-full flex justify-start" source={evidence.change} inline />
+        <AiText
+          className="w-full flex justify-start"
+          source={evidence.change}
+          inline
+        />
         <ChevronRight className="size-4 ml-auto text-muted-foreground" />
       </TooltipTrigger>
       <TooltipContent side="top" align="end">
@@ -1661,9 +1779,7 @@ function DiffViewControls({
                   onOverflowChange(pressed ? "wrap" : "scroll")
                 }
                 aria-label={
-                  overflow === "wrap"
-                    ? "Disable line wrap"
-                    : "Enable line wrap"
+                  overflow === "wrap" ? "Disable line wrap" : "Enable line wrap"
                 }
               >
                 <WrapText data-icon="inline-start" />
@@ -1682,9 +1798,7 @@ function DiffViewControls({
                 pressed={lineNumbersEnabled}
                 onPressedChange={onLineNumbersEnabledChange}
                 aria-label={
-                  lineNumbersEnabled
-                    ? "Hide line numbers"
-                    : "Show line numbers"
+                  lineNumbersEnabled ? "Hide line numbers" : "Show line numbers"
                 }
               >
                 <ListOrdered data-icon="inline-start" />
@@ -1793,7 +1907,8 @@ function ReviewCodePanel({
   const [lineNumbersEnabled, setLineNumbersEnabled] = React.useState(true);
   const [backgroundEnabled, setBackgroundEnabled] = React.useState(true);
   const [diffStyle, setDiffStyle] = React.useState<DiffLayoutStyle>("unified");
-  const [lineDiffType, setLineDiffType] = React.useState<LineDiffType>("word-alt");
+  const [lineDiffType, setLineDiffType] =
+    React.useState<LineDiffType>("word-alt");
   const { resolvedTheme } = useTheme();
   const diffTheme = resolvedTheme === "dark" ? "pierre-dark" : "pierre-light";
 
@@ -1869,7 +1984,9 @@ function ReviewCodePanel({
             size="icon"
             variant="ghost"
             className="size-8"
-            aria-label={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
+            aria-label={
+              fileTreeOpen ? "Collapse file tree" : "Expand file tree"
+            }
             title={fileTreeOpen ? "Collapse file tree" : "Expand file tree"}
             onClick={() => setFileTreeOpen((value) => !value)}
           >
@@ -2043,18 +2160,8 @@ function ClaimActions({
 }) {
   const queryClient = useQueryClient();
   const statusMutation = useMutation({
-    mutationFn: async (humanStatus: HumanStatus) => {
-      const response = await fetch(
-        `/api/claims/${encodeURIComponent(claim.id)}/human-status`,
-        {
-          method: "POST",
-          headers: reviewApiHeaders({ "Content-Type": "application/json" }),
-          body: JSON.stringify({ humanStatus }),
-        },
-      );
-      if (!response.ok) throw new Error("Failed to update claim status.");
-      return humanStatus;
-    },
+    mutationFn: (humanStatus: HumanStatus) =>
+      postClaimHumanStatus(claim.id, humanStatus),
     onSuccess: (humanStatus) => {
       onStatusChange?.(humanStatus);
       return queryClient.invalidateQueries({ queryKey: ["review"] });
@@ -2066,6 +2173,7 @@ function ClaimActions({
       <Button
         type="button"
         variant={claim.humanStatus === "accepted" ? "default" : "outline"}
+        // className="min-w-20 flex-1 rounded-none sm:flex-none"
         onClick={() =>
           statusMutation.mutate(
             claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
