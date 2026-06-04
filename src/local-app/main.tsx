@@ -1337,9 +1337,9 @@ function ThreadGroup({
       <section className="contents">
         <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-linear-to-b from-muted to-transparent backdrop-blur-xs supports-backdrop-filter:bg-muted/80">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <h2 className="min-w-0 text-3xl font-light leading-snug">
-                <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted">
+            <div className="flex items-start justify-between gap-3">
+              <h2 className="min-w-0 text-3xl font-light leading-snug w-full">
+                <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted w-full">
                   <ChevronRight
                     className={cn(
                       "size-7 shrink-0 text-muted-foreground transition-transform",
@@ -1461,16 +1461,17 @@ function ClaimCard({
       <Card
         className={cn(
           "gap-0 py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
-          // claim.humanStatus === "accepted"
-          //   ? "ring-2 ring-inset ring-primary/35"
-          //   : "",
+          claim.humanStatus === "accepted"
+            // ? "ring-2 ring-inset ring-primary/35"
+            ? "bg-background/50"
+            : "",
         )}
       >
         <CardHeader className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start sm:justify-between px-4 sm:px-6">
-          <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug">
+          <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug w-full">
             <CollapsibleTrigger
               ref={onTriggerRef}
-              className="group -ml-3 flex min-w-0 items-center gap-1 rounded-md px-1 text-left"
+              className="group -ml-3 flex min-w-0 items-center gap-1 rounded-md px-1 text-left w-full"
               onKeyDown={(event) => {
                 if (event.key !== "Enter" && event.key !== " ") return;
                 event.preventDefault();
@@ -1484,7 +1485,7 @@ function ClaimCard({
                 )}
                 aria-hidden
               />
-              <span className="min-w-0">
+              <span className={cn("min-w-0", claim.humanStatus === "accepted" ? 'text-muted-foreground' : '')}>
                 <AiText source={claim.title} />
               </span>
             </CollapsibleTrigger>
