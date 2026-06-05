@@ -1,4 +1,5 @@
 import { parsePatchFiles, resolveTheme } from "@pierre/diffs";
+import { Dialog } from "@base-ui/react/dialog";
 import {
   CodeView,
   type CodeViewHandle,
@@ -28,7 +29,6 @@ import {
   ChevronRight,
   Columns2,
   FileCode,
-  Files,
   FolderTree,
   Highlighter,
   ListChevronsDownUp,
@@ -46,6 +46,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { createRoot } from "react-dom/client";
+import type { PanelImperativeHandle } from "react-resizable-panels";
 import { Streamdown } from "streamdown";
 
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
@@ -79,6 +80,11 @@ import {
   useTheme,
   type Theme,
 } from "./components/theme-provider";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "./components/ui/resizable";
 import { cn } from "./lib/utils";
 import "./styles.css";
 
@@ -293,17 +299,16 @@ function getActiveClaimId(target: EventTarget | null) {
     target instanceof Element
       ? target.closest<HTMLElement>("[data-claim-id]")?.dataset.claimId
       : undefined;
-  const fromFocus = document.activeElement?.closest<HTMLElement>(
-    "[data-claim-id]",
-  )?.dataset.claimId;
+  const fromFocus =
+    document.activeElement?.closest<HTMLElement>("[data-claim-id]")?.dataset
+      .claimId;
   return fromTarget ?? fromFocus;
 }
 
 function isTypingTarget(target: EventTarget | null) {
   return (
     target instanceof HTMLElement &&
-    (target.isContentEditable ||
-      target.matches("input, textarea, select"))
+    (target.isContentEditable || target.matches("input, textarea, select"))
   );
 }
 
@@ -352,7 +357,7 @@ function useDelayedValue(value: boolean, delayMs: number) {
 }
 
 function ReviewScreen() {
-  const isDesktopLayout = useMediaQuery("(min-width: 768px)");
+  const isDesktopLayout = useMediaQuery("(min-width: 1024px)");
   const [humanStatusFilter, setHumanStatusFilter] =
     React.useState<FilterValue>("all");
   const [openThreads, setOpenThreads] = React.useState<Record<string, boolean>>(
@@ -514,7 +519,7 @@ function ReviewScreen() {
     />
   );
   const reviewPanel = (
-    <ReviewScrollPanel sidebarCollapsible={!codePanelOpen}>
+    <ReviewScrollPanel contained={isDesktopLayout}>
       {!data.git.clean ? <DirtyWorktreeAlert /> : null}
       {reviewContent}
     </ReviewScrollPanel>
@@ -542,21 +547,19 @@ function ReviewScreen() {
         />
         <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
           <Badge variant="outline">{data.burden}</Badge>
+          {!isDesktopLayout ? (
+            <MobileCodePanelButton
+              open={codePanelOpen}
+              onOpenChange={setCodePanelOpen}
+            />
+          ) : null}
           <ModeToggle />
         </div>
       </header>
 
       {isDesktopLayout ? (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div
-            className={cn(
-              "grid min-h-0 flex-1 gap-4",
-              codePanelOpen
-                ? "grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
-                : "grid-cols-[minmax(0,1fr)_auto]",
-            )}
-          >
-            {reviewPanel}
+        <ResizableReviewLayout
+          codePanel={
             <ReviewCodePanel
               codeViewRef={codeViewRef}
               className="h-full min-h-0"
@@ -568,14 +571,16 @@ function ReviewScreen() {
               onOpenChange={setCodePanelOpen}
               onSelectedEvidenceChange={setSelectedEvidence}
             />
-          </div>
-        </div>
+          }
+          codePanelOpen={codePanelOpen}
+          reviewPanel={reviewPanel}
+          onCodePanelOpenChange={setCodePanelOpen}
+        />
       ) : (
-        <div className="flex flex-col gap-4">
+        <>
           {reviewPanel}
-          <ReviewCodePanel
+          <ReviewCodeSheet
             codeViewRef={codeViewRef}
-            className="h-[70vh]"
             diffError={isDiffError}
             gitStatus={gitStatusEntries}
             items={codeItems}
@@ -584,9 +589,145 @@ function ReviewScreen() {
             onOpenChange={setCodePanelOpen}
             onSelectedEvidenceChange={setSelectedEvidence}
           />
-        </div>
+        </>
       )}
     </main>
+  );
+}
+
+function ResizableReviewLayout({
+  codePanel,
+  codePanelOpen,
+  reviewPanel,
+  onCodePanelOpenChange,
+}: {
+  codePanel: React.ReactNode;
+  codePanelOpen: boolean;
+  reviewPanel: React.ReactNode;
+  onCodePanelOpenChange: (open: boolean) => void;
+}) {
+  const codePanelRef = React.useRef<PanelImperativeHandle | null>(null);
+
+  React.useEffect(() => {
+    if (codePanelOpen) {
+      codePanelRef.current?.expand();
+    } else {
+      codePanelRef.current?.collapse();
+    }
+  }, [codePanelOpen]);
+
+  return (
+    <ResizablePanelGroup
+      className="min-h-0 flex-1 gap-3"
+      orientation="horizontal"
+      resizeTargetMinimumSize={{ coarse: 40, fine: 24 }}
+    >
+      <ResizablePanel
+        id="review-claims"
+        className="min-h-0 min-w-0"
+        defaultSize="58%"
+        minSize="360px"
+      >
+        {reviewPanel}
+      </ResizablePanel>
+      <ResizableHandle
+        withHandle={codePanelOpen}
+        className={cn(!codePanelOpen && "opacity-0")}
+      />
+      <ResizablePanel
+        id="review-code"
+        className="min-h-0 min-w-0"
+        collapsedSize="44px"
+        collapsible
+        defaultSize="42%"
+        minSize="360px"
+        panelRef={codePanelRef}
+        onResize={(size) => {
+          const nextOpen = size.inPixels > 80;
+          if (nextOpen !== codePanelOpen) onCodePanelOpenChange(nextOpen);
+        }}
+      >
+        {codePanel}
+      </ResizablePanel>
+    </ResizablePanelGroup>
+  );
+}
+
+function MobileCodePanelButton({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        delay={0}
+        render={
+          <Button
+            type="button"
+            size="icon"
+            variant={open ? "default" : "outline"}
+            className="size-7"
+            aria-label={open ? "Close code panel" : "Open code panel"}
+            aria-pressed={open}
+            title={open ? "Close code panel" : "Open code panel"}
+            onClick={() => onOpenChange(!open)}
+          >
+            <FileCode data-icon="inline-start" />
+          </Button>
+        }
+      />
+      <TooltipContent>
+        {open ? "Close code panel" : "Open code panel"}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+function ReviewCodeSheet({
+  codeViewRef,
+  diffError,
+  gitStatus,
+  items,
+  open,
+  selectedEvidence,
+  onOpenChange,
+  onSelectedEvidenceChange,
+}: {
+  codeViewRef: React.RefObject<CodeViewHandle<undefined> | null>;
+  diffError: boolean;
+  gitStatus: GitStatusEntry[];
+  items: CodeViewItem[];
+  open: boolean;
+  selectedEvidence: EvidenceSelection | null;
+  onOpenChange: (open: boolean) => void;
+  onSelectedEvidenceChange: (selection: EvidenceSelection | null) => void;
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => onOpenChange(nextOpen)}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-40 bg-background/70 backdrop-blur-xs" />
+        <Dialog.Popup
+          className="fixed inset-y-0 right-0 z-50 flex w-[min(100vw,48rem)] max-w-full flex-col border-l bg-background shadow-xl"
+          initialFocus={false}
+        >
+          <Dialog.Title className="sr-only">Code panel</Dialog.Title>
+          <ReviewCodePanel
+            codeViewRef={codeViewRef}
+            className="h-full min-h-0 rounded-none border-0"
+            diffError={diffError}
+            gitStatus={gitStatus}
+            items={items}
+            open={open}
+            selectedEvidence={selectedEvidence}
+            onOpenChange={onOpenChange}
+            onSelectedEvidenceChange={onSelectedEvidenceChange}
+          />
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -596,14 +737,17 @@ function ProjectIdentity({ projectKey }: { projectKey: string }) {
   return (
     <div className="flex min-w-0 items-center gap-2">
       <ProjectAvatar project={project} />
-      <span className="min-w-0 truncate text-base font-semibold leading-tight">
+      <span
+        className="min-w-0 truncate text-base font-semibold leading-tight"
+        title={project.hash}
+      >
         {project.repo}
       </span>
-      {project.hash ? (
+      {/* {project.hash ? (
         <span className="shrink-0 font-mono text-[11px] leading-none text-muted-foreground">
           {project.hash}
         </span>
-      ) : null}
+      ) : null} */}
     </div>
   );
 }
@@ -741,22 +885,23 @@ function HumanFilterButton({
 
 function ReviewScrollPanel({
   children,
-  sidebarCollapsible,
+  contained,
 }: {
   children: React.ReactNode;
-  sidebarCollapsible: boolean;
+  contained: boolean;
 }) {
+  const content = (
+    <div className="mx-auto w-full max-w-3xl">
+      {children}
+    </div>
+  );
+
+  if (!contained) return content;
+
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-8">
-        <div
-          className={cn(
-            "w-full max-w-3xl",
-            sidebarCollapsible ? "mx-auto" : "mx-auto",
-          )}
-        >
-          {children}
-        </div>
+        {content}
       </div>
     </div>
   );
@@ -837,7 +982,11 @@ function ReviewClaims({
         return entry.claim.humanStatus !== "accepted";
       };
 
-      for (let index = currentIndex + 1; index < filteredClaims.length; index++) {
+      for (
+        let index = currentIndex + 1;
+        index < filteredClaims.length;
+        index++
+      ) {
         if (isNextCandidate(index)) {
           focusClaimAt(index);
           return;
@@ -1363,7 +1512,7 @@ function ThreadGroup({
         </div>
         <CollapsibleContent className="flex flex-col gap-1 sm:pl-8">
           {thread.summary ? (
-            <div className="text-lg leading-relaxed text-muted-foreground pb-2 max-w-prose">
+            <div className="text-lg leading-relaxed pb-2 max-w-prose">
               <AiText source={thread.summary} />
             </div>
           ) : null}
@@ -1462,8 +1611,8 @@ function ClaimCard({
         className={cn(
           "gap-0 py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
           claim.humanStatus === "accepted"
-            // ? "ring-2 ring-inset ring-primary/35"
-            ? "bg-background/50"
+            ? // ? "ring-2 ring-inset ring-primary/35"
+              "bg-background/50 text-muted-foreground"
             : "",
         )}
       >
@@ -1485,7 +1634,7 @@ function ClaimCard({
                 )}
                 aria-hidden
               />
-              <span className={cn("min-w-0", claim.humanStatus === "accepted" ? 'text-muted-foreground' : '')}>
+              <span className={cn("min-w-0")}>
                 <AiText source={claim.title} />
               </span>
             </CollapsibleTrigger>
@@ -1700,19 +1849,21 @@ function InfoPanel({
 }) {
   const labelClass = deltaPanelLabelClasses[color];
   return (
-    <div className="rounded-lg border border-border p-4">
-      <div className="text-sm leading-relaxed text-muted-foreground">
+    <div className="size-full">
+      <div className="text-sm leading-relaxed">
         <span
           aria-hidden="true"
-          className="mr-2 inline-flex items-center justify-center text-foreground"
+          className="mr-2 inline-flex items-center justify-center"
         >
           {direction === "left" ? (
-            <ArrowLeftFromLine className="relative top-0.5 size-4" />
+            <ArrowLeftFromLine className={cn(labelClass, "relative top-0.5 size-3")} />
           ) : (
-            <ArrowRightFromLine className="relative top-0.5 size-4" />
+            <ArrowRightFromLine className={cn(labelClass, "relative top-0.5 size-3")} />
           )}
         </span>
-        <strong className={labelClass}>{label}:</strong>{" "}
+        <strong className={cn("text-xs", labelClass)}>{label}:</strong>{" "}
+      </div>
+      <div className="rounded-lg border border-border p-4 h-full">
         <AiText source={text} inline />
       </div>
     </div>
