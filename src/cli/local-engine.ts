@@ -205,6 +205,18 @@ const VALID_CLAIM_IMPORTANCES = new Set([
   "minor",
   "noise",
 ]);
+const CLAIM_IMPORTANCE_ORDER: ClaimImportance[] = [
+  "critical",
+  "important",
+  "minor",
+  "noise",
+];
+const CLAIM_IMPORTANCE_RANK: Record<ClaimImportance, number> = {
+  critical: 0,
+  important: 1,
+  minor: 2,
+  noise: 3,
+};
 
 export async function runCli(argv: string[], options: CliOptions = {}) {
   const ctx = makeContext(options);
@@ -1533,7 +1545,8 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
       ...thread,
       id: publicDbId(session.id, thread.id),
       claims: getClaimsForThread(db, session.id, thread.id),
-    }));
+    }))
+    .sort(compareThreadsByImportance);
   return {
     session,
     git,
@@ -1553,6 +1566,7 @@ function getClaimsForThread(
       "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, importance, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc, rowid desc",
     )
     .all(threadDbId)
+    .sort(compareClaimsByImportance)
     .map((claim) => ({
       ...claim,
       ...normalizeStoredClaim(claim),
@@ -1569,6 +1583,40 @@ function getClaimsForThread(
           claimId: publicDbId(sessionId, claim.id),
         })),
     }));
+}
+
+function compareClaimsByImportance(
+  left: Pick<AgentClaim, "importance">,
+  right: Pick<AgentClaim, "importance">,
+) {
+  return (
+    CLAIM_IMPORTANCE_RANK[left.importance] -
+    CLAIM_IMPORTANCE_RANK[right.importance]
+  );
+}
+
+function compareThreadsByImportance(
+  left: { claims: Array<Pick<AgentClaim, "importance">> },
+  right: { claims: Array<Pick<AgentClaim, "importance">> },
+) {
+  const leftCounts = claimImportanceCounts(left.claims);
+  const rightCounts = claimImportanceCounts(right.claims);
+  for (const importance of CLAIM_IMPORTANCE_ORDER) {
+    const countDelta = rightCounts[importance] - leftCounts[importance];
+    if (countDelta !== 0) return countDelta;
+  }
+  return 0;
+}
+
+function claimImportanceCounts(claims: Array<Pick<AgentClaim, "importance">>) {
+  const counts: Record<ClaimImportance, number> = {
+    critical: 0,
+    important: 0,
+    minor: 0,
+    noise: 0,
+  };
+  for (const claim of claims) counts[claim.importance] += 1;
+  return counts;
 }
 
 async function openBrowser(

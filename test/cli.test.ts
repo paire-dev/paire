@@ -337,7 +337,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   db.close();
 });
 
-test("review API returns threads and claims newest first", async () => {
+test("review API sorts threads and claims by importance", async () => {
   const fixture = createFixtureRepo();
 
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
@@ -440,6 +440,77 @@ test("review API returns threads and claims newest first", async () => {
               },
             ],
           },
+          {
+            id: "thread_one_critical",
+            title: "One critical thread",
+            summary: "Thread with one critical claim.",
+            claims: [
+              {
+                id: "claim_one_critical",
+                threadId: "thread_one_critical",
+                title: "One critical claim",
+                description: "Only critical claim in this thread.",
+                before: "Before one critical.",
+                after: "After one critical.",
+                agentStatus: "new",
+                importance: "critical",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "One critical evidence.",
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            id: "thread_more_critical",
+            title: "More critical thread",
+            summary: "Thread with two critical claims.",
+            claims: [
+              {
+                id: "claim_more_critical_a",
+                threadId: "thread_more_critical",
+                title: "First critical claim",
+                description: "First critical claim in this thread.",
+                before: "Before first critical.",
+                after: "After first critical.",
+                agentStatus: "new",
+                importance: "critical",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "First critical evidence.",
+                  },
+                ],
+              },
+              {
+                id: "claim_more_critical_b",
+                threadId: "thread_more_critical",
+                title: "Second critical claim",
+                description: "Second critical claim in this thread.",
+                before: "Before second critical.",
+                after: "After second critical.",
+                agentStatus: "new",
+                importance: "critical",
+                humanStatus: "unreviewed",
+                evidences: [
+                  {
+                    filePath: "src/app.ts",
+                    startLine: 1,
+                    endLine: 6,
+                    change: "Second critical evidence.",
+                  },
+                ],
+              },
+            ],
+          },
         ],
       },
       null,
@@ -472,8 +543,10 @@ test("review API returns threads and claims newest first", async () => {
       response.json(),
     );
     expect(reviewData.threads.map((thread: { id: string }) => thread.id)).toEqual([
-      "thread_newer",
+      "thread_more_critical",
+      "thread_one_critical",
       "thread_older",
+      "thread_newer",
     ]);
     expect(
       reviewData.threads

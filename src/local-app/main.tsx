@@ -1458,13 +1458,13 @@ function statusLabel(status: string) {
 function claimImportanceColor(importance: ClaimImportance) {
   switch (importance) {
     case "critical":
-      return "bg-violet-500";
+      return "shadow-[inset_2px_0_0_var(--color-violet-500)]";
     case "important":
-      return "bg-orange-500";
+      return "shadow-[inset_2px_0_0_var(--color-orange-500)]";
     case "noise":
-      return "bg-muted";
+      return "shadow-[inset_2px_0_0_var(--color-muted)]";
     case "minor":
-      return "bg-current";
+      return "shadow-[inset_2px_0_0_currentColor]";
   }
 }
 
@@ -1624,12 +1624,14 @@ function ClaimCard({
     >
       <Card
         className={cn(
-          "gap-0 py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
+          "relative gap-0 overflow-hidden py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
+          claimImportanceColor(claim.importance),
           claim.humanStatus === "accepted"
             ? // ? "ring-2 ring-inset ring-primary/35"
               "bg-background/50 text-muted-foreground"
             : "",
         )}
+        title={claim.importance}
       >
         <CardHeader className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start sm:justify-between px-4 sm:px-6">
           <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug w-full">
@@ -1647,14 +1649,6 @@ function ClaimCard({
                   "size-5 shrink-0 text-muted-foreground transition-transform",
                   open && "rotate-90",
                 )}
-                aria-hidden
-              />
-              <span
-                className={cn(
-                  "mt-2 size-2 shrink-0 rounded-full",
-                  claimImportanceColor(claim.importance),
-                )}
-                title={claim.importance}
                 aria-hidden
               />
               <span className={cn("min-w-0")}>
