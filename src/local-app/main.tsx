@@ -25,9 +25,11 @@ import {
   ArrowLeftFromLine,
   ArrowRightFromLine,
   Bot,
-  SquareCheckBig,
+  Check,
+  CheckCheck,
   ChevronRight,
   Columns2,
+  OctagonX,
   FileCode,
   FolderTree,
   Highlighter,
@@ -42,6 +44,7 @@ import {
   Rows2,
   Sun,
   Square,
+  TriangleAlert,
   WrapText,
 } from "lucide-react";
 import * as React from "react";
@@ -708,7 +711,10 @@ function ReviewCodeSheet({
   onSelectedEvidenceChange: (selection: EvidenceSelection | null) => void;
 }) {
   return (
-    <Dialog.Root open={open} onOpenChange={(nextOpen) => onOpenChange(nextOpen)}>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(nextOpen) => onOpenChange(nextOpen)}
+    >
       <Dialog.Portal>
         <Dialog.Backdrop className="fixed inset-0 z-40 bg-background/70 backdrop-blur-xs" />
         <Dialog.Popup
@@ -892,11 +898,7 @@ function ReviewScrollPanel({
   children: React.ReactNode;
   contained: boolean;
 }) {
-  const content = (
-    <div className="mx-auto w-full max-w-3xl">
-      {children}
-    </div>
-  );
+  const content = <div className="mx-auto w-full max-w-3xl">{children}</div>;
 
   if (!contained) return content;
 
@@ -1344,7 +1346,7 @@ function CopyAgentPromptButton({ text }: { text: string }) {
     >
       {copied ? (
         <>
-          <SquareCheckBig className="size-3.5" aria-hidden />
+          <Check className="size-3.5" aria-hidden />
           <span className="text-xs">Copied</span>
         </>
       ) : (
@@ -1492,6 +1494,10 @@ function ThreadGroup({
   ) => void;
   onThreadOpenChange: (threadId: string, open: boolean) => void;
 }) {
+  const allClaimsAccepted =
+    thread.claims.length > 0 &&
+    thread.claims.every((claim) => claim.humanStatus === "accepted");
+
   return (
     <Collapsible
       open={open}
@@ -1511,8 +1517,14 @@ function ThreadGroup({
                     )}
                     aria-hidden
                   />
-                  <span className="min-w-0">
+                  <span className="flex min-w-0 items-center gap-2">
                     <AiText source={thread.title || "Behavior"} inline />
+                    {allClaimsAccepted ? (
+                      <CheckCheck
+                        className="size-6 shrink-0 text-primary-darker"
+                        aria-label="All claims approved"
+                      />
+                    ) : null}
                   </span>
                 </CollapsibleTrigger>
               </h2>
@@ -1616,6 +1628,10 @@ function ClaimCard({
   onStatusChange: (humanStatus: HumanStatus) => void;
   onTriggerRef: (button: HTMLButtonElement | null) => void;
 }) {
+  const showsImportanceIcon =
+    claim.humanStatus !== "accepted" &&
+    (claim.importance === "critical" || claim.importance === "important");
+
   return (
     <Collapsible
       open={open}
@@ -1625,11 +1641,9 @@ function ClaimCard({
       <Card
         className={cn(
           "relative gap-0 overflow-hidden py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
-          claimImportanceColor(claim.importance),
-          claim.humanStatus === "accepted"
-            ? // ? "ring-2 ring-inset ring-primary/35"
-              "bg-background/50 text-muted-foreground"
-            : "",
+          // claimImportanceColor(claim.importance),
+          claim.humanStatus === "accepted" &&
+            "bg-background/50 text-muted-foreground",
         )}
         title={claim.importance}
       >
@@ -1644,13 +1658,29 @@ function ClaimCard({
                 onOpenChange(!open);
               }}
             >
-              <ChevronRight
-                className={cn(
-                  "size-5 shrink-0 text-muted-foreground transition-transform",
-                  open && "rotate-90",
-                )}
-                aria-hidden
-              />
+              <span className="relative flex size-5 shrink-0 items-center justify-center">
+                <ChevronRight
+                  className={cn(
+                    "size-5 text-muted-foreground transition-[transform,opacity]",
+                    open && "rotate-90",
+                    showsImportanceIcon &&
+                      "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
+                  )}
+                  aria-hidden
+                />
+                {showsImportanceIcon && claim.importance === "critical" ? (
+                  <OctagonX
+                    className="absolute size-5 text-violet-500 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                    aria-hidden
+                  />
+                ) : null}
+                {showsImportanceIcon && claim.importance === "important" ? (
+                  <TriangleAlert
+                    className="absolute size-5 text-orange-500 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                    aria-hidden
+                  />
+                ) : null}
+              </span>
               <span className={cn("min-w-0")}>
                 <AiText source={claim.title} />
               </span>
@@ -1672,26 +1702,17 @@ function ClaimCard({
             >
               {statusLabel(claim.agentStatus)}
             </Badge>
-            {!open && (
+            {!open && claim.humanStatus === "accepted" && (
               <span
                 className={cn(
-                  "inline-flex h-7 items-center gap-1 rounded-md border px-2 text-sm font-medium",
-                  claim.humanStatus === "accepted"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-secondary text-secondary-foreground",
+                  "inline-flex h-7 items-center gap-1 rounded-md text-sm font-medium shrink-0",
                 )}
-                aria-label={
-                  claim.humanStatus === "accepted" ? "Approved" : "Not approved"
-                }
-                title={
-                  claim.humanStatus === "accepted" ? "Approved" : "Not approved"
-                }
+                aria-label="Approved"
               >
-                {claim.humanStatus === "accepted" ? (
-                  <SquareCheckBig className="size-3.5" aria-hidden />
-                ) : (
-                  <Square className="size-3.5" aria-hidden />
-                )}
+                <Check
+                  className="size-6 shrink-0 text-primary-darker"
+                  aria-hidden
+                />
               </span>
             )}
           </CardAction>
@@ -1873,9 +1894,13 @@ function InfoPanel({
           className="mr-2 inline-flex items-center justify-center"
         >
           {direction === "left" ? (
-            <ArrowLeftFromLine className={cn(labelClass, "relative top-0.5 size-3")} />
+            <ArrowLeftFromLine
+              className={cn(labelClass, "relative top-0.5 size-3")}
+            />
           ) : (
-            <ArrowRightFromLine className={cn(labelClass, "relative top-0.5 size-3")} />
+            <ArrowRightFromLine
+              className={cn(labelClass, "relative top-0.5 size-3")}
+            />
           )}
         </span>
         <strong className={cn("text-xs", labelClass)}>{label}:</strong>{" "}
@@ -2352,7 +2377,7 @@ function ClaimActions({
         {claim.humanStatus === "accepted" ? (
           <>
             Accepted
-            <SquareCheckBig data-icon="inline-start" />
+            <Check data-icon="inline-start" />
           </>
         ) : (
           <>
