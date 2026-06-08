@@ -65,6 +65,7 @@ type ClaimStatus =
   | "superseded";
 
 type HumanStatus = "unreviewed" | "accepted";
+type ClaimImportance = "critical" | "important" | "minor" | "noise";
 
 type AgentEvidence = {
   claimId?: string;
@@ -82,6 +83,7 @@ type AgentClaim = {
   threadId: string;
   title: string;
   agentStatus: ClaimStatus;
+  importance: ClaimImportance;
   humanStatus?: HumanStatus;
   evidences: AgentEvidence[];
   before?: string | null;
@@ -197,6 +199,12 @@ const VALID_AGENT_STATUSES = new Set([
   "superseded",
 ]);
 const VALID_HUMAN_STATUSES = new Set(["unreviewed", "accepted"]);
+const VALID_CLAIM_IMPORTANCES = new Set([
+  "critical",
+  "important",
+  "minor",
+  "noise",
+]);
 
 export async function runCli(argv: string[], options: CliOptions = {}) {
   const ctx = makeContext(options);
@@ -505,12 +513,13 @@ async function applyReviewCommand(
               description: string;
               beforeText: string | null;
               afterText: string | null;
+              importance: ClaimImportance;
               humanStatus: HumanStatus;
               updatedAt: number;
             },
             [string, string]
           >(
-            "select title, description, beforeText, afterText, humanStatus, updatedAt from claims where id = ? and sessionId = ?",
+            "select title, description, beforeText, afterText, importance, humanStatus, updatedAt from claims where id = ? and sessionId = ?",
           )
           .get(claimDbId, session.id);
         const claimCopy = normalizeClaimCopy(claim);
@@ -534,12 +543,13 @@ async function applyReviewCommand(
             : (existingClaim?.humanStatus ?? claim.humanStatus ?? "unreviewed");
         ctx.db
           .prepare(
-            `insert into claims (id, threadId, sessionId, title, description, beforeText, afterText, agentStatus, humanStatus, updatedAt)
-             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `insert into claims (id, threadId, sessionId, title, description, beforeText, afterText, agentStatus, importance, humanStatus, updatedAt)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              on conflict(id) do update set threadId = excluded.threadId, title = excluded.title,
                description = excluded.description,
                beforeText = excluded.beforeText, afterText = excluded.afterText,
-               agentStatus = excluded.agentStatus, humanStatus = excluded.humanStatus, updatedAt = excluded.updatedAt`,
+               agentStatus = excluded.agentStatus, importance = excluded.importance,
+               humanStatus = excluded.humanStatus, updatedAt = excluded.updatedAt`,
           )
           .run(
             claimDbId,
@@ -550,6 +560,9 @@ async function applyReviewCommand(
             claimBefore,
             claimAfter,
             claim.agentStatus,
+            preserveClaimCopy && existingClaim
+              ? existingClaim.importance
+              : claim.importance,
             claimHumanStatus,
             preserveClaimCopy && existingClaim
               ? existingClaim.updatedAt
@@ -796,12 +809,14 @@ async function createPendingPacket(
       revisionId: "string",
       gitFingerprint: "string",
       threads:
-        "Array<{ id, title, summary?, claims: Array<{ id, threadId, title, agentStatus, humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }>, before?, after?, description? }> }>",
+        "Array<{ id, title, summary?, claims: Array<{ id, threadId, title, agentStatus, importance: v.union(v.literal(\"critical\"), v.literal(\"important\"), v.literal(\"minor\"), v.literal(\"noise\")), humanStatus?, evidences: Array<{ filePath, startLine, endLine, symbol?, fingerprint?, change }>, before?, after?, description? }> }>",
     },
     rules: [
       "Group related claims into area threads. Treat each thread as one review area with a short area title, not as a single diff line or file.",
       "Order areas and claims for review, not alphabetically: start with the main behavior or core contract, then supporting helpers, then consumers/usages, then tests, generated files, config, and lockfiles.",
       "Use the first area for the most important files or behavior a reviewer needs to understand before the rest of the change makes sense.",
+      "Set every claim importance to one of: critical, important, minor, noise. Critical means a correctness, security, data-loss, or release-blocking behavior change; important means meaningful user-facing or maintainer-facing behavior; minor means low-risk polish, cleanup, tests, or config; noise means mechanical churn that reviewers may safely scan last.",
+      "When noise claims exist, group them in their own thread instead of mixing them with critical, important, or minor claims.",
       "When updating an existing thread, keep its thread id stable. Only create a new thread when the claim does not fit an existing area.",
       "Update existing claims before creating new ones.",
       "Do not create new claims for line movement, formatting, renames, or helper extraction unless meaning changed.",
@@ -815,7 +830,7 @@ async function createPendingPacket(
       "Keep claim titles short and direct.",
       "Use claim description only to add detail that complements the title; do not restate the same point.",
       "Aim for clarity with progressive disclosure: each new detail should build on the previous one and avoid repetition.",
-      "In agent-result.json, write each claim object with keys in this order: id, threadId, title, agentStatus, humanStatus (if set), evidences, before, after, description — ground the claim in code spans first, then behavior deltas, then the longer description.",
+      "In agent-result.json, write each claim object with keys in this order: id, threadId, title, agentStatus, importance, humanStatus (if set), evidences, before, after, description — ground the claim in code spans first, then behavior deltas, then the longer description.",
       "On each claim, set optional before and after to high-level behavior summaries for the whole claim; use null when not applicable (pure addition: null before; pure removal: null after). Do not mention file paths or line numbers.",
       "On each evidence span, set change to a required imperative line describing what this span does; verb-first, concise, and may name symbols or APIs.",
     ],
@@ -1535,7 +1550,7 @@ function getClaimsForThread(
 ) {
   return db
     .query<AgentClaim, [string]>(
-      "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc, rowid desc",
+      "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, importance, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc, rowid desc",
     )
     .all(threadDbId)
     .map((claim) => ({
@@ -1638,6 +1653,7 @@ function migrate(db: Database) {
       beforeText text,
       afterText text,
       agentStatus text not null,
+      importance text not null default 'minor',
       humanStatus text not null,
       updatedAt integer not null
     );
@@ -1674,6 +1690,7 @@ function migrate(db: Database) {
   addNullableColumn(db, "claims", "description", "text");
   addNullableColumn(db, "claims", "beforeText", "text");
   addNullableColumn(db, "claims", "afterText", "text");
+  addNullableColumn(db, "claims", "importance", "text not null default 'minor'");
   addNullableColumn(db, "claim_evidences", "changeText", "text");
   migrateClaimsDropLegacyTextColumn(db);
   dropColumnIfExists(db, "claim_evidences", "beforeText");
@@ -1752,12 +1769,13 @@ function migrateClaimsDropLegacyTextColumn(db: Database) {
       beforeText text,
       afterText text,
       agentStatus text not null,
+      importance text not null default 'minor',
       humanStatus text not null,
       updatedAt integer not null
     );
     insert into claims_next (
       id, threadId, sessionId, title, description, beforeText, afterText,
-      agentStatus, humanStatus, updatedAt
+      agentStatus, importance, humanStatus, updatedAt
     )
     select
       id,
@@ -1768,6 +1786,7 @@ function migrateClaimsDropLegacyTextColumn(db: Database) {
       beforeText,
       afterText,
       agentStatus,
+      'minor',
       humanStatus,
       updatedAt
     from claims;
@@ -1889,7 +1908,7 @@ function getActiveClaims(db: Database, sessionId: string) {
     .query<AgentClaim & { threadTitle: string }, [string]>(
       `select claims.id, claims.threadId, claims.title, claims.description,
               claims.beforeText as before, claims.afterText as after,
-              claims.agentStatus, claims.humanStatus, change_threads.title as threadTitle
+              claims.agentStatus, claims.importance, claims.humanStatus, change_threads.title as threadTitle
        from claims join change_threads on change_threads.id = claims.threadId
        where claims.sessionId = ? and claims.agentStatus != 'superseded'
        order by change_threads.updatedAt desc, change_threads.rowid desc, claims.updatedAt desc, claims.rowid desc`,
@@ -1922,6 +1941,7 @@ function formatAgentClaimForExport<T extends AgentClaim & { threadTitle?: string
     threadId: rest.threadId,
     title: rest.title,
     agentStatus: rest.agentStatus,
+    importance: rest.importance,
     ...(rest.humanStatus != null ? { humanStatus: rest.humanStatus } : {}),
     evidences: rest.evidences,
     before: rest.before ?? null,
@@ -1986,6 +2006,9 @@ function validateApplyPayload(value: unknown): AgentApplyPayload {
       }
       if (!VALID_AGENT_STATUSES.has(claim.agentStatus))
         throw new Error(`Invalid agentStatus: ${claim.agentStatus}`);
+      if (!VALID_CLAIM_IMPORTANCES.has(claim.importance)) {
+        throw new Error(`Invalid importance: ${claim.importance}`);
+      }
       if (claim.humanStatus && !VALID_HUMAN_STATUSES.has(claim.humanStatus)) {
         throw new Error(`Invalid humanStatus: ${claim.humanStatus}`);
       }

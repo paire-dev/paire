@@ -101,6 +101,7 @@ const DIFF_SELECTED_LINE_UNSAFE_CSS = `
 `;
 
 type HumanStatus = "unreviewed" | "accepted";
+type ClaimImportance = "critical" | "important" | "minor" | "noise";
 type FilterValue = "all" | string;
 
 type Evidence = {
@@ -120,6 +121,7 @@ type Claim = {
   before?: string | null;
   after?: string | null;
   agentStatus: string;
+  importance: ClaimImportance;
   humanStatus: HumanStatus;
   updatedAt?: number;
   evidences: Evidence[];
@@ -1453,6 +1455,19 @@ function statusLabel(status: string) {
   return status.replaceAll("_", " ");
 }
 
+function claimImportanceColor(importance: ClaimImportance) {
+  switch (importance) {
+    case "critical":
+      return "bg-violet-500";
+    case "important":
+      return "bg-orange-500";
+    case "noise":
+      return "bg-muted";
+    case "minor":
+      return "bg-current";
+  }
+}
+
 function ThreadGroup({
   thread,
   open,
@@ -1632,6 +1647,14 @@ function ClaimCard({
                   "size-5 shrink-0 text-muted-foreground transition-transform",
                   open && "rotate-90",
                 )}
+                aria-hidden
+              />
+              <span
+                className={cn(
+                  "mt-2 size-2 shrink-0 rounded-full",
+                  claimImportanceColor(claim.importance),
+                )}
+                title={claim.importance}
                 aria-hidden
               />
               <span className={cn("min-w-0")}>

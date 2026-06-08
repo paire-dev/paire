@@ -382,6 +382,7 @@ test("review API returns threads and claims newest first", async () => {
                 before: "Before older.",
                 after: "After older.",
                 agentStatus: "new",
+                importance: "minor",
                 humanStatus: "unreviewed",
                 evidences: [
                   {
@@ -400,6 +401,7 @@ test("review API returns threads and claims newest first", async () => {
                 before: "Before newer.",
                 after: "After newer.",
                 agentStatus: "new",
+                importance: "important",
                 humanStatus: "unreviewed",
                 evidences: [
                   {
@@ -425,6 +427,7 @@ test("review API returns threads and claims newest first", async () => {
                 before: "Before thread.",
                 after: "After thread.",
                 agentStatus: "new",
+                importance: "minor",
                 humanStatus: "unreviewed",
                 evidences: [
                   {
@@ -477,6 +480,12 @@ test("review API returns threads and claims newest first", async () => {
         .find((thread: { id: string }) => thread.id === "thread_older")
         ?.claims.map((claim: { id: string }) => claim.id),
     ).toEqual(["claim_newer", "claim_older"]);
+    expect(
+      reviewData.threads
+        .find((thread: { id: string }) => thread.id === "thread_older")
+        ?.claims.find((claim: { id: string }) => claim.id === "claim_newer")
+        ?.importance,
+    ).toBe("important");
   } finally {
     server.kill();
     await server.exited;
@@ -1012,6 +1021,34 @@ test("apply rejects unsafe evidence paths and leaves review state unchanged", ()
   expect(apply.stderr).toContain(
     "Evidence filePath must be a relative repository path",
   );
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const claims = db
+    .query<{ count: number }, []>("select count(*) as count from claims")
+    .get();
+  expect(claims?.count).toBe(0);
+  db.close();
+});
+
+test("apply rejects invalid claim importance and leaves review state unchanged", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "change value to two");
+
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const result = hardcodedAgentResult(packet);
+  (result.threads[0]!.claims[0]! as { importance: string }).importance =
+    "urgent";
+  const resultPath = join(fixture.root, "invalid-importance-result.json");
+  writeFileSync(resultPath, JSON.stringify(result, null, 2));
+
+  const apply = runPaire(fixture, ["review", "--apply", resultPath]);
+  expect(apply.exitCode).not.toBe(0);
+  expect(apply.stderr).toContain("Invalid importance: urgent");
 
   const db = new Database(join(fixture.home, "paire.db"));
   const claims = db
@@ -1632,6 +1669,7 @@ function hardcodedAgentResult(packet: {
             after:
               "Project creation rejects missing users before returning data.",
             agentStatus: "new",
+            importance: "minor",
             humanStatus: "unreviewed",
             evidences: [
               {
@@ -1694,6 +1732,7 @@ function sandboxAgentResult(
               overrides.authClaimAfter ??
               "Project creation rejects missing users before returning data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
+            importance: "minor",
             humanStatus: "unreviewed",
             evidences: [
               {
@@ -1735,6 +1774,7 @@ function sandboxAgentResult(
                 ? "Workspace validation rejects inputs without a workspace name."
                 : "Workspace validation rejects missing names and exposes a version marker.",
             agentStatus: workspaceStatus,
+            importance: "minor",
             humanStatus: "unreviewed",
             evidences: [
               {

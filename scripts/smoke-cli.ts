@@ -198,6 +198,7 @@ function agentResult(
             after:
               "Project creation rejects missing users before returning data.",
             agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
+            importance: "minor",
             humanStatus: "unreviewed",
             evidences: [
               {
@@ -229,6 +230,7 @@ function agentResult(
                 ? "Workspace validation rejects inputs without a workspace name."
                 : "Workspace validation rejects missing names and exposes a version marker.",
             agentStatus: workspaceStatus,
+            importance: "minor",
             humanStatus: "unreviewed",
             evidences: [
               {
