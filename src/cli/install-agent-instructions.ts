@@ -15,7 +15,7 @@ export const PAIRE_AGENT_INSTRUCTIONS = [
   "`paire it` is a command. **Run it verbatim, then do only what its output says.** Paire is the entire review workflow — you do not review, test, or build the code yourself.",
   "",
   "- Do **not** run the test suite, typecheck, build, or an exploratory `git diff` as part of this workflow. Run only the exact commands Paire prints.",
-  "- Paire reviews **committed** code. If it prints `PAIRE_NEEDS_COMMITTED_CHANGES`, commit (or stash) your changes and run `paire it` again.",
+  "- Paire reviews **committed** code. If it prints `PAIRE_NEEDS_COMMITTED_CHANGES`, commit your worktree changes and run `paire it` again.",
   "- When it prints **Action required**, do the steps in order: inspect the diff range it names, edit the review draft in place (never create a new file), then run `paire review --apply <draft>`.",
   "- If apply prints `PAIRE_APPLY_REJECTED`, fix the draft per the listed issues and re-run. You are done only when `paire review --apply` exits 0.",
   "- An unrelated test or build failure is not a Paire step — don't chase it from inside this workflow.",

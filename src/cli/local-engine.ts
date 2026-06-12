@@ -358,11 +358,12 @@ async function reviewCommand(args: string[], ctx: Context): Promise<number> {
   const parsed = parseFlags(args);
   const applyPath = stringFlag(parsed, "apply");
   const checkPath = stringFlag(parsed, "check");
+  const open = parsed.flags.has("open");
   if (applyPath || parsed.flags.has("stdin")) {
     return await applyReviewCommand(
       applyPath,
       parsed.flags.has("stdin"),
-      parsed.flags.has("no-open"),
+      open,
       ctx,
     );
   }
@@ -379,12 +380,12 @@ async function reviewCommand(args: string[], ctx: Context): Promise<number> {
   }
   if (!git.clean) {
     ctx.stdout(dirtyWorktreeMessage(git));
-    await openReviewUi(ctx, session, git);
+    await openReviewUi(ctx, session, git, open);
     return 0;
   }
   const lastApplied = getLastAppliedRevision(ctx.db, session.id);
   if (lastApplied?.gitFingerprint === git.fingerprint) {
-    await printStatusAndOpen(session, git, ctx);
+    await printStatusAndOpen(session, git, ctx, open);
     return 0;
   }
 
@@ -414,13 +415,14 @@ async function itCommand(args: string[], ctx: Context) {
   if (!getSession(ctx.db, git.repoRoot, git.branch)) {
     await startCommand(args, ctx);
   }
-  await reviewCommand([], ctx);
+  const open = parseFlags(args).flags.has("open");
+  await reviewCommand(open ? ["--open"] : [], ctx);
 }
 
 async function applyReviewCommand(
   applyPath: string | undefined,
   useStdin: boolean,
-  noOpen: boolean,
+  open: boolean,
   ctx: Context,
 ) {
   const draftPath = useStdin
@@ -589,9 +591,7 @@ async function applyReviewCommand(
   apply(payload);
 
   ctx.stdout(formatStatus(ctx.db, session, git));
-  if (!noOpen) {
-    await openReviewUi(ctx, session, git);
-  }
+  await openReviewUi(ctx, session, git, open);
   return 0;
 }
 
@@ -800,7 +800,7 @@ async function serverCommand(args: string[], ctx: Context) {
       await serverStartCommand(rest, ctx);
       return;
     case "stop":
-      await serverStopCommand(ctx);
+      await serverStopCommand(rest, ctx);
       return;
     case "help":
     case "--help":
@@ -824,13 +824,27 @@ async function serverStartCommand(args: string[], ctx: Context) {
   }
 
   const state = await ensureReviewServer(ctx, session);
-  if (!parsed.flags.has("no-open")) {
+  if (parsed.flags.has("open")) {
     await ctx.openBrowser(state.url);
   }
   ctx.stdout(reviewUiMessage(state.url));
 }
 
-async function serverStopCommand(ctx: Context) {
+async function serverStopCommand(args: string[], ctx: Context) {
+  const parsed = parseFlags(args);
+
+  if (parsed.flags.has("all")) {
+    const outcome = await stopReviewDaemonCompletely(ctx);
+    if (outcome === "stopped") {
+      ctx.stdout("Stopped the shared review server.");
+    } else if (outcome === "stale") {
+      ctx.stdout("Review server was not running. Removed stale state.");
+    } else {
+      ctx.stdout("No review server is running.");
+    }
+    return;
+  }
+
   const git = getGitState(ctx.cwd);
   const session = getSession(ctx.db, git.repoRoot, git.branch);
   if (!session) {
@@ -840,12 +854,20 @@ async function serverStopCommand(ctx: Context) {
     return;
   }
 
-  const outcome = await stopReviewSession(ctx, session);
-  if (outcome === "stopped") {
-    ctx.stdout("Stopped the review UI server.");
+  const result = await stopReviewSession(ctx, session);
+  if (result.outcome === "stopped") {
+    if (result.daemonStopped) {
+      ctx.stdout("Stopped the review UI server.");
+    } else {
+      const others =
+        result.remaining === 1 ? "1 other branch" : `${result.remaining} other branches`;
+      ctx.stdout(
+        `Stopped the review UI for ${git.branch}. The shared review server is still running for ${others} (paire server stop --all to stop it).`,
+      );
+    }
     return;
   }
-  if (outcome === "stale") {
+  if (result.outcome === "stale") {
     ctx.stdout("Review UI server was not running. Removed stale state.");
     return;
   }
@@ -1228,9 +1250,10 @@ async function printStatusAndOpen(
   session: SessionRow,
   git: GitState,
   ctx: Context,
+  open: boolean,
 ) {
   ctx.stdout(formatStatus(ctx.db, session, git));
-  await openReviewUi(ctx, session, git);
+  await openReviewUi(ctx, session, git, open);
 }
 
 function paireCliSpawnArgs(...args: string[]): string[] {
@@ -1240,7 +1263,12 @@ function paireCliSpawnArgs(...args: string[]): string[] {
   return [process.execPath, join(import.meta.dir, "../cli.ts"), ...args];
 }
 
-async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
+async function openReviewUi(
+  ctx: Context,
+  session: SessionRow,
+  _git: GitState,
+  open: boolean,
+) {
   if (ctx.env.PAIRE_BROWSER_HTML_CAPTURE) {
     await Bun.write(
       ctx.env.PAIRE_BROWSER_HTML_CAPTURE,
@@ -1252,14 +1280,14 @@ async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
     const token = createReviewToken();
     const server = serveStandaloneReviewUi(session, ctx, token);
     const url = reviewUiUrl(server.port, token);
-    await ctx.openBrowser(url);
+    if (open) await ctx.openBrowser(url);
     ctx.stdout(reviewUiMessage(url));
     server.stop();
     return;
   }
 
   const state = await ensureReviewServer(ctx, session);
-  await ctx.openBrowser(state.url);
+  if (open) await ctx.openBrowser(state.url);
   ctx.stdout(reviewUiMessage(state.url));
 }
 
@@ -1349,15 +1377,24 @@ async function registerReviewSession(
 }
 
 // Unregister a session from the daemon and drop its per-session state file.
-// "stopped" = handed off to a live daemon; "stale" = no live daemon, cleaned
-// up the leftover file; "missing" = nothing was registered for this branch.
+// Unregister a single branch's review from the shared daemon.
+//   outcome "stopped" = handed off to a live daemon; "stale" = no live daemon,
+//   cleaned up the leftover file; "missing" = nothing registered for this branch.
+//   daemonStopped = this was the last branch, so the shared server is exiting.
+//   remaining = branches still served by the daemon afterwards.
+type StopSessionResult = {
+  outcome: "stopped" | "stale" | "missing";
+  daemonStopped: boolean;
+  remaining: number;
+};
+
 async function stopReviewSession(
   ctx: Context,
   session: SessionRow,
-): Promise<"stopped" | "stale" | "missing"> {
+): Promise<StopSessionResult> {
   const statePath = reviewServerStatePath(ctx, session.id);
   if (!existsSync(statePath)) {
-    return "missing";
+    return { outcome: "missing", daemonStopped: false, remaining: 0 };
   }
 
   const state = readReviewServerState(statePath);
@@ -1374,23 +1411,77 @@ async function stopReviewSession(
   }
 
   if (state && daemon && daemonAlive) {
+    let daemonStopped = false;
+    let remaining = 0;
     try {
-      await fetch(new URL("/api/_internal/unregister", daemon.baseUrl), {
-        method: "POST",
-        headers: {
-          [REVIEW_TOKEN_HEADER]: daemon.adminToken,
-          "content-type": "application/json",
+      const response = await fetch(
+        new URL("/api/_internal/unregister", daemon.baseUrl),
+        {
+          method: "POST",
+          headers: {
+            [REVIEW_TOKEN_HEADER]: daemon.adminToken,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ sessionId: session.id }),
+          signal: AbortSignal.timeout(2_000),
         },
-        body: JSON.stringify({ sessionId: session.id }),
-        signal: AbortSignal.timeout(2_000),
-      });
+      );
+      const data = (await response.json()) as {
+        empty?: unknown;
+        remaining?: unknown;
+      };
+      daemonStopped = data.empty === true;
+      remaining = typeof data.remaining === "number" ? data.remaining : 0;
     } catch {
       // daemon may have exited between checks; the file is already gone
     }
-    return "stopped";
+    return { outcome: "stopped", daemonStopped, remaining };
   }
 
-  return "stale";
+  return { outcome: "stale", daemonStopped: false, remaining: 0 };
+}
+
+// Stop the whole shared daemon and clear every branch's review state.
+//   "stopped" = a live daemon was shut down; "stale" = state file but no live
+//   daemon, cleaned up; "missing" = no daemon state at all.
+async function stopReviewDaemonCompletely(
+  ctx: Context,
+): Promise<"stopped" | "stale" | "missing"> {
+  const daemon = readReviewDaemonState(reviewDaemonStatePath(ctx));
+  const daemonAlive =
+    !!daemon &&
+    isProcessRunning(daemon.pid) &&
+    (await isReviewDaemonAlive(daemon));
+
+  if (daemon && daemonAlive) {
+    await shutdownReviewDaemon(daemon);
+  }
+  clearReviewServerStateFiles(ctx);
+  if (!daemon) return "missing";
+  return daemonAlive ? "stopped" : "stale";
+}
+
+function clearReviewServerStateFiles(ctx: Context) {
+  try {
+    unlinkSync(reviewDaemonStatePath(ctx));
+  } catch {
+    // ignore
+  }
+  const dir = join(ctx.paireHome, "review-servers");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      unlinkSync(join(dir, name));
+    } catch {
+      // ignore
+    }
+  }
 }
 
 // The long-lived shared review daemon: one process, one fixed port, routing
@@ -1475,9 +1566,10 @@ async function reviewServeCommand(ctx: Context) {
       registry.delete(token);
       sessionTokens.delete(body.sessionId);
     }
-    const empty = sessionTokens.size === 0;
+    const remaining = sessionTokens.size;
+    const empty = remaining === 0;
     if (empty) queueShutdown();
-    return Response.json({ ok: true, empty });
+    return Response.json({ ok: true, empty, remaining });
   };
 
   const routes = buildReviewRoutes(ctx, resolveSession, {
@@ -2682,7 +2774,7 @@ function parseFlags(args: string[]) {
     if (!arg) continue;
     if (!arg.startsWith("--")) continue;
     const name = arg.slice(2);
-    if (name === "stdin" || name === "no-open") {
+    if (name === "stdin" || name === "open" || name === "no-open" || name === "all") {
       flags.add(name);
       continue;
     }
@@ -2716,13 +2808,13 @@ function helpText() {
     "",
     "Commands:",
     "  start --base <ref> --goal <text>",
-    "  review [--apply <file> | --check <file> | --stdin] [--no-open]",
-    "  it",
+    "  review [--apply <file> | --check <file> | --stdin] [--open]",
+    "  it [--open]",
     "  status",
     "  sync",
     "  reset",
-    "  server start [--no-open]",
-    "  server stop",
+    "  server start [--open]",
+    "  server stop [--all]",
     "  install",
     "  version",
   ].join("\n");
@@ -2733,7 +2825,8 @@ function serverHelpText() {
     "Usage: paire server <command>",
     "",
     "Commands:",
-    "  start [--no-open]   Start or reuse the review UI server for the current branch",
-    "  stop                Stop the review UI server for the current branch",
+    "  start [--open]      Start or reuse the shared review server for the current branch (--open launches a browser)",
+    "  stop                Stop the review UI for the current branch (stops the shared server if it was the last)",
+    "  stop --all          Stop the shared review server for every branch",
   ].join("\n");
 }

@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import {
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -78,7 +79,7 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
     JSON.stringify(hardcodedAgentResult(packet), null, 2),
   );
 
-  const apply = runPaire(fixture, ["review", "--apply", agentResultPath]);
+  const apply = runPaire(fixture, ["review", "--apply", agentResultPath, "--open"]);
   expect(apply.exitCode).toBe(0);
   expect(apply.stdout).toContain("Review burden:");
   expect(apply.stdout).toContain("Open this URL in the browser:");
@@ -143,7 +144,7 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   db.close();
 
   writeFileSync(fixture.browserCapture, "");
-  const reviewAgain = runPaire(fixture, ["review"]);
+  const reviewAgain = runPaire(fixture, ["review", "--open"]);
   expect(reviewAgain.exitCode).toBe(0);
   expect(reviewAgain.stdout).not.toContain("Action required");
   expect(reviewAgain.stdout).toContain("Open this URL in the browser:");
@@ -211,7 +212,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
     firstResult,
     JSON.stringify(sandboxAgentResult(firstPacket, "new"), null, 2),
   );
-  const firstApply = runPaire(fixture, ["review", "--apply", firstResult]);
+  const firstApply = runPaire(fixture, ["review", "--apply", firstResult, "--open"]);
   expect(firstApply.exitCode).toBe(0);
   expect(firstApply.stdout).toContain("Review burden: 2 new");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
@@ -225,7 +226,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   dbAfterFirstApply.close();
 
   writeFileSync(fixture.browserCapture, "");
-  const reopen = runPaire(fixture, ["review"]);
+  const reopen = runPaire(fixture, ["review", "--open"]);
   expect(reopen.exitCode).toBe(0);
   expect(reopen.stdout).not.toContain("Action required");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
@@ -648,7 +649,7 @@ test("dirty worktree opens review UI with committed-state warning", () => {
   const start = runPaire(fixture, ["start", "--base", "main"]);
   expect(start.exitCode).toBe(0);
 
-  const review = runPaire(fixture, ["review"]);
+  const review = runPaire(fixture, ["review", "--open"]);
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
   expect(review.stdout).toContain("Paire reviews committed code only");
@@ -1526,28 +1527,24 @@ test("paire server start spawns or reuses the review UI server", async () => {
   db.close();
   expect(session?.id).toBeTruthy();
 
+  // Default does not open a browser, but still prints the URL.
   writeFileSync(fixture.browserCapture, "");
   const start = runPaire(fixture, ["server", "start"]);
   expect(start.exitCode).toBe(0);
   expect(start.stdout).toContain("Review UI:");
-  expect(readFileSync(fixture.browserCapture, "utf8")).toContain("http://127.0.0.1:");
+  expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
 
   const state = await waitForServerState(fixture.home, session!.id);
   expect(state.port).toBe(PREFERRED_REVIEW_PORT);
   expect(state.url).toContain(`http://127.0.0.1:${PREFERRED_REVIEW_PORT}/`);
   expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
 
+  // --open launches the browser.
   writeFileSync(fixture.browserCapture, "");
-  const startAgain = runPaire(fixture, ["server", "start"]);
-  expect(startAgain.exitCode).toBe(0);
-  expect(startAgain.stdout).toContain(state.url);
+  const startOpen = runPaire(fixture, ["server", "start", "--open"]);
+  expect(startOpen.exitCode).toBe(0);
+  expect(startOpen.stdout).toContain(state.url);
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(state.url);
-
-  writeFileSync(fixture.browserCapture, "");
-  const startNoOpen = runPaire(fixture, ["server", "start", "--no-open"]);
-  expect(startNoOpen.exitCode).toBe(0);
-  expect(startNoOpen.stdout).toContain(state.url);
-  expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
 
   const stop = runPaire(fixture, ["server", "stop"]);
   expect(stop.exitCode).toBe(0);
@@ -1617,6 +1614,49 @@ test("paire server stop shuts down the review UI server for the current branch",
   const stopAgain = runPaire(fixture, ["server", "stop"]);
   expect(stopAgain.exitCode).toBe(0);
   expect(stopAgain.stdout).toContain("No review UI server is running for this branch.");
+});
+
+test("paire server stop leaves the shared server up for other branches; --all stops it", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  // Second branch with its own Paire session, sharing the same daemon.
+  run(["git", "checkout", "-b", "feature"], fixture.repo);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 3;\n");
+  commitAll(fixture.repo, "feature change");
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  // Bring up the shared server for both branches.
+  run(["git", "checkout", "main"], fixture.repo);
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  run(["git", "checkout", "feature"], fixture.repo);
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
+
+  const daemonStatePath = join(fixture.home, "review-server.json");
+  expect(existsSync(daemonStatePath)).toBe(true);
+  const daemonPid = JSON.parse(readFileSync(daemonStatePath, "utf8")).pid as number;
+
+  // Stopping one branch keeps the shared server running for the other.
+  const stopOne = runPaire(fixture, ["server", "stop"]);
+  expect(stopOne.exitCode).toBe(0);
+  expect(stopOne.stdout).toContain("Stopped the review UI for feature");
+  expect(stopOne.stdout).toContain("1 other branch");
+  expect(stopOne.stdout).toContain("paire server stop --all");
+  expect(existsSync(daemonStatePath)).toBe(true);
+  try {
+    process.kill(daemonPid, 0);
+  } catch {
+    throw new Error("Shared server should still be running after one branch stop.");
+  }
+
+  // --all tears the whole thing down and clears every branch's state.
+  const stopAll = runPaire(fixture, ["server", "stop", "--all"]);
+  expect(stopAll.exitCode).toBe(0);
+  expect(stopAll.stdout).toContain("Stopped the shared review server.");
+  await waitForProcessExit(daemonPid);
+  expect(existsSync(daemonStatePath)).toBe(false);
+  expect(existsSync(join(fixture.home, "review-servers"))).toBe(true);
+  expect(readdirSync(join(fixture.home, "review-servers")).length).toBe(0);
 });
 
 test("paire server stop removes stale review server state", async () => {
