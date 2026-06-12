@@ -53,7 +53,23 @@ assert(
     (file: { path: string }) => file.path === "src/workspace.ts",
   ),
 );
-const firstResultPath = join(root, "agent-result.json");
+const firstResultPath = join(root, "review-draft-mutated.json");
+const badFirstResult = agentResult(firstPacket, "new");
+const firstBadThread = badFirstResult.threads[0];
+const firstBadClaim = firstBadThread?.claims[0];
+if (!firstBadThread || !firstBadClaim) {
+  throw new Error("Smoke fixture did not produce a claim to mutate.");
+}
+firstBadThread.claims = [firstBadClaim];
+await Bun.write(
+  firstResultPath,
+  JSON.stringify(badFirstResult, null, 2),
+);
+const rejectedApply = runPaireResult(["review", "--apply", firstResultPath]);
+assert(rejectedApply.exitCode !== 0);
+assert(rejectedApply.stderr.includes("PAIRE_APPLY_REJECTED"));
+assert(rejectedApply.stderr.includes("file_not_covered"));
+
 await Bun.write(
   firstResultPath,
   JSON.stringify(agentResult(firstPacket, "new"), null, 2),
@@ -88,7 +104,7 @@ assert(
     (file: { path: string }) => file.path === "src/workspace.ts",
   ),
 );
-const secondResultPath = join(root, "agent-result-2.json");
+const secondResultPath = join(root, "review-draft-mutated-2.json");
 await Bun.write(
   secondResultPath,
   JSON.stringify(agentResult(secondPacket, "amended"), null, 2),
@@ -110,6 +126,16 @@ console.log(
 );
 
 function runPaire(args: string[]) {
+  const result = runPaireResult(args);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `paire ${args.join(" ")} failed:\n${result.stdout}\n${result.stderr}`,
+    );
+  }
+  return result.stdout;
+}
+
+function runPaireResult(args: string[]) {
   const result = Bun.spawnSync([process.execPath, cliPath, ...args], {
     cwd: repo,
     env: {
@@ -121,13 +147,11 @@ function runPaire(args: string[]) {
     stdout: "pipe",
     stderr: "pipe",
   });
-  const stdout = text(result.stdout);
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `paire ${args.join(" ")} failed:\n${stdout}\n${text(result.stderr)}`,
-    );
-  }
-  return stdout;
+  return {
+    exitCode: result.exitCode,
+    stdout: text(result.stdout),
+    stderr: text(result.stderr),
+  };
 }
 
 function run(args: string[], cwd: string) {
@@ -152,17 +176,22 @@ function text(value: Uint8Array) {
 }
 
 function extractPacketPath(stdout: string) {
+  const draftPath = extractDraftPath(stdout);
+  return join(dirname(draftPath), "current-packet.json");
+}
+
+function extractDraftPath(stdout: string) {
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (
       trimmed.startsWith("/") &&
-      trimmed.endsWith("current-packet.json") &&
+      trimmed.endsWith("review-draft.json") &&
       !trimmed.includes("--apply")
     ) {
       return trimmed;
     }
   }
-  throw new Error(`Packet path missing from output:\n${stdout}`);
+  throw new Error(`Draft path missing from output:\n${stdout}`);
 }
 
 function agentResult(
@@ -171,6 +200,7 @@ function agentResult(
     sessionId: string;
     revisionId: string;
     currentFingerprint: string;
+    changedFiles: Array<{ path: string; additions: number; deletions: number }>;
   },
   workspaceStatus: "new" | "amended",
 ) {
@@ -179,6 +209,12 @@ function agentResult(
     sessionId: packet.sessionId,
     revisionId: packet.revisionId,
     gitFingerprint: packet.currentFingerprint,
+    files: packet.changedFiles.map((file) => ({
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+      disposition: "pending",
+    })),
     threads: [
       {
         id: "thread_smoke_auth_workspace",

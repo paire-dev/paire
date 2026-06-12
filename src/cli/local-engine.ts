@@ -3,6 +3,21 @@ import { Database } from "bun:sqlite";
 
 import { addedLineRanges, annotateHunkText } from "./diff-line-numbers";
 import {
+  checkCoverage,
+  checkPriorClaims,
+  formatRejection,
+  validateApplyPayload,
+  type AgentApplyPayload,
+  type AgentClaim,
+  type AgentEvidence,
+  type AgentThread,
+  type ApplyIssue,
+  type ClaimImportance,
+  type ClaimStatus,
+  type HumanStatus,
+} from "./apply-validation";
+import { buildReviewDraft, stripDraftAnnotations } from "./review-draft";
+import {
   chmodSync,
   existsSync,
   mkdirSync,
@@ -56,55 +71,19 @@ type RevisionRow = {
   appliedAt: number | null;
 };
 
-type ClaimStatus =
-  | "new"
-  | "unchanged"
-  | "evidence_moved"
-  | "amended"
-  | "invalidated"
-  | "superseded";
-
-type HumanStatus = "unreviewed" | "accepted";
-type ClaimImportance = "critical" | "important" | "minor" | "noise";
-
-type AgentEvidence = {
-  claimId?: string;
-  filePath: string;
-  startLine: number;
-  endLine: number;
-  symbol?: string;
-  fingerprint?: string;
-  revisionId?: string;
-  change: string;
-};
-
-type AgentClaim = {
+export type ClaimRevisionRow = {
   id: string;
-  threadId: string;
-  title: string;
-  agentStatus: ClaimStatus;
-  importance: ClaimImportance;
-  humanStatus?: HumanStatus;
-  evidences: AgentEvidence[];
-  before?: string | null;
-  after?: string | null;
-  description?: string;
-  updatedAt?: number;
-};
-
-type AgentThread = {
-  id: string;
-  title: string;
-  summary?: string;
-  claims: AgentClaim[];
-};
-
-type AgentApplyPayload = {
-  packetId: string;
+  claimId: string;
   sessionId: string;
   revisionId: string;
-  gitFingerprint: string;
-  threads: AgentThread[];
+  agentStatus: ClaimStatus;
+  title: string;
+  description: string;
+  beforeText: string | null;
+  afterText: string | null;
+  importance: ClaimImportance;
+  evidencesJson: string;
+  createdAt: number;
 };
 
 type GitState = {
@@ -155,6 +134,13 @@ type TouchedSnippet = {
   text: string;
   addedRanges?: Array<{ startLine: number; endLine: number }>;
   summarized: boolean;
+};
+
+type StoredAgentClaim = AgentClaim & {
+  threadId: string;
+  title: string;
+  importance: ClaimImportance;
+  evidences: AgentEvidence[];
 };
 
 const LARGE_DIFF_BYTES = 30_000;
@@ -227,8 +213,7 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         await startCommand(rest, ctx);
         return 0;
       case "review":
-        await reviewCommand(rest, ctx);
-        return 0;
+        return await reviewCommand(rest, ctx);
       case "it":
         await itCommand(rest, ctx);
         return 0;
@@ -375,17 +360,20 @@ async function startCommand(args: string[], ctx: Context) {
   );
 }
 
-async function reviewCommand(args: string[], ctx: Context) {
+async function reviewCommand(args: string[], ctx: Context): Promise<number> {
   const parsed = parseFlags(args);
   const applyPath = stringFlag(parsed, "apply");
+  const checkPath = stringFlag(parsed, "check");
   if (applyPath || parsed.flags.has("stdin")) {
-    await applyReviewCommand(
+    return await applyReviewCommand(
       applyPath,
       parsed.flags.has("stdin"),
       parsed.flags.has("no-open"),
       ctx,
     );
-    return;
+  }
+  if (checkPath) {
+    return await checkReviewCommand(checkPath, ctx);
   }
 
   const git = getGitState(ctx.cwd);
@@ -393,17 +381,17 @@ async function reviewCommand(args: string[], ctx: Context) {
   if (!session) {
     const base = detectBaseRef(git.repoRoot);
     ctx.stdout(`No Paire session found.\nRun:\npaire start --base ${base}`);
-    return;
+    return 0;
   }
   if (!git.clean) {
     ctx.stdout(dirtyWorktreeMessage(git));
     await openReviewUi(ctx, session, git);
-    return;
+    return 0;
   }
   const lastApplied = getLastAppliedRevision(ctx.db, session.id);
   if (lastApplied?.gitFingerprint === git.fingerprint) {
     await printStatusAndOpen(session, git, ctx);
-    return;
+    return 0;
   }
 
   const packet = await createPendingPacket(ctx, session, git, lastApplied);
@@ -419,6 +407,7 @@ async function reviewCommand(args: string[], ctx: Context) {
       packet,
     }),
   );
+  return 0;
 }
 
 function installCommand(ctx: Context) {
@@ -440,45 +429,15 @@ async function applyReviewCommand(
   noOpen: boolean,
   ctx: Context,
 ) {
-  const raw = useStdin
-    ? await new Response(Bun.stdin).text()
-    : await Bun.file(
-        resolveRequiredPath(applyPath, "Missing --apply file."),
-      ).text();
-  if (raw.length > MAX_APPLY_PAYLOAD_BYTES) {
-    throw new Error("Agent result is too large.");
+  const draftPath = useStdin
+    ? "(stdin)"
+    : resolveRequiredPath(applyPath, "Missing --apply file.");
+  const result = await validateReviewDraft(draftPath, useStdin, ctx);
+  if (result.issues.length > 0 || !result.ready) {
+    ctx.stderr(formatRejection(draftPath, result.issues));
+    return 1;
   }
-  const payload = validateApplyPayload(JSON.parse(raw));
-  const session = ctx.db
-    .query<SessionRow, [string]>("select * from sessions where id = ?")
-    .get(payload.sessionId);
-  if (!session) throw new Error("Session not found for apply payload.");
-  const git = getGitState(session.repoRoot);
-  if (!git.clean) {
-    throw new Error(
-      "Paire reviews committed code only. Commit the current worktree changes, then run paire review --apply again.",
-    );
-  }
-  if (git.fingerprint !== payload.gitFingerprint) {
-    throw new Error(
-      `Stale Paire review update. Packet fingerprint ${payload.gitFingerprint} does not match current fingerprint ${git.fingerprint}. Run paire review again.`,
-    );
-  }
-  const revision = ctx.db
-    .query<RevisionRow, [string]>("select * from revisions where id = ?")
-    .get(payload.revisionId);
-  if (!revision || revision.state !== "pending_agent") {
-    throw new Error("Pending revision not found for apply payload.");
-  }
-  if (revision.gitFingerprint !== payload.gitFingerprint) {
-    throw new Error(
-      "Apply payload does not match the pending revision fingerprint.",
-    );
-  }
-  const packet = parseStoredPacket(revision);
-  if (!packet || packet.packetId !== payload.packetId) {
-    throw new Error("Apply payload does not match the canonical pending packet.");
-  }
+  const { payload, session, git, revision } = result.ready;
 
   const apply = ctx.db.transaction((value: AgentApplyPayload) => {
     let applyOrder = Date.now();
@@ -518,6 +477,8 @@ async function applyReviewCommand(
         );
       for (const claim of thread.claims) {
         const claimDbId = scopedDbId(session.id, claim.id);
+        const claimThreadId = claim.threadId ?? thread.id;
+        const claimThreadDbId = scopedDbId(session.id, claimThreadId);
         const existingClaim = ctx.db
           .query<
             {
@@ -534,15 +495,13 @@ async function applyReviewCommand(
             "select title, description, beforeText, afterText, importance, humanStatus, updatedAt from claims where id = ? and sessionId = ?",
           )
           .get(claimDbId, session.id);
-        const claimCopy = normalizeClaimCopy(claim);
         const preserveClaimCopy =
-          !!existingClaim && claim.agentStatus === "unchanged";
-        const claimTitle = preserveClaimCopy
-          ? existingClaim.title
-          : claimCopy.title;
-        const claimDescription = preserveClaimCopy
-          ? existingClaim.description
-          : claimCopy.description;
+          !!existingClaim &&
+          (claim.agentStatus === "unchanged" ||
+            (claim.agentStatus === "evidence_moved" && !claim.title));
+        const claimCopy = finalClaimCopy(claim, existingClaim, preserveClaimCopy);
+        const claimTitle = claimCopy.title;
+        const claimDescription = claimCopy.description;
         const claimBefore = preserveClaimCopy
           ? existingClaim.beforeText
           : normalizeNullableCopy(claim.before);
@@ -565,7 +524,7 @@ async function applyReviewCommand(
           )
           .run(
             claimDbId,
-            threadDbId,
+            claimThreadDbId,
             session.id,
             claimTitle,
             claimDescription,
@@ -574,32 +533,55 @@ async function applyReviewCommand(
             claim.agentStatus,
             preserveClaimCopy && existingClaim
               ? existingClaim.importance
-              : claim.importance,
+              : requiredImportance(claim),
             claimHumanStatus,
             preserveClaimCopy && existingClaim
               ? existingClaim.updatedAt
               : ++applyOrder,
           );
-        ctx.db
-          .prepare("delete from claim_evidences where claimId = ?")
-          .run(claimDbId);
-        for (const evidence of claim.evidences) {
+        const preserveEvidenceRows =
+          claim.agentStatus === "unchanged" &&
+          (!claim.evidences || claim.evidences.length === 0);
+        const submittedEvidences = claim.evidences ?? [];
+        if (!preserveEvidenceRows) {
           ctx.db
-            .prepare(
-              `insert into claim_evidences (id, claimId, revisionId, filePath, startLine, endLine, symbol, fingerprint, changeText)
-               values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            )
-            .run(
-              `ev_${crypto.randomUUID()}`,
-              claimDbId,
-              revision.id,
-              evidence.filePath,
-              evidence.startLine,
-              evidence.endLine,
-              evidence.symbol ?? null,
-              evidence.fingerprint ?? null,
-              evidence.change.trim(),
-            );
+            .prepare("delete from claim_evidences where claimId = ?")
+            .run(claimDbId);
+          for (const evidence of submittedEvidences) {
+            ctx.db
+              .prepare(
+                `insert into claim_evidences (id, claimId, revisionId, filePath, startLine, endLine, symbol, fingerprint, changeText)
+                 values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .run(
+                `ev_${crypto.randomUUID()}`,
+                claimDbId,
+                revision.id,
+                evidence.filePath,
+                evidence.startLine,
+                evidence.endLine,
+                evidence.symbol ?? null,
+                evidence.fingerprint ?? null,
+                evidence.change.trim(),
+              );
+          }
+        }
+        if (claim.agentStatus !== "unchanged") {
+          appendClaimRevision(ctx.db, {
+            claimId: claimDbId,
+            sessionId: session.id,
+            revisionId: revision.id,
+            agentStatus: claim.agentStatus,
+            title: claimTitle,
+            description: claimDescription,
+            beforeText: claimBefore,
+            afterText: claimAfter,
+            importance: preserveClaimCopy && existingClaim
+              ? existingClaim.importance
+              : requiredImportance(claim),
+            evidences: submittedEvidences,
+            createdAt: ++applyOrder,
+          });
         }
       }
     }
@@ -620,6 +602,183 @@ async function applyReviewCommand(
   if (!noOpen) {
     await openReviewUi(ctx, session, git);
   }
+  return 0;
+}
+
+async function checkReviewCommand(checkPath: string, ctx: Context) {
+  const draftPath = resolve(checkPath);
+  const result = await validateReviewDraft(draftPath, false, ctx);
+  if (result.issues.length > 0 || !result.ready) {
+    ctx.stderr(formatRejection(draftPath, result.issues));
+    return 1;
+  }
+  ctx.stdout("PAIRE_DRAFT_OK");
+  return 0;
+}
+
+type ReadyApplyDraft = {
+  payload: AgentApplyPayload;
+  session: SessionRow;
+  git: GitState;
+  revision: RevisionRow;
+  packet: Packet;
+};
+
+async function validateReviewDraft(
+  draftPath: string,
+  useStdin: boolean,
+  ctx: Context,
+): Promise<{ ready?: ReadyApplyDraft; issues: ApplyIssue[] }> {
+  const raw = useStdin ? await new Response(Bun.stdin).text() : await Bun.file(draftPath).text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return {
+      issues: [
+        {
+          code: "invalid_field",
+          field: "$",
+          value: error instanceof Error ? error.message : String(error),
+          fix: "Fix the draft so it is valid JSON, then re-run the command.",
+        },
+      ],
+    };
+  }
+
+  const stripped = stripDraftAnnotations(parsed);
+  const strippedBytes = new TextEncoder().encode(JSON.stringify(stripped)).length;
+  if (strippedBytes > MAX_APPLY_PAYLOAD_BYTES) {
+    return {
+      issues: [
+        {
+          code: "payload_too_large",
+          value: strippedBytes,
+          fix: `The stripped apply payload is too large; keep it under ${MAX_APPLY_PAYLOAD_BYTES} bytes.`,
+        },
+      ],
+    };
+  }
+
+  const sessionId = readStringProperty(stripped, "sessionId");
+  const session = sessionId
+    ? ctx.db
+        .query<SessionRow, [string]>("select * from sessions where id = ?")
+        .get(sessionId)
+    : null;
+  const activeClaims = session ? getActiveClaims(ctx.db, session.id) : [];
+  const knownClaimIds = new Set(activeClaims.map((claim) => claim.id));
+  const validation = validateApplyPayload(stripped, { knownClaimIds });
+  const issues = [...validation.issues];
+  const payload = validation.payload;
+
+  if (!payload) return { issues };
+  if (!session) {
+    issues.push({
+      code: "unknown_revision",
+      field: "sessionId",
+      value: payload.sessionId,
+      fix: "Run paire review again and edit the generated review-draft.json for the current session.",
+    });
+    return { issues };
+  }
+
+  const git = getGitState(session.repoRoot);
+  if (!git.clean) {
+    issues.push({
+      code: "dirty_worktree",
+      fix: "Commit the current worktree changes, then run paire review again.",
+    });
+  }
+  if (git.fingerprint !== payload.gitFingerprint) {
+    issues.push({
+      code: "stale_fingerprint",
+      field: "gitFingerprint",
+      value: payload.gitFingerprint,
+      fix: `Run paire review again; the draft fingerprint does not match current HEAD ${git.fingerprint}.`,
+    });
+  }
+
+  const revision = ctx.db
+    .query<RevisionRow, [string]>("select * from revisions where id = ?")
+    .get(payload.revisionId);
+  if (!revision || revision.state !== "pending_agent") {
+    issues.push({
+      code: "unknown_revision",
+      field: "revisionId",
+      value: payload.revisionId,
+      fix: "Run paire review again and edit the current pending review-draft.json.",
+    });
+    return { issues };
+  }
+  if (revision.gitFingerprint !== payload.gitFingerprint) {
+    issues.push({
+      code: "stale_fingerprint",
+      field: "gitFingerprint",
+      value: payload.gitFingerprint,
+      fix: "Run paire review again; this draft does not match the pending revision fingerprint.",
+    });
+  }
+
+  const packet = parseStoredPacket(revision);
+  if (!packet || packet.packetId !== payload.packetId) {
+    issues.push({
+      code: "unknown_revision",
+      field: "packetId",
+      value: payload.packetId,
+      fix: "Run paire review again; this draft does not match the canonical pending packet.",
+    });
+    return { issues };
+  }
+
+  issues.push(
+    ...checkPriorClaims(
+      activeClaims.flatMap((claim) =>
+        claim.threadId ? [{ id: claim.id, threadId: claim.threadId }] : [],
+      ),
+      payload,
+    ),
+    ...checkCoverage(
+      packet,
+      payload,
+      preservedEvidencePaths(ctx.db, session.id, payload),
+    ),
+  );
+
+  if (issues.length > 0) return { issues };
+  return { ready: { payload, session, git, revision, packet }, issues };
+}
+
+function readStringProperty(value: unknown, key: string) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const found = (value as Record<string, unknown>)[key];
+  return typeof found === "string" && found.trim() ? found : null;
+}
+
+function preservedEvidencePaths(
+  db: Database,
+  sessionId: string,
+  payload: AgentApplyPayload,
+) {
+  const paths: string[] = [];
+  for (const thread of payload.threads) {
+    for (const claim of thread.claims) {
+      if (
+        claim.agentStatus !== "unchanged" ||
+        (claim.evidences && claim.evidences.length > 0)
+      ) {
+        continue;
+      }
+      const claimDbId = scopedDbId(sessionId, claim.id);
+      const rows = db
+        .query<{ filePath: string }, [string]>(
+          "select filePath from claim_evidences where claimId = ?",
+        )
+        .all(claimDbId);
+      for (const row of rows) paths.push(row.filePath);
+    }
+  }
+  return paths;
 }
 
 async function statusCommand(ctx: Context) {
@@ -842,14 +1001,16 @@ async function createPendingPacket(
       "Keep claim titles short and direct.",
       "Use claim description only to add detail that complements the title; do not restate the same point.",
       "Aim for clarity with progressive disclosure: each new detail should build on the previous one and avoid repetition.",
-      "In agent-result.json, write each claim object with keys in this order: id, threadId, title, agentStatus, importance, humanStatus (if set), evidences, before, after, description — ground the claim in code spans first, then behavior deltas, then the longer description.",
+      "When adding a claim to the review draft, write keys in this order: id, threadId, title, agentStatus, importance, humanStatus (if set), evidences, before, after, description — ground the claim in code spans first, then behavior deltas, then the longer description.",
       "On each claim, set optional before and after to high-level behavior summaries for the whole claim; use null when not applicable (pure addition: null before; pure removal: null after). Do not mention file paths or line numbers.",
       "On each evidence span, set change to a required imperative line describing what this span does; verb-first, concise, and may name symbols or APIs.",
     ],
   };
   const packetJson = JSON.stringify(packet, null, 2);
   const packetPath = await writeCurrentPacketExport(ctx, session, packetJson);
-  const resultPath = join(dirname(packetPath), "agent-result.json");
+  const draft = buildReviewDraft(packet, packet.activeClaims);
+  const draftJson = JSON.stringify(draft, null, 2);
+  const draftPath = await writeReviewDraftExport(ctx, session, draftJson);
   if (!existing) {
     ctx.db
       .prepare(
@@ -863,7 +1024,7 @@ async function createPendingPacket(
         git.fingerprint,
         packetJson,
         packetPath,
-        resultPath,
+        draftPath,
         totalDiffArtifactId,
         Date.now(),
       );
@@ -872,9 +1033,13 @@ async function createPendingPacket(
       .prepare(
         "update revisions set packetJson = ?, packetExportPath = ?, resultPath = ?, totalDiffArtifactId = ? where id = ?",
       )
-      .run(packetJson, packetPath, resultPath, totalDiffArtifactId, revisionId);
+      .run(packetJson, packetPath, draftPath, totalDiffArtifactId, revisionId);
   }
-  return { path: packetPath, resultPath, preview: packetPreview(packetJson) };
+  return {
+    path: packetPath,
+    draftPath,
+    preview: draftPreview(packet, draftPath),
+  };
 }
 
 async function writeArtifact(
@@ -905,7 +1070,11 @@ function projectExportDirectory(ctx: Context, session: SessionRow) {
 
 function clearProjectReviewExports(ctx: Context, session: SessionRow) {
   const directory = projectExportDirectory(ctx, session);
-  for (const filename of ["agent-result.json", "current-packet.json"]) {
+  for (const filename of [
+    "agent-result.json",
+    "current-packet.json",
+    "review-draft.json",
+  ]) {
     const path = join(directory, filename);
     if (existsSync(path)) unlinkSync(path);
   }
@@ -924,6 +1093,19 @@ async function writeCurrentPacketExport(
   return path;
 }
 
+async function writeReviewDraftExport(
+  ctx: Context,
+  session: SessionRow,
+  draftJson: string,
+) {
+  const directory = projectExportDirectory(ctx, session);
+  ensurePrivateDirectory(directory);
+  const path = join(directory, "review-draft.json");
+  await Bun.write(path, draftJson);
+  ensurePrivateFile(path);
+  return path;
+}
+
 function packetPreview(packetJson: string) {
   if (packetJson.length <= MAX_PACKET_PREVIEW_CHARS) return packetJson;
   const truncated = packetJson.slice(0, MAX_PACKET_PREVIEW_CHARS);
@@ -931,6 +1113,22 @@ function packetPreview(packetJson: string) {
     truncated,
     "",
     `... truncated packet preview at ${MAX_PACKET_PREVIEW_CHARS} characters. Read the exported packet path above for the complete current packet.`,
+  ].join("\n");
+}
+
+function draftPreview(packet: Packet, draftPath: string) {
+  return [
+    `Draft: ${draftPath}`,
+    `Packet: ${packet.packetId}`,
+    `Revision: ${packet.revisionId} (#${packet.revisionNumber})`,
+    `Fingerprint: ${packet.currentFingerprint}`,
+    `Changed files: ${packet.changedFiles.length}`,
+    ...packet.changedFiles
+      .slice(0, 12)
+      .map((file) => `- ${file.path} (+${file.additions}/-${file.deletions})`),
+    ...(packet.changedFiles.length > 12
+      ? [`- ... ${packet.changedFiles.length - 12} more`]
+      : []),
   ].join("\n");
 }
 
@@ -960,11 +1158,11 @@ function formatStatus(db: Database, session: SessionRow, git: GitState) {
   if (pending?.packetJson) {
     lines.push(
       "",
+      "Current review draft:",
+      pending.resultPath ?? "(not exported)",
+      "",
       "Current pending packet export:",
       pending.packetExportPath ?? "(not exported)",
-      "",
-      "Packet preview:",
-      packetPreview(pending.packetJson),
     );
   }
   return lines.join("\n");
@@ -982,45 +1180,33 @@ function reviewActionRequiredMessage({
   diffFrom: string;
   diffFromLabel: string;
   lastAppliedId: string | null;
-  packet: { path: string; resultPath: string; preview: string };
+  packet: { path: string; draftPath: string; preview: string };
 }) {
   return [
-    "Action required",
+    "Action required — update the Paire review",
     "",
-    "Coding agent workflow — complete every step below in order.",
-    "Do not skip steps. Do not stop after step 1 or 2. The task is incomplete until step 5 succeeds.",
+    "Three steps. Done when step 3 exits 0.",
     "",
-    "Step 1 — Inspect the git diff (required)",
-    `Changes since the last applied revision (${lastAppliedId ?? "none"}). Run and read the full output:`,
+    "Step 1 — Inspect the diff",
+    "Run and read:",
     `git diff ${diffFrom}..HEAD`,
     `(${diffFromLabel})`,
+    lastAppliedId ? `Last applied Paire revision: ${lastAppliedId}` : "Last applied Paire revision: none",
     "",
-    "Step 2 — Read the full packet (required)",
-    "Analyze this packet:",
-    "Read the entire exported packet JSON at this path (use the preview below only as a shortcut):",
-    packet.path,
+    "Step 2 — Edit the review draft IN PLACE (do not create a new file)",
+    packet.draftPath,
+    "The draft is pre-filled: header IDs, every changed file under \"files\", and all prior",
+    "claims (agentStatus \"unchanged\") are already correct.",
+    "- Cover every \"files\" entry: reference it from a claim's evidences, or set its",
+    "  disposition to \"acknowledged\" with a reason (mechanical/generated churn only).",
+    "- Leave still-accurate prior claims exactly as listed. Never delete a prior claim.",
+    "- Add new claims following context.claimTemplate; copy line numbers from the N|",
+    "  prefixes in context.touchedSnippets. Follow the \"instructions\" in the draft.",
     "",
-    "Step 3 — Write the review update JSON (required)",
-    "Write the review update JSON to:",
-    packet.resultPath,
-    "Follow packet.rules and resultSchema exactly.",
-    "",
-    "Step 4 — Apply the review (required)",
-    "Then run:",
-    `paire review --apply ${packet.resultPath}`,
-    "Do not consider the review done until this command exits 0.",
-    "",
-    "Step 5 — Open the Review UI (required)",
-    "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
-    "",
-    "Before you stop, confirm every item:",
-    "- git diff inspected",
-    "- full packet read from the exported path",
-    `- JSON written to ${packet.resultPath}`,
-    "- paire review --apply succeeded",
-    "- Review UI opened when a URL was printed",
-    "",
-    "Packet preview:",
+    "Step 3 — Apply",
+    `paire review --apply ${packet.draftPath}`,
+    "On failure it prints PAIRE_APPLY_REJECTED with a JSON list of exact fixes — edit the",
+    "draft and re-run. On success the Review UI opens automatically.",
     packet.preview,
     "",
   ].join("\n");
@@ -1045,8 +1231,8 @@ function dirtyWorktreeMessage(git: GitState) {
     "",
     "Step 3 — Follow every printed instruction through apply (required)",
     AGENT_DIRTY_WORKTREE_ONE_LINER,
-    "When paire review prints Action required, complete all five steps through paire review --apply.",
-    "Do not stop until apply succeeds and you opened the Review UI URL when printed.",
+    "When paire review prints Action required, complete all three steps through paire review --apply.",
+    "Do not stop until apply succeeds; the Review UI opens automatically on success.",
     "",
     `Current branch: ${git.branch}`,
     `Current HEAD: ${git.head}`,
@@ -1562,7 +1748,7 @@ function getClaimsForThread(
   threadDbId: string,
 ) {
   return db
-    .query<AgentClaim, [string]>(
+    .query<StoredAgentClaim, [string]>(
       "select id, threadId, title, description, beforeText as before, afterText as after, agentStatus, importance, humanStatus, updatedAt from claims where threadId = ? order by updatedAt desc, rowid desc",
     )
     .all(threadDbId)
@@ -1586,8 +1772,8 @@ function getClaimsForThread(
 }
 
 function compareClaimsByImportance(
-  left: Pick<AgentClaim, "importance">,
-  right: Pick<AgentClaim, "importance">,
+  left: Pick<StoredAgentClaim, "importance">,
+  right: Pick<StoredAgentClaim, "importance">,
 ) {
   return (
     CLAIM_IMPORTANCE_RANK[left.importance] -
@@ -1596,8 +1782,8 @@ function compareClaimsByImportance(
 }
 
 function compareThreadsByImportance(
-  left: { claims: Array<Pick<AgentClaim, "importance">> },
-  right: { claims: Array<Pick<AgentClaim, "importance">> },
+  left: { claims: Array<Pick<StoredAgentClaim, "importance">> },
+  right: { claims: Array<Pick<StoredAgentClaim, "importance">> },
 ) {
   const leftCounts = claimImportanceCounts(left.claims);
   const rightCounts = claimImportanceCounts(right.claims);
@@ -1608,7 +1794,7 @@ function compareThreadsByImportance(
   return 0;
 }
 
-function claimImportanceCounts(claims: Array<Pick<AgentClaim, "importance">>) {
+function claimImportanceCounts(claims: Array<Pick<StoredAgentClaim, "importance">>) {
   const counts: Record<ClaimImportance, number> = {
     critical: 0,
     important: 0,
@@ -1713,7 +1899,22 @@ function migrate(db: Database) {
       startLine integer not null,
       endLine integer not null,
       symbol text,
-      fingerprint text
+      fingerprint text,
+      changeText text
+    );
+    create table if not exists claim_revisions (
+      id text primary key,
+      claimId text not null,
+      sessionId text not null,
+      revisionId text not null,
+      agentStatus text not null,
+      title text not null,
+      description text not null default '',
+      beforeText text,
+      afterText text,
+      importance text not null,
+      evidencesJson text not null,
+      createdAt integer not null
     );
     create table if not exists human_review_marks (
       id text primary key,
@@ -1728,160 +1929,6 @@ function migrate(db: Database) {
       path text not null,
       createdAt integer not null
     );
-  `);
-  addNullableColumn(db, "sessions", "projectKey", "text");
-  addNullableColumn(db, "revisions", "packetJson", "text");
-  addNullableColumn(db, "revisions", "packetExportPath", "text");
-  addNullableColumn(db, "revisions", "resultPath", "text");
-  addNullableColumn(db, "revisions", "totalDiffArtifactId", "text");
-  addNullableColumn(db, "claims", "title", "text");
-  addNullableColumn(db, "claims", "description", "text");
-  addNullableColumn(db, "claims", "beforeText", "text");
-  addNullableColumn(db, "claims", "afterText", "text");
-  addNullableColumn(db, "claims", "importance", "text not null default 'minor'");
-  addNullableColumn(db, "claim_evidences", "changeText", "text");
-  migrateClaimsDropLegacyTextColumn(db);
-  dropColumnIfExists(db, "claim_evidences", "beforeText");
-  dropColumnIfExists(db, "claim_evidences", "afterText");
-  dropColumnIfExists(db, "change_threads", "status");
-  migrateSessionsToBranchScope(db);
-  scopeReviewIds(db);
-}
-
-function migrateSessionsToBranchScope(db: Database) {
-  const table = db
-    .query<{ sql: string }, []>(
-      "select sql from sqlite_master where type = 'table' and name = 'sessions'",
-    )
-    .get();
-  if (!/\brepoRoot\s+text\s+not\s+null\s+unique\b/i.test(table?.sql ?? "")) {
-    return;
-  }
-
-  db.exec(`
-    create table sessions_next (
-      id text primary key,
-      repoRoot text not null,
-      projectKey text not null,
-      goal text,
-      baseRef text not null,
-      baseCommit text not null,
-      branch text not null,
-      upstream text,
-      createdAt integer not null,
-      updatedAt integer not null,
-      unique(repoRoot, branch)
-    );
-    insert into sessions_next (id, repoRoot, projectKey, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt)
-      select id, repoRoot, projectKey, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt
-        from sessions;
-    drop table sessions;
-    alter table sessions_next rename to sessions;
-  `);
-}
-
-function addNullableColumn(
-  db: Database,
-  table: string,
-  column: string,
-  type: string,
-) {
-  try {
-    db.exec(`alter table ${table} add column ${column} ${type}`);
-  } catch {
-    // SQLite throws when the column already exists.
-  }
-}
-
-function tableHasColumn(db: Database, table: string, column: string) {
-  return db
-    .query<{ name: string }, []>(`pragma table_info(${table})`)
-    .all()
-    .some((row) => row.name === column);
-}
-
-function dropColumnIfExists(db: Database, table: string, column: string) {
-  if (!tableHasColumn(db, table, column)) return;
-  db.exec(`alter table ${table} drop column ${column}`);
-}
-
-function migrateClaimsDropLegacyTextColumn(db: Database) {
-  if (!tableHasColumn(db, "claims", "text")) return;
-  db.exec(`
-    create table claims_next (
-      id text primary key,
-      threadId text not null,
-      sessionId text not null,
-      title text not null,
-      description text not null default '',
-      beforeText text,
-      afterText text,
-      agentStatus text not null,
-      importance text not null default 'minor',
-      humanStatus text not null,
-      updatedAt integer not null
-    );
-    insert into claims_next (
-      id, threadId, sessionId, title, description, beforeText, afterText,
-      agentStatus, importance, humanStatus, updatedAt
-    )
-    select
-      id,
-      threadId,
-      sessionId,
-      coalesce(nullif(trim(title), ''), text),
-      coalesce(description, ''),
-      beforeText,
-      afterText,
-      agentStatus,
-      'minor',
-      humanStatus,
-      updatedAt
-    from claims;
-    drop table claims;
-    alter table claims_next rename to claims;
-  `);
-}
-
-function scopeReviewIds(db: Database) {
-  db.exec(`
-    update claim_evidences
-       set claimId = (
-         select claims.sessionId || ':' || claim_evidences.claimId
-           from claims
-          where claims.id = claim_evidences.claimId
-       )
-     where exists (
-         select 1
-           from claims
-          where claims.id = claim_evidences.claimId
-            and instr(claims.id, claims.sessionId || ':') != 1
-       );
-
-    update human_review_marks
-       set claimId = (
-         select claims.sessionId || ':' || human_review_marks.claimId
-           from claims
-          where claims.id = human_review_marks.claimId
-       )
-     where exists (
-         select 1
-           from claims
-          where claims.id = human_review_marks.claimId
-            and instr(claims.id, claims.sessionId || ':') != 1
-       );
-
-    update claims
-       set threadId = sessionId || ':' || threadId
-     where instr(threadId, sessionId || ':') != 1;
-
-    update claims
-       set id = sessionId || ':' || id
-     where instr(id, sessionId || ':') != 1;
-
-    update change_threads
-       set id = sessionId || ':' || id
-     where instr(id, sessionId || ':') != 1;
   `);
 }
 
@@ -1951,14 +1998,59 @@ function reviewBurden(db: Database, sessionId: string) {
   return rows.map((row) => `${row.count} ${row.agentStatus}`).join(", ");
 }
 
+function appendClaimRevision(
+  db: Database,
+  snapshot: {
+    claimId: string;
+    sessionId: string;
+    revisionId: string;
+    agentStatus: ClaimStatus;
+    title: string;
+    description: string;
+    beforeText: string | null;
+    afterText: string | null;
+    importance: ClaimImportance;
+    evidences: AgentEvidence[];
+    createdAt: number;
+  },
+) {
+  db.prepare(
+    `insert into claim_revisions (
+      id, claimId, sessionId, revisionId, agentStatus, title, description,
+      beforeText, afterText, importance, evidencesJson, createdAt
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    `cr_${crypto.randomUUID()}`,
+    snapshot.claimId,
+    snapshot.sessionId,
+    snapshot.revisionId,
+    snapshot.agentStatus,
+    snapshot.title,
+    snapshot.description,
+    snapshot.beforeText,
+    snapshot.afterText,
+    snapshot.importance,
+    JSON.stringify(snapshot.evidences),
+    snapshot.createdAt,
+  );
+}
+
+export function getClaimHistory(db: Database, claimId: string) {
+  return db
+    .query<ClaimRevisionRow, [string]>(
+      "select * from claim_revisions where claimId = ? order by createdAt asc, rowid asc",
+    )
+    .all(claimId);
+}
+
 function getActiveClaims(db: Database, sessionId: string) {
   const rows = db
-    .query<AgentClaim & { threadTitle: string }, [string]>(
+    .query<StoredAgentClaim & { threadTitle: string }, [string]>(
       `select claims.id, claims.threadId, claims.title, claims.description,
               claims.beforeText as before, claims.afterText as after,
               claims.agentStatus, claims.importance, claims.humanStatus, change_threads.title as threadTitle
        from claims join change_threads on change_threads.id = claims.threadId
-       where claims.sessionId = ? and claims.agentStatus != 'superseded'
+       where claims.sessionId = ? and claims.agentStatus not in ('superseded', 'invalidated')
        order by change_threads.updatedAt desc, change_threads.rowid desc, claims.updatedAt desc, claims.rowid desc`,
     )
     .all(sessionId);
@@ -2012,149 +2104,6 @@ function publicDbId(sessionId: string, dbId: string) {
   return dbId.startsWith(prefix) ? dbId.slice(prefix.length) : dbId;
 }
 
-function validateApplyPayload(value: unknown): AgentApplyPayload {
-  if (!value || typeof value !== "object")
-    throw new Error("Agent result must be an object.");
-  const payload = value as AgentApplyPayload;
-  for (const key of ["packetId", "sessionId", "revisionId", "gitFingerprint"]) {
-    if (typeof payload[key as keyof AgentApplyPayload] !== "string") {
-      throw new Error(`Agent result is missing ${key}.`);
-    }
-  }
-  if (!Array.isArray(payload.threads))
-    throw new Error("Agent result threads must be an array.");
-  if (payload.threads.length > MAX_THREADS_PER_APPLY) {
-    throw new Error(`Agent result has too many threads; max ${MAX_THREADS_PER_APPLY}.`);
-  }
-  for (const thread of payload.threads) {
-    validatePublicId(thread.id, "Thread id");
-    validateTextField(thread.title, "Thread title", MAX_TITLE_CHARS);
-    if (thread.summary != null) {
-      validateOptionalTextField(thread.summary, "Thread summary", MAX_SUMMARY_CHARS);
-    }
-    if (!Array.isArray(thread.claims)) {
-      throw new Error("Each thread needs id, title, and claims.");
-    }
-    if (thread.claims.length > MAX_CLAIMS_PER_THREAD) {
-      throw new Error(`Thread has too many claims; max ${MAX_CLAIMS_PER_THREAD}.`);
-    }
-    for (const claim of thread.claims) {
-      validatePublicId(claim.id, "Claim id");
-      validatePublicId(claim.threadId, "Claim threadId");
-      if ("text" in claim && (claim as { text?: unknown }).text != null) {
-        throw new Error("Claim text is no longer supported; use title and description.");
-      }
-      validateTextField(claim.title, "Claim title", MAX_TITLE_CHARS);
-      if (claim.description != null) {
-        validateOptionalTextField(
-          claim.description,
-          "Claim description",
-          MAX_DESCRIPTION_CHARS,
-        );
-      }
-      if (!VALID_AGENT_STATUSES.has(claim.agentStatus))
-        throw new Error(`Invalid agentStatus: ${claim.agentStatus}`);
-      if (!VALID_CLAIM_IMPORTANCES.has(claim.importance)) {
-        throw new Error(`Invalid importance: ${claim.importance}`);
-      }
-      if (claim.humanStatus && !VALID_HUMAN_STATUSES.has(claim.humanStatus)) {
-        throw new Error(`Invalid humanStatus: ${claim.humanStatus}`);
-      }
-      if (!Array.isArray(claim.evidences))
-        throw new Error("Each claim needs evidences[].");
-      if (claim.before != null) {
-        validateOptionalTextField(claim.before, "Claim before", MAX_BEHAVIOR_COPY_CHARS);
-      }
-      if (claim.after != null) {
-        validateOptionalTextField(claim.after, "Claim after", MAX_BEHAVIOR_COPY_CHARS);
-      }
-      if (claim.evidences.length > MAX_EVIDENCES_PER_CLAIM) {
-        throw new Error(
-          `Claim has too many evidences; max ${MAX_EVIDENCES_PER_CLAIM}.`,
-        );
-      }
-      for (const evidence of claim.evidences) {
-        validateEvidencePath(evidence.filePath);
-        validateEvidenceRange(evidence.startLine, evidence.endLine);
-        if ("before" in evidence || "after" in evidence) {
-          throw new Error(
-            "Evidence before/after are no longer supported; set claim before/after and evidence change.",
-          );
-        }
-        validateTextField(
-          evidence.change,
-          "Evidence change",
-          MAX_EVIDENCE_CHANGE_CHARS,
-        );
-      }
-    }
-  }
-  return normalizeApplyPayload(payload);
-}
-
-function validatePublicId(value: unknown, label: string) {
-  validateTextField(value, label, MAX_ID_CHARS);
-  if (!/^[a-zA-Z0-9._:-]+$/.test(value as string)) {
-    throw new Error(`${label} contains unsupported characters.`);
-  }
-}
-
-function validateTextField(value: unknown, label: string, maxLength: number) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${label} must be a non-empty string.`);
-  }
-  if (value.length > maxLength) {
-    throw new Error(`${label} is too long; max ${maxLength} characters.`);
-  }
-}
-
-function validateOptionalTextField(
-  value: unknown,
-  label: string,
-  maxLength: number,
-) {
-  if (typeof value !== "string") {
-    throw new Error(`${label} must be a string when provided.`);
-  }
-  if (value.length > maxLength) {
-    throw new Error(`${label} is too long; max ${maxLength} characters.`);
-  }
-}
-
-function validateEvidencePath(value: unknown) {
-  validateTextField(value, "Evidence filePath", MAX_FILE_PATH_CHARS);
-  const path = value as string;
-  if (
-    path.startsWith("/") ||
-    path.startsWith("\\") ||
-    /^[a-zA-Z]:[\\/]/.test(path) ||
-    path.split(/[\\/]+/).some((part) => part === "..")
-  ) {
-    throw new Error("Evidence filePath must be a relative repository path.");
-  }
-}
-
-function validateEvidenceRange(startLine: unknown, endLine: unknown) {
-  if (
-    typeof startLine !== "number" ||
-    typeof endLine !== "number" ||
-    !Number.isInteger(startLine) ||
-    !Number.isInteger(endLine)
-  ) {
-    throw new Error("Evidence line range is invalid.");
-  }
-  const start = startLine;
-  const end = endLine;
-  if (start < 1 || end < start || end > MAX_EVIDENCE_LINE) {
-    throw new Error("Evidence line range is invalid.");
-  }
-  if (end - start + 1 > MAX_EVIDENCE_SPAN_LINES) {
-    throw new Error(
-      `Evidence line range is too large; max ${MAX_EVIDENCE_SPAN_LINES} lines.`,
-    );
-  }
-}
-
 function normalizeNullableCopy(value: unknown): string | null {
   if (value == null) return null;
   if (typeof value !== "string") return null;
@@ -2162,28 +2111,44 @@ function normalizeNullableCopy(value: unknown): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
-function normalizeApplyPayload(payload: AgentApplyPayload): AgentApplyPayload {
+function requiredClaimCopy(claim: AgentClaim) {
+  if (!claim.title) {
+    throw new Error(`Validated claim ${claim.id} is missing title.`);
+  }
   return {
-    ...payload,
-    threads: payload.threads.map((thread) => ({
-      ...thread,
-      claims: thread.claims.map((claim) => ({
-        ...claim,
-        before: normalizeNullableCopy(claim.before),
-        after: normalizeNullableCopy(claim.after),
-        evidences: claim.evidences.map((evidence) => ({
-          ...evidence,
-          change: evidence.change.trim(),
-        })),
-      })),
-    })),
+    title: claim.title,
+    description: claim.description,
   };
 }
 
+function finalClaimCopy(
+  claim: AgentClaim,
+  existingClaim: { title: string; description: string } | null | undefined,
+  preserveClaimCopy: boolean,
+) {
+  if (preserveClaimCopy && existingClaim) {
+    return {
+      title: existingClaim.title,
+      description: existingClaim.description,
+    };
+  }
+  return normalizeClaimCopy(requiredClaimCopy(claim));
+}
+
+function requiredImportance(claim: AgentClaim) {
+  if (!claim.importance) {
+    throw new Error(`Validated claim ${claim.id} is missing importance.`);
+  }
+  return claim.importance;
+}
+
 function normalizeClaimCopy(claim: Pick<AgentClaim, "title" | "description">) {
+  if (!claim.title) {
+    throw new Error("Validated claim copy is missing title.");
+  }
   return {
     title: claim.title.trim(),
-    description: claim.description?.trim() ?? "",
+    description: claim.description ? claim.description.trim() : "",
   };
 }
 
@@ -2362,9 +2327,9 @@ function touchedSnippets(diff: string): TouchedSnippet[] {
               hunk.additionStart,
               hunk.deletionStart,
             );
-        const text = summarize
-          ? `[summarized: ${file.name} is too large or generated; inspect the artifact diff path instead]`
-          : annotated!.annotatedText.slice(0, MAX_INLINE_SNIPPET_CHARS);
+        const text = annotated
+          ? annotated.annotatedText.slice(0, MAX_INLINE_SNIPPET_CHARS)
+          : `[summarized: ${file.name} is too large or generated; inspect the artifact diff path instead]`;
         total += text.length;
         snippets.push({
           filePath: file.name,
@@ -2375,9 +2340,7 @@ function touchedSnippets(diff: string): TouchedSnippet[] {
           ),
           hunkHeader: hunk.hunkSpecs,
           text,
-          addedRanges: summarize
-            ? undefined
-            : addedLineRanges(annotated!.lines),
+          addedRanges: annotated ? addedLineRanges(annotated.lines) : undefined,
           summarized: summarize,
         });
       }
@@ -2479,7 +2442,7 @@ function helpText() {
     "",
     "Commands:",
     "  start --base <ref> --goal <text>",
-    "  review [--apply <file> | --stdin] [--no-open]",
+    "  review [--apply <file> | --check <file> | --stdin] [--no-open]",
     "  it",
     "  status",
     "  sync",

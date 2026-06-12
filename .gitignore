@@ -5,6 +5,7 @@ node_modules
 out
 dist
 *.tgz
+evals/results/*-local/
 
 # code coverage
 coverage

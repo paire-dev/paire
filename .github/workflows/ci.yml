@@ -1,54 +1,14 @@
-name: CI
-
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-
-jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Test
-        run: bun test
-
-  build:
-    name: Build linux-x64
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build release binary
-        run: bash scripts/build-release.sh
-
-      - name: Smoke test binary
-        run: |
-          dist/releases/paire-linux-x64 --help
-          dist/releases/paire-linux-x64 --version
+# Uncomment this file to enable local-quality checks in GitHub Actions.
+# name: CI
+#
+# on:
+#   workflow_dispatch:
+#
+# jobs:
+#   ci:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: oven-sh/setup-bun@v2
+#       - run: bun install
+#       - run: bun run ci

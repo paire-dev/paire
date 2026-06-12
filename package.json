@@ -13,7 +13,8 @@
     "release:local": "bash scripts/build-release.sh",
     "smoke": "bun scripts/smoke-cli.ts",
     "test": "bun test",
-    "typecheck": "bun x tsc -p jsconfig.json --noEmit"
+    "typecheck": "bun x tsc -p jsconfig.json --noEmit",
+    "ci": "bun run typecheck && bun test && bun run smoke"
   },
   "keywords": [
     "cli",

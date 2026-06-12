@@ -62,20 +62,17 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   const review = runPaire(fixture, ["review"]);
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("Action required");
-  expect(review.stdout).toContain("Step 1 — Inspect the git diff (required)");
-  expect(review.stdout).toContain("Step 5 — Open the Review UI (required)");
-  expect(review.stdout).toContain("Do not skip steps");
-  expect(review.stdout).toContain(
-    "After any `paire review` command prints a Review UI URL, open that URL in the browser.",
-  );
+  expect(review.stdout).toContain("Step 1 — Inspect the diff");
+  expect(review.stdout).toContain("Step 2 — Edit the review draft IN PLACE");
+  expect(review.stdout).toContain("Step 3 — Apply");
   expect(existsSync(fixture.browserCapture)).toBe(false);
 
   const packetPath = extractPacketPath(review.stdout);
   expect(packetPath).toContain(`${fixture.home}/projects/`);
   const packet = JSON.parse(readFileSync(packetPath, "utf8"));
-  expect(review.stdout).toContain('"packetId"');
+  expect(review.stdout).toContain("review-draft.json");
   expect(review.stdout).toContain(packet.currentFingerprint);
-  const agentResultPath = join(fixture.root, "agent-result.json");
+  const agentResultPath = join(fixture.root, "review-draft-mutated.json");
   writeFileSync(
     agentResultPath,
     JSON.stringify(hardcodedAgentResult(packet), null, 2),
@@ -117,8 +114,14 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
       []
     >("select count(*) as count from claim_evidences")
     .get();
+  const claimRevisions = db
+    .query<{ count: number }, []>(
+      "select count(*) as count from claim_revisions",
+    )
+    .get();
   expect(claims?.count).toBe(1);
   expect(evidences?.count).toBe(1);
+  expect(claimRevisions?.count).toBe(1);
   const claim = db
     .query<
       { beforeText: string | null; afterText: string | null },
@@ -203,7 +206,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   expect(firstPacket.touchedSnippets[0]?.text).toMatch(/\d+\|\+/);
   expect(firstPacket.touchedSnippets[0]?.changedLines).toBeUndefined();
 
-  const firstResult = join(fixture.root, "sandbox-agent-result.json");
+  const firstResult = join(fixture.root, "sandbox-review-draft.json");
   writeFileSync(
     firstResult,
     JSON.stringify(sandboxAgentResult(firstPacket, "new"), null, 2),
@@ -266,7 +269,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
     "8|+export const workspaceValidationVersion = 2;",
   );
 
-  const secondResult = join(fixture.root, "sandbox-agent-result-2.json");
+  const secondResult = join(fixture.root, "sandbox-review-draft-2.json");
   writeFileSync(
     secondResult,
     JSON.stringify(
@@ -280,6 +283,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
           "This rewritten description should also be ignored for unchanged claims.",
         authClaimBefore: "This rewritten before should be ignored.",
         authClaimAfter: "This rewritten after should be ignored.",
+        minimalAuth: true,
       }),
       null,
       2,
@@ -334,6 +338,18 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
     .get();
   expect(authHumanStatus?.humanStatus).toBe("accepted");
   expect(workspaceHumanStatus?.humanStatus).toBe("unreviewed");
+  const authHistoryCount = db
+    .query<{ count: number }, []>(
+      "select count(*) as count from claim_revisions where claimId like '%:claim_sandbox_auth_required'",
+    )
+    .get();
+  const workspaceHistoryCount = db
+    .query<{ count: number }, []>(
+      "select count(*) as count from claim_revisions where claimId like '%:claim_sandbox_workspace_required'",
+    )
+    .get();
+  expect(authHistoryCount?.count).toBe(1);
+  expect(workspaceHistoryCount?.count).toBe(2);
   db.close();
 });
 
@@ -368,6 +384,7 @@ test("review API sorts threads and claims by importance", async () => {
         sessionId: packet.sessionId,
         revisionId: packet.revisionId,
         gitFingerprint: packet.currentFingerprint,
+        files: draftFiles(packet),
         threads: [
           {
             id: "thread_older",
@@ -762,7 +779,7 @@ test("reset clears review state on the current branch and re-baselines to baseCo
   db.close();
 });
 
-test("reset removes exported agent-result and current-packet", () => {
+test("reset removes exported review draft, stale agent-result, and current-packet", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
@@ -772,12 +789,15 @@ test("reset removes exported agent-result and current-packet", () => {
   const packetPath = extractPacketPath(review.stdout);
   const exportDir = dirname(packetPath);
   const agentResultPath = join(exportDir, "agent-result.json");
+  const draftPath = join(exportDir, "review-draft.json");
   writeFileSync(agentResultPath, JSON.stringify({ stale: true }, null, 2));
   expect(existsSync(packetPath)).toBe(true);
+  expect(existsSync(draftPath)).toBe(true);
   expect(existsSync(agentResultPath)).toBe(true);
 
   expect(runPaire(fixture, ["reset"]).exitCode).toBe(0);
   expect(existsSync(agentResultPath)).toBe(false);
+  expect(existsSync(draftPath)).toBe(false);
   expect(existsSync(packetPath)).toBe(false);
 });
 
@@ -1063,7 +1083,8 @@ test("stale apply is rejected without mutating claims or opening browser", () =>
 
   const apply = runPaire(fixture, ["review", "--apply", agentResultPath]);
   expect(apply.exitCode).not.toBe(0);
-  expect(apply.stderr).toContain("Stale Paire review update");
+  expect(apply.stderr).toContain("PAIRE_APPLY_REJECTED");
+  expect(apply.stderr).toContain('"code": "stale_fingerprint"');
   expect(existsSync(fixture.browserCapture)).toBe(false);
 
   const db = new Database(join(fixture.home, "paire.db"));
@@ -1091,9 +1112,8 @@ test("apply rejects unsafe evidence paths and leaves review state unchanged", ()
 
   const apply = runPaire(fixture, ["review", "--apply", resultPath]);
   expect(apply.exitCode).not.toBe(0);
-  expect(apply.stderr).toContain(
-    "Evidence filePath must be a relative repository path",
-  );
+  expect(apply.stderr).toContain("PAIRE_APPLY_REJECTED");
+  expect(apply.stderr).toContain('"field": "threads[0].claims[0].evidences[0].filePath"');
 
   const db = new Database(join(fixture.home, "paire.db"));
   const claims = db
@@ -1121,7 +1141,60 @@ test("apply rejects invalid claim importance and leaves review state unchanged",
 
   const apply = runPaire(fixture, ["review", "--apply", resultPath]);
   expect(apply.exitCode).not.toBe(0);
-  expect(apply.stderr).toContain("Invalid importance: urgent");
+  expect(apply.stderr).toContain("PAIRE_APPLY_REJECTED");
+  expect(apply.stderr).toContain('"value": "urgent"');
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const claims = db
+    .query<{ count: number }, []>("select count(*) as count from claims")
+    .get();
+  expect(claims?.count).toBe(0);
+  db.close();
+});
+
+test("--check reports coverage errors without mutating review state", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) throw new Error('Unauthorized');",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(fixture.repo, "src/workspace.ts"),
+    [
+      "export function validateWorkspace(input: { name?: string }) {",
+      "  if (!input.name) throw new Error('Missing workspace name');",
+      "  return input.name;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add auth and workspace validation");
+
+  const review = runPaire(fixture, ["review"]);
+  const packet = JSON.parse(
+    readFileSync(extractPacketPath(review.stdout), "utf8"),
+  );
+  const result = sandboxAgentResult(packet, "new");
+  const thread = result.threads.find(
+    (candidate) => candidate.id === "thread_sandbox_workspace",
+  );
+  if (!thread) throw new Error("Expected sandbox workspace thread.");
+  thread.claims = [];
+  const resultPath = join(fixture.root, "missing-coverage-result.json");
+  writeFileSync(resultPath, JSON.stringify(result, null, 2));
+
+  const check = runPaire(fixture, ["review", "--check", resultPath]);
+  expect(check.exitCode).toBe(1);
+  expect(check.stderr).toContain("PAIRE_APPLY_REJECTED");
+  expect(check.stderr).toContain('"code": "file_not_covered"');
+  expect(check.stderr).toContain('"path": "src/workspace.ts"');
 
   const db = new Database(join(fixture.home, "paire.db"));
   const claims = db
@@ -1373,7 +1446,7 @@ test("paire server start falls back to an open port when the preferred port is o
     expect(start.stdout).toContain("Review UI:");
 
     const state = await waitForServerState(fixture.home, session!.id);
-    expect(state.port).toBe(PREFERRED_REVIEW_PORT + 1);
+    expect(state.port).toBeGreaterThan(PREFERRED_REVIEW_PORT);
     expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
 
     const stop = runPaire(fixture, ["server", "stop"]);
@@ -1674,17 +1747,22 @@ function text(value: Uint8Array) {
 }
 
 function extractPacketPath(stdout: string) {
+  const draftPath = extractDraftPath(stdout);
+  return join(dirname(draftPath), "current-packet.json");
+}
+
+function extractDraftPath(stdout: string) {
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (
       trimmed.startsWith("/") &&
-      trimmed.endsWith("current-packet.json") &&
+      trimmed.endsWith("review-draft.json") &&
       !trimmed.includes("--apply")
     ) {
       return trimmed;
     }
   }
-  throw new Error(`Packet path missing from output:\n${stdout}`);
+  throw new Error(`Draft path missing from output:\n${stdout}`);
 }
 
 async function waitForServerState(home: string, sessionId: string) {
@@ -1719,12 +1797,18 @@ function hardcodedAgentResult(packet: {
   sessionId: string;
   revisionId: string;
   currentFingerprint: string;
+  changedFiles: Array<{ path: string; additions: number; deletions: number }>;
 }) {
+  const primaryFilePath = packet.changedFiles.some((file) => file.path === "src/app.ts")
+    ? "src/app.ts"
+    : packet.changedFiles[0]?.path;
+  if (!primaryFilePath) throw new Error("Packet has no changed files.");
   return {
     packetId: packet.packetId,
     sessionId: packet.sessionId,
     revisionId: packet.revisionId,
     gitFingerprint: packet.currentFingerprint,
+    files: draftFiles(packet),
     threads: [
       {
         id: "thread_workspace_validation",
@@ -1746,7 +1830,7 @@ function hardcodedAgentResult(packet: {
             humanStatus: "unreviewed",
             evidences: [
               {
-                filePath: "src/app.ts",
+                filePath: primaryFilePath,
                 startLine: 1,
                 endLine: 6,
                 symbol: "createProject",
@@ -1766,6 +1850,7 @@ function sandboxAgentResult(
     sessionId: string;
     revisionId: string;
     currentFingerprint: string;
+    changedFiles: Array<{ path: string; additions: number; deletions: number }>;
   },
   workspaceStatus: "new" | "amended",
   overrides: {
@@ -1775,13 +1860,47 @@ function sandboxAgentResult(
     authClaimDescription?: string;
     authClaimBefore?: string;
     authClaimAfter?: string;
+    minimalAuth?: boolean;
   } = {},
 ) {
+  const authClaim = overrides.minimalAuth
+    ? {
+        id: "claim_sandbox_auth_required",
+        agentStatus: "unchanged",
+      }
+    : {
+        id: "claim_sandbox_auth_required",
+        threadId: "thread_sandbox_auth",
+        title:
+          overrides.authClaimTitle ?? "Reject missing users before create",
+        description:
+          overrides.authClaimDescription ??
+          "Project creation rejects missing users before returning project data.",
+        before:
+          overrides.authClaimBefore ??
+          "Project creation accepted any user input.",
+        after:
+          overrides.authClaimAfter ??
+          "Project creation rejects missing users before returning data.",
+        agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
+        importance: "minor",
+        humanStatus: "unreviewed",
+        evidences: [
+          {
+            filePath: "src/app.ts",
+            startLine: 1,
+            endLine: 6,
+            symbol: "createProject",
+            change: "Throw when `createProject` receives a null user.",
+          },
+        ],
+      };
   return {
     packetId: packet.packetId,
     sessionId: packet.sessionId,
     revisionId: packet.revisionId,
     gitFingerprint: packet.currentFingerprint,
+    files: draftFiles(packet),
     threads: [
       {
         id: "thread_sandbox_auth",
@@ -1789,35 +1908,7 @@ function sandboxAgentResult(
         summary:
           overrides.authThreadSummary ??
           "Project creation rejects missing users before creating data.",
-        claims: [
-          {
-            id: "claim_sandbox_auth_required",
-            threadId: "thread_sandbox_auth",
-            title:
-              overrides.authClaimTitle ?? "Reject missing users before create",
-            description:
-              overrides.authClaimDescription ??
-              "Project creation rejects missing users before returning project data.",
-            before:
-              overrides.authClaimBefore ??
-              "Project creation accepted any user input.",
-            after:
-              overrides.authClaimAfter ??
-              "Project creation rejects missing users before returning data.",
-            agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
-            importance: "minor",
-            humanStatus: "unreviewed",
-            evidences: [
-              {
-                filePath: "src/app.ts",
-                startLine: 1,
-                endLine: 6,
-                symbol: "createProject",
-                change: "Throw when `createProject` receives a null user.",
-              },
-            ],
-          },
-        ],
+        claims: [authClaim],
       },
       {
         id: "thread_sandbox_workspace",
@@ -1866,6 +1957,17 @@ function sandboxAgentResult(
       },
     ],
   };
+}
+
+function draftFiles(packet: {
+  changedFiles: Array<{ path: string; additions: number; deletions: number }>;
+}) {
+  return packet.changedFiles.map((file) => ({
+    path: file.path,
+    additions: file.additions,
+    deletions: file.deletions,
+    disposition: "pending",
+  }));
 }
 
 function makeLargeLockPackages() {

@@ -1,0 +1,8 @@
+{
+  "name": "paire-evals",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "ai": "^5.0.0"
+  }
+}
