@@ -71,8 +71,11 @@ paire sync
 paire reset
 paire server start [--no-open]
 paire server stop
+paire upgrade [--force]
 paire version
 ```
+
+`paire upgrade` reinstalls the latest release (re-running the install script). `paire it` also checks once a day and prints an upgrade hint when a newer version is available; set `PAIRE_NO_UPGRADE_CHECK=1` to disable that check.
 
 ## Local State
 

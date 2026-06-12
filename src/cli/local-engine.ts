@@ -34,6 +34,12 @@ import {
   installAgentInstructions,
 } from "./install-agent-instructions";
 import { PAIRE_VERSION } from "./version";
+import {
+  PAIRE_INSTALL_PIPELINE,
+  getLatestVersionCached,
+  upgradeAvailable,
+  upgradeNotice,
+} from "./upgrade";
 import reviewApp from "../local-app/index.html";
 
 export type CliOptions = {
@@ -228,6 +234,8 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
       case "install":
         installCommand(ctx);
         return 0;
+      case "upgrade":
+        return await upgradeCommand(rest, ctx);
       case "version":
       case "--version":
       case "-v":
@@ -417,6 +425,64 @@ async function itCommand(args: string[], ctx: Context) {
   }
   const open = parseFlags(args).flags.has("open");
   await reviewCommand(open ? ["--open"] : [], ctx);
+  await maybePrintUpgradeNotice(ctx);
+}
+
+function upgradeCachePath(ctx: Context) {
+  return join(ctx.paireHome, "upgrade-check.json");
+}
+
+/**
+ * Print a one-line upgrade hint at the end of `paire it` when a newer release
+ * exists. Best effort: cached, short-timeout, and never fails the command.
+ * Opt out with PAIRE_NO_UPGRADE_CHECK=1.
+ */
+async function maybePrintUpgradeNotice(ctx: Context) {
+  if (ctx.env.PAIRE_NO_UPGRADE_CHECK === "1") return;
+  // Dev builds never report an upgrade, so skip the network check entirely.
+  if (PAIRE_VERSION === "dev") return;
+  try {
+    const latest = await getLatestVersionCached({
+      cachePath: upgradeCachePath(ctx),
+      env: ctx.env,
+    });
+    if (upgradeAvailable(PAIRE_VERSION, latest)) {
+      ctx.stdout(`\n${upgradeNotice(latest)}`);
+    }
+  } catch {
+    // Upgrade checks are advisory; ignore any failure.
+  }
+}
+
+async function upgradeCommand(args: string[], ctx: Context): Promise<number> {
+  const parsed = parseFlags(args);
+  const force = parsed.flags.has("force");
+  const latest = await getLatestVersionCached({
+    cachePath: upgradeCachePath(ctx),
+    env: ctx.env,
+    ttlMs: 0,
+  });
+  if (latest && !force && !upgradeAvailable(PAIRE_VERSION, latest)) {
+    ctx.stdout(`paire is already up to date (${PAIRE_VERSION}).`);
+    return 0;
+  }
+  ctx.stdout(
+    latest
+      ? `Upgrading paire ${PAIRE_VERSION} -> ${latest}...`
+      : "Upgrading paire to the latest version...",
+  );
+  const result = Bun.spawnSync(["bash", "-c", PAIRE_INSTALL_PIPELINE], {
+    cwd: ctx.cwd,
+    env: ctx.env,
+    stdout: "inherit",
+    stderr: "inherit",
+    stdin: "inherit",
+  });
+  if (result.exitCode !== 0) {
+    ctx.stderr(`paire upgrade failed (exit code ${result.exitCode}).`);
+    return result.exitCode || 1;
+  }
+  return 0;
 }
 
 async function applyReviewCommand(
@@ -2816,6 +2882,7 @@ function helpText() {
     "  server start [--open]",
     "  server stop [--all]",
     "  install",
+    "  upgrade [--force]",
     "  version",
   ].join("\n");
 }
