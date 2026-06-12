@@ -21,6 +21,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
@@ -153,7 +154,13 @@ const MAX_REVIEW_PORT_ATTEMPTS = 100;
 const REVIEW_SERVER_START_TIMEOUT_MS = 5_000;
 const REVIEW_TOKEN_BYTES = 16;
 const REVIEW_TOKEN_HEADER = "x-paire-review-token";
+// Shut the shared daemon down after this long with no requests. Generous so a
+// browser tab left open after the terminal closes keeps working for a while.
+const REVIEW_IDLE_TIMEOUT_MS = 30 * 60_000;
+const REVIEW_IDLE_CHECK_MS = 60_000;
 
+// Per-session record of "where is this branch's review UI". The pid/port now
+// point at the shared daemon; many sessions share them.
 type ReviewServerState = {
   pid: number;
   port: number;
@@ -163,6 +170,22 @@ type ReviewServerState = {
   repoRoot: string;
   startedAt: number;
 };
+
+// The single shared review daemon. One per ~/.paire, bound to a fixed port.
+type ReviewDaemonState = {
+  pid: number;
+  port: number;
+  baseUrl: string;
+  adminToken: string;
+  version: string;
+  startedAt: number;
+};
+
+type ReviewRegistryEntry = { sessionId: string; repoRoot: string };
+
+type SessionResolution =
+  | { session: SessionRow }
+  | { error: string; status: number };
 const VALID_HUMAN_STATUSES = new Set(["unreviewed", "accepted"]);
 const CLAIM_IMPORTANCE_ORDER: ClaimImportance[] = [
   "critical",
@@ -211,9 +234,7 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         ctx.stdout(PAIRE_VERSION);
         return 0;
       case "_review-serve": {
-        const sessionId = rest[0];
-        if (!sessionId) throw new Error("Missing session id.");
-        await reviewServeCommand(sessionId, ctx);
+        await reviewServeCommand(ctx);
         return 0;
       }
       case "help":
@@ -819,7 +840,7 @@ async function serverStopCommand(ctx: Context) {
     return;
   }
 
-  const outcome = await stopReviewServerAtPath(reviewServerStatePath(ctx, session.id));
+  const outcome = await stopReviewSession(ctx, session);
   if (outcome === "stopped") {
     ctx.stdout("Stopped the review UI server.");
     return;
@@ -1229,7 +1250,7 @@ async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
 
   if (ctx.env.PAIRE_BROWSER_CAPTURE) {
     const token = createReviewToken();
-    const server = createReviewServer(session, ctx, token);
+    const server = serveStandaloneReviewUi(session, ctx, token);
     const url = reviewUiUrl(server.port, token);
     await ctx.openBrowser(url);
     ctx.stdout(reviewUiMessage(url));
@@ -1242,27 +1263,58 @@ async function openReviewUi(ctx: Context, session: SessionRow, _git: GitState) {
   ctx.stdout(reviewUiMessage(state.url));
 }
 
+// Ensure the shared daemon is up (spawning/upgrading as needed), register this
+// session with it, and record the per-session URL/token. The daemon resolves
+// requests back to a session via the per-session token.
 async function ensureReviewServer(
   ctx: Context,
   session: SessionRow,
 ): Promise<ReviewServerState> {
+  const daemon = await ensureReviewDaemon(ctx);
+  const token = await registerReviewSession(daemon, session);
+  const url = reviewUiUrl(daemon.port, token);
   const statePath = reviewServerStatePath(ctx, session.id);
-  const existing = readReviewServerState(statePath);
+  const state: ReviewServerState = {
+    pid: daemon.pid,
+    port: daemon.port,
+    url,
+    token,
+    sessionId: session.id,
+    repoRoot: session.repoRoot,
+    startedAt: daemon.startedAt,
+  };
+  ensurePrivateDirectory(dirname(statePath));
+  writeFileSync(statePath, JSON.stringify(state));
+  ensurePrivateFile(statePath);
+  return state;
+}
+
+async function ensureReviewDaemon(ctx: Context): Promise<ReviewDaemonState> {
+  const statePath = reviewDaemonStatePath(ctx);
+  const existing = readReviewDaemonState(statePath);
   if (
-    existing?.pid &&
-    existing.token &&
+    existing &&
     isProcessRunning(existing.pid) &&
-    (await isReviewServerAlive(existing))
+    (await isReviewDaemonAlive(existing))
   ) {
-    return existing;
+    if (existing.version === PAIRE_VERSION) {
+      return existing;
+    }
+    // Version skew: an older daemon is still running stale code. Drain it so
+    // the freshly-installed CLI serves its own code.
+    await shutdownReviewDaemon(existing);
   }
 
-  if (existing) {
-    unlinkSync(statePath);
+  if (existsSync(statePath)) {
+    try {
+      unlinkSync(statePath);
+    } catch {
+      // ignore
+    }
   }
 
-  Bun.spawn(paireCliSpawnArgs("_review-serve", session.id), {
-    cwd: session.repoRoot,
+  Bun.spawn(paireCliSpawnArgs("_review-serve"), {
+    cwd: ctx.cwd,
     env: { ...ctx.env, PAIRE_HOME: ctx.paireHome },
     stdout: "ignore",
     stderr: "ignore",
@@ -1270,14 +1322,315 @@ async function ensureReviewServer(
     detached: true,
   }).unref();
 
-  return waitForReviewServerState(statePath);
+  return waitForReviewDaemonState(statePath);
 }
 
-function createReviewServer(session: SessionRow, ctx: Context, token: string) {
+async function registerReviewSession(
+  daemon: ReviewDaemonState,
+  session: SessionRow,
+): Promise<string> {
+  const response = await fetch(new URL("/api/_internal/register", daemon.baseUrl), {
+    method: "POST",
+    headers: {
+      [REVIEW_TOKEN_HEADER]: daemon.adminToken,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ sessionId: session.id, repoRoot: session.repoRoot }),
+    signal: AbortSignal.timeout(2_000),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to register session with the review server.");
+  }
+  const data = (await response.json()) as { token?: unknown };
+  if (typeof data.token !== "string") {
+    throw new Error("Review server returned an invalid session token.");
+  }
+  return data.token;
+}
+
+// Unregister a session from the daemon and drop its per-session state file.
+// "stopped" = handed off to a live daemon; "stale" = no live daemon, cleaned
+// up the leftover file; "missing" = nothing was registered for this branch.
+async function stopReviewSession(
+  ctx: Context,
+  session: SessionRow,
+): Promise<"stopped" | "stale" | "missing"> {
+  const statePath = reviewServerStatePath(ctx, session.id);
+  if (!existsSync(statePath)) {
+    return "missing";
+  }
+
+  const state = readReviewServerState(statePath);
+  const daemon = readReviewDaemonState(reviewDaemonStatePath(ctx));
+  const daemonAlive =
+    !!daemon &&
+    isProcessRunning(daemon.pid) &&
+    (await isReviewDaemonAlive(daemon));
+
+  try {
+    unlinkSync(statePath);
+  } catch {
+    // ignore
+  }
+
+  if (state && daemon && daemonAlive) {
+    try {
+      await fetch(new URL("/api/_internal/unregister", daemon.baseUrl), {
+        method: "POST",
+        headers: {
+          [REVIEW_TOKEN_HEADER]: daemon.adminToken,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ sessionId: session.id }),
+        signal: AbortSignal.timeout(2_000),
+      });
+    } catch {
+      // daemon may have exited between checks; the file is already gone
+    }
+    return "stopped";
+  }
+
+  return "stale";
+}
+
+// The long-lived shared review daemon: one process, one fixed port, routing
+// requests to the right session by token. Exits when idle or when the last
+// session unregisters.
+async function reviewServeCommand(ctx: Context) {
+  const statePath = reviewDaemonStatePath(ctx);
+  const adminToken = createReviewToken();
+  const registry = new Map<string, ReviewRegistryEntry>();
+  const sessionTokens = new Map<string, string>();
+  rehydrateReviewRegistry(ctx, registry, sessionTokens);
+
+  let lastActivity = Date.now();
+  const touch = () => {
+    lastActivity = Date.now();
+  };
+
+  let server: ReturnType<typeof Bun.serve> | null = null;
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      server?.stop(true);
+    } catch {
+      // ignore
+    }
+    try {
+      if (existsSync(statePath)) unlinkSync(statePath);
+    } catch {
+      // ignore
+    }
+    process.exit(0);
+  };
+  // Defer so the in-flight response flushes before the process exits.
+  const queueShutdown = () => {
+    setTimeout(shutdown, 10);
+  };
+
+  const resolveSession = (request: Request): SessionResolution => {
+    touch();
+    const token = request.headers.get(REVIEW_TOKEN_HEADER);
+    const entry = token ? registry.get(token) : undefined;
+    if (!entry) {
+      return { error: "Unauthorized.", status: 401 };
+    }
+    const session = ctx.db
+      .query<SessionRow, [string]>("select * from sessions where id = ?")
+      .get(entry.sessionId);
+    if (!session) {
+      return { error: "Session not found.", status: 404 };
+    }
+    return { session };
+  };
+
+  const onRegister = async (request: Request) => {
+    touch();
+    const body = (await request.json()) as {
+      sessionId?: unknown;
+      repoRoot?: unknown;
+    };
+    if (typeof body.sessionId !== "string" || typeof body.repoRoot !== "string") {
+      return Response.json({ error: "Invalid registration." }, { status: 400 });
+    }
+    let token = sessionTokens.get(body.sessionId);
+    if (!token) {
+      token = createReviewToken();
+      sessionTokens.set(body.sessionId, token);
+    }
+    registry.set(token, { sessionId: body.sessionId, repoRoot: body.repoRoot });
+    return Response.json({ token });
+  };
+
+  const onUnregister = async (request: Request) => {
+    touch();
+    const body = (await request.json()) as { sessionId?: unknown };
+    if (typeof body.sessionId !== "string") {
+      return Response.json({ error: "Invalid request." }, { status: 400 });
+    }
+    const token = sessionTokens.get(body.sessionId);
+    if (token) {
+      registry.delete(token);
+      sessionTokens.delete(body.sessionId);
+    }
+    const empty = sessionTokens.size === 0;
+    if (empty) queueShutdown();
+    return Response.json({ ok: true, empty });
+  };
+
+  const routes = buildReviewRoutes(ctx, resolveSession, {
+    adminToken,
+    onRegister,
+    onUnregister,
+    onShutdown: () => {
+      queueShutdown();
+      return Response.json({ ok: true });
+    },
+  });
+
+  server = listenWithFallback((port) =>
+    Bun.serve({ hostname: "127.0.0.1", port, routes }),
+  );
+  const port = server.port;
+  if (port == null) {
+    throw new Error("Review UI server did not bind to a port.");
+  }
+
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      pid: process.pid,
+      port,
+      baseUrl: `http://127.0.0.1:${port}`,
+      adminToken,
+      version: PAIRE_VERSION,
+      startedAt: Date.now(),
+    } satisfies ReviewDaemonState),
+  );
+  ensurePrivateFile(statePath);
+
+  const idle = setInterval(() => {
+    if (Date.now() - lastActivity > REVIEW_IDLE_TIMEOUT_MS) {
+      shutdown();
+    }
+  }, REVIEW_IDLE_CHECK_MS);
+  idle.unref?.();
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  await new Promise(() => undefined);
+}
+
+// Repopulate the daemon's session→token registry from the per-session state
+// files written by the CLI, so browser tabs survive a daemon respawn.
+function rehydrateReviewRegistry(
+  ctx: Context,
+  registry: Map<string, ReviewRegistryEntry>,
+  sessionTokens: Map<string, string>,
+) {
+  const dir = join(ctx.paireHome, "review-servers");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const state = readReviewServerState(join(dir, name));
+    if (!state) continue;
+    registry.set(state.token, {
+      sessionId: state.sessionId,
+      repoRoot: state.repoRoot,
+    });
+    sessionTokens.set(state.sessionId, state.token);
+  }
+}
+
+type ReviewAdminRoutes = {
+  adminToken: string;
+  onRegister: (request: Request) => Promise<Response> | Response;
+  onUnregister: (request: Request) => Promise<Response> | Response;
+  onShutdown: () => Response;
+};
+
+function buildReviewRoutes(
+  ctx: Context,
+  resolveSession: (request: Request) => SessionResolution,
+  admin?: ReviewAdminRoutes,
+) {
+  const sessionRoute =
+    (
+      handler: (
+        request: Request,
+        session: SessionRow,
+        ctx: Context,
+      ) => Promise<Response> | Response,
+    ) =>
+    (request: Request) =>
+      authenticatedReviewRequest(request, resolveSession, (session) =>
+        handler(request, session, ctx),
+      );
+
+  const routes: Record<string, unknown> = {
+    "/": reviewApp,
+    "/api/review": sessionRoute(handleReviewRequest),
+    "/api/review/diff": sessionRoute(handleReviewDiffRequest),
+    "/api/claims/:claimId/evidence-diff": sessionRoute(
+      handleEvidenceDiffRequest,
+    ),
+    "/api/claims/:claimId/human-status": sessionRoute(handleHumanStatusRequest),
+    "/api/claims/:claimId/comment": sessionRoute(handleCommentRequest),
+  };
+
+  if (admin) {
+    routes["/api/_internal/ping"] = (request: Request) =>
+      adminReviewRequest(request, admin.adminToken, () =>
+        Response.json({ ok: true, version: PAIRE_VERSION }),
+      );
+    routes["/api/_internal/register"] = (request: Request) =>
+      adminReviewRequest(request, admin.adminToken, () =>
+        admin.onRegister(request),
+      );
+    routes["/api/_internal/unregister"] = (request: Request) =>
+      adminReviewRequest(request, admin.adminToken, () =>
+        admin.onUnregister(request),
+      );
+    routes["/api/_internal/shutdown"] = (request: Request) =>
+      adminReviewRequest(request, admin.adminToken, admin.onShutdown);
+  }
+
+  return routes as Bun.Serve.Routes<unknown, string>;
+}
+
+// A short-lived single-session server used only for browser-capture flows; it
+// does not register with the daemon and is stopped immediately after use.
+function serveStandaloneReviewUi(
+  session: SessionRow,
+  ctx: Context,
+  token: string,
+) {
+  const routes = buildReviewRoutes(ctx, (request) => {
+    if (request.headers.get(REVIEW_TOKEN_HEADER) !== token) {
+      return { error: "Unauthorized.", status: 401 };
+    }
+    return { session };
+  });
+  return listenWithFallback((port) =>
+    Bun.serve({ hostname: "127.0.0.1", port, routes }),
+  );
+}
+
+function listenWithFallback(
+  build: (port: number) => ReturnType<typeof Bun.serve>,
+) {
   for (let attempt = 0; attempt < MAX_REVIEW_PORT_ATTEMPTS; attempt++) {
     const port = REVIEW_PORT + attempt;
     try {
-      return serveReviewUi(session, ctx, token, port);
+      return build(port);
     } catch (error) {
       if (!isAddressInUseError(error)) {
         throw error;
@@ -1290,41 +1643,6 @@ function createReviewServer(session: SessionRow, ctx: Context, token: string) {
   );
 }
 
-function serveReviewUi(
-  session: SessionRow,
-  ctx: Context,
-  token: string,
-  port: number,
-) {
-  return Bun.serve({
-    hostname: "127.0.0.1",
-    port,
-    routes: {
-      "/": reviewApp,
-      "/api/review": (request: Request) =>
-        authenticatedReviewRequest(request, token, () =>
-          handleReviewRequest(request, session, ctx),
-        ),
-      "/api/review/diff": (request: Request) =>
-        authenticatedReviewRequest(request, token, () =>
-          handleReviewDiffRequest(request, session, ctx),
-        ),
-      "/api/claims/:claimId/evidence-diff": (request: Request) =>
-        authenticatedReviewRequest(request, token, () =>
-          handleEvidenceDiffRequest(request, session, ctx),
-        ),
-      "/api/claims/:claimId/human-status": (request: Request) =>
-        authenticatedReviewRequest(request, token, () =>
-          handleHumanStatusRequest(request, session, ctx),
-        ),
-      "/api/claims/:claimId/comment": (request: Request) =>
-        authenticatedReviewRequest(request, token, () =>
-          handleCommentRequest(request, session, ctx),
-        ),
-    },
-  });
-}
-
 function isAddressInUseError(error: unknown) {
   return (
     error instanceof Error &&
@@ -1332,55 +1650,12 @@ function isAddressInUseError(error: unknown) {
   );
 }
 
-async function reviewServeCommand(sessionId: string, ctx: Context) {
-  const session = ctx.db
-    .query<SessionRow, [string]>("select * from sessions where id = ?")
-    .get(sessionId);
-  if (!session) {
-    throw new Error(`Session not found: ${sessionId}`);
-  }
-
-  const statePath = reviewServerStatePath(ctx, sessionId);
-  ensurePrivateDirectory(dirname(statePath));
-
-  const token = createReviewToken();
-  const server = createReviewServer(session, ctx, token);
-  const port = server.port;
-  if (port == null) {
-    throw new Error("Review UI server did not bind to a port.");
-  }
-  const url = reviewUiUrl(port, token);
-  writeFileSync(
-    statePath,
-    JSON.stringify({
-      pid: process.pid,
-      port,
-      url,
-      token,
-      sessionId,
-      repoRoot: session.repoRoot,
-      startedAt: Date.now(),
-    } satisfies ReviewServerState),
-  );
-  ensurePrivateFile(statePath);
-
-  const shutdown = () => {
-    server.stop();
-    try {
-      unlinkSync(statePath);
-    } catch {
-      // ignore missing state file
-    }
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  await new Promise(() => undefined);
-}
-
 function reviewServerStatePath(ctx: Context, sessionId: string) {
   return join(ctx.paireHome, "review-servers", `${sessionId}.json`);
+}
+
+function reviewDaemonStatePath(ctx: Context) {
+  return join(ctx.paireHome, "review-server.json");
 }
 
 function readReviewServerState(path: string) {
@@ -1390,7 +1665,9 @@ function readReviewServerState(path: string) {
     if (
       typeof state.pid !== "number" ||
       typeof state.url !== "string" ||
-      typeof state.token !== "string"
+      typeof state.token !== "string" ||
+      typeof state.sessionId !== "string" ||
+      typeof state.repoRoot !== "string"
     ) {
       return null;
     }
@@ -1400,11 +1677,34 @@ function readReviewServerState(path: string) {
   }
 }
 
-async function waitForReviewServerState(path: string) {
+function readReviewDaemonState(path: string) {
+  if (!existsSync(path)) return null;
+  try {
+    const state = JSON.parse(
+      readFileSync(path, "utf8"),
+    ) as Partial<ReviewDaemonState>;
+    if (
+      typeof state.pid !== "number" ||
+      typeof state.port !== "number" ||
+      typeof state.baseUrl !== "string" ||
+      typeof state.adminToken !== "string" ||
+      typeof state.version !== "string"
+    ) {
+      return null;
+    }
+    return state as ReviewDaemonState;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForReviewDaemonState(path: string) {
   const deadline = Date.now() + REVIEW_SERVER_START_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const state = readReviewServerState(path);
-    if (state?.url) return state;
+    const state = readReviewDaemonState(path);
+    if (state && isProcessRunning(state.pid) && (await isReviewDaemonAlive(state))) {
+      return state;
+    }
     await Bun.sleep(50);
   }
   throw new Error("Review UI server failed to start.");
@@ -1419,10 +1719,12 @@ function isProcessRunning(pid: number) {
   }
 }
 
-async function isReviewServerAlive(state: Pick<ReviewServerState, "url" | "token">) {
+async function isReviewDaemonAlive(
+  state: Pick<ReviewDaemonState, "baseUrl" | "adminToken">,
+) {
   try {
-    const response = await fetch(new URL("/api/review", state.url), {
-      headers: { [REVIEW_TOKEN_HEADER]: state.token },
+    const response = await fetch(new URL("/api/_internal/ping", state.baseUrl), {
+      headers: { [REVIEW_TOKEN_HEADER]: state.adminToken },
       signal: AbortSignal.timeout(1_000),
     });
     return response.ok;
@@ -1431,59 +1733,32 @@ async function isReviewServerAlive(state: Pick<ReviewServerState, "url" | "token
   }
 }
 
-async function stopReviewServerAtPath(
-  statePath: string,
-): Promise<"stopped" | "stale" | "missing"> {
-  if (!existsSync(statePath)) {
-    return "missing";
+async function shutdownReviewDaemon(state: ReviewDaemonState) {
+  try {
+    await fetch(new URL("/api/_internal/shutdown", state.baseUrl), {
+      method: "POST",
+      headers: { [REVIEW_TOKEN_HEADER]: state.adminToken },
+      signal: AbortSignal.timeout(2_000),
+    });
+  } catch {
+    // fall through to signal-based shutdown
   }
 
-  const state = readReviewServerState(statePath);
-  if (!state) {
-    try {
-      unlinkSync(statePath);
-    } catch {
-      // ignore
-    }
-    return "stale";
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline && isProcessRunning(state.pid)) {
+    await Bun.sleep(50);
   }
-
-  const wasRunning =
-    isProcessRunning(state.pid) && (await isReviewServerAlive(state));
-  if (wasRunning) {
+  if (isProcessRunning(state.pid)) {
     try {
       process.kill(state.pid, "SIGTERM");
     } catch {
-      // process may have exited between checks
+      // already exited
     }
-
-    const deadline = Date.now() + 3_000;
-    while (Date.now() < deadline && isProcessRunning(state.pid)) {
+    const killDeadline = Date.now() + 1_000;
+    while (Date.now() < killDeadline && isProcessRunning(state.pid)) {
       await Bun.sleep(50);
     }
-
-    if (isProcessRunning(state.pid)) {
-      try {
-        process.kill(state.pid, "SIGKILL");
-      } catch {
-        // ignore
-      }
-      const killDeadline = Date.now() + 1_000;
-      while (Date.now() < killDeadline && isProcessRunning(state.pid)) {
-        await Bun.sleep(50);
-      }
-    }
   }
-
-  if (existsSync(statePath)) {
-    try {
-      unlinkSync(statePath);
-    } catch {
-      // ignore
-    }
-  }
-
-  return wasRunning ? "stopped" : "stale";
 }
 
 function createReviewToken() {
@@ -1509,8 +1784,8 @@ function reviewUiMessage(url: string) {
 
 function authenticatedReviewRequest(
   request: Request,
-  token: string,
-  handler: () => Promise<Response> | Response,
+  resolveSession: (request: Request) => SessionResolution,
+  handler: (session: SessionRow) => Promise<Response> | Response,
 ) {
   if (request.method === "OPTIONS") {
     return new Response(null, {
@@ -1522,7 +1797,19 @@ function authenticatedReviewRequest(
       },
     });
   }
-  if (request.headers.get(REVIEW_TOKEN_HEADER) !== token) {
+  const resolved = resolveSession(request);
+  if ("error" in resolved) {
+    return Response.json({ error: resolved.error }, { status: resolved.status });
+  }
+  return handler(resolved.session);
+}
+
+function adminReviewRequest(
+  request: Request,
+  adminToken: string,
+  handler: () => Promise<Response> | Response,
+) {
+  if (request.headers.get(REVIEW_TOKEN_HEADER) !== adminToken) {
     return Response.json({ error: "Unauthorized." }, { status: 401 });
   }
   return handler();

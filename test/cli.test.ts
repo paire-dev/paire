@@ -543,15 +543,7 @@ test("review API sorts threads and claims by importance", async () => {
   db.close();
   expect(session?.id).toBeTruthy();
 
-  const server = Bun.spawn(
-    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
-    {
-      cwd: fixture.repo,
-      env: { ...process.env, PAIRE_HOME: fixture.home },
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
   try {
     const state = await waitForServerState(fixture.home, session!.id);
     const unauthenticated = await fetch(reviewApiUrl(state, "/api/review"));
@@ -577,8 +569,7 @@ test("review API sorts threads and claims by importance", async () => {
         ?.importance,
     ).toBe("important");
   } finally {
-    server.kill();
-    await server.exited;
+    runPaire(fixture, ["server", "stop"]);
   }
 });
 
@@ -618,15 +609,7 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
   db.close();
   expect(session?.id).toBeTruthy();
 
-  const server = Bun.spawn(
-    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
-    {
-      cwd: fixture.repo,
-      env: { ...process.env, PAIRE_HOME: fixture.home },
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
   try {
     const state = await waitForServerState(fixture.home, session!.id);
     const reviewResponse = await reviewApiFetch(state, "/api/review");
@@ -654,8 +637,7 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
     expect(diffPayload.diff).toContain("diff --git a/src/app.ts b/src/app.ts");
     expect(diffPayload.diff).toContain("throw new Error('Unauthorized')");
   } finally {
-    server.kill();
-    await server.exited;
+    runPaire(fixture, ["server", "stop"]);
   }
 });
 
@@ -1413,15 +1395,84 @@ test("paire install appends agent instructions to AGENTS.md and CLAUDE.md", () =
   const agents = readFileSync(agentsPath, "utf8");
   const claude = readFileSync(claudePath, "utf8");
   expect(agents).toContain("<!-- paire -->");
-  expect(agents).toContain("When you **git push**, run `paire it`");
+  expect(agents).toContain("<!-- /paire -->");
+  expect(agents).toContain("`paire it` is a command");
   expect(agents).toContain("paire review --apply");
   expect(claude).toContain("<!-- paire -->");
-  expect(claude).toContain("When you **git push**, run `paire it`");
+  expect(claude).toContain("`paire it` is a command");
 
   const second = runPaire(fixture, ["install"]);
   expect(second.exitCode).toBe(0);
-  expect(second.stdout).toContain("Already installed: AGENTS.md, CLAUDE.md");
+  expect(second.stdout).toContain("Already up to date: AGENTS.md, CLAUDE.md");
   expect(readFileSync(agentsPath, "utf8")).toBe(agents);
+});
+
+test("paire install replaces an existing Paire block in place", () => {
+  const fixture = createFixtureRepo();
+  const agentsPath = join(fixture.repo, "AGENTS.md");
+  // A drifted/legacy block, with content both before and after it.
+  writeFileSync(
+    agentsPath,
+    [
+      "# Agent rules",
+      "",
+      "<!-- paire -->",
+      "## Paire",
+      "",
+      "Old, out-of-date instructions that should be replaced.",
+      "<!--/ paire -->",
+      "",
+      "## Keep me",
+      "Trailing content must survive.",
+      "",
+    ].join("\n"),
+  );
+
+  const result = runPaire(fixture, ["install"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("Updated: AGENTS.md");
+
+  const agents = readFileSync(agentsPath, "utf8");
+  // Old content gone, new content in, no duplicate block, surrounding text kept.
+  expect(agents).not.toContain("Old, out-of-date instructions");
+  expect(agents).toContain("`paire it` is a command");
+  expect(agents.match(/<!-- paire -->/g)?.length).toBe(1);
+  expect(agents).toContain("# Agent rules");
+  expect(agents).toContain("## Keep me");
+  expect(agents).toContain("Trailing content must survive.");
+
+  // Idempotent once current.
+  const again = runPaire(fixture, ["install"]);
+  expect(again.stdout).toContain("Already up to date: AGENTS.md");
+  expect(readFileSync(agentsPath, "utf8")).toBe(agents);
+});
+
+test("paire install upgrades a legacy block with no closing marker", () => {
+  const fixture = createFixtureRepo();
+  const agentsPath = join(fixture.repo, "AGENTS.md");
+  writeFileSync(
+    agentsPath,
+    [
+      "# Agent rules",
+      "",
+      "<!-- paire -->",
+      "## Paire",
+      "",
+      "When you **git push**, run `paire it`.",
+      "",
+    ].join("\n"),
+  );
+
+  const result = runPaire(fixture, ["install"]);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("Updated: AGENTS.md");
+
+  const agents = readFileSync(agentsPath, "utf8");
+  expect(agents).not.toContain("When you **git push**, run `paire it`.");
+  expect(agents).toContain("`paire it` is a command");
+  expect(agents).toContain("<!-- /paire -->");
+  expect(agents.match(/<!-- paire -->/g)?.length).toBe(1);
+  expect(agents).toContain("# Agent rules");
 });
 
 test("paire install skips missing agent instruction files", () => {
@@ -1542,36 +1593,30 @@ test("paire server stop shuts down the review UI server for the current branch",
   db.close();
   expect(session?.id).toBeTruthy();
 
-  const server = Bun.spawn(
-    [process.execPath, resolve(import.meta.dir, "../src/cli.ts"), "_review-serve", session!.id],
-    {
-      cwd: fixture.repo,
-      env: { ...process.env, PAIRE_HOME: fixture.home },
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
-  try {
-    const state = await waitForServerState(fixture.home, session!.id);
-    expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
+  const start = runPaire(fixture, ["server", "start", "--no-open"]);
+  expect(start.exitCode).toBe(0);
 
-    const stop = runPaire(fixture, ["server", "stop"]);
-    expect(stop.exitCode).toBe(0);
-    expect(stop.stdout).toContain("Stopped the review UI server.");
-    expect(
-      existsSync(join(fixture.home, "review-servers", `${session!.id}.json`)),
-    ).toBe(false);
-    await server.exited;
+  const state = await waitForServerState(fixture.home, session!.id);
+  expect(await reviewApiFetch(state, "/api/review").then((r) => r.ok)).toBe(true);
 
-    const stopAgain = runPaire(fixture, ["server", "stop"]);
-    expect(stopAgain.exitCode).toBe(0);
-    expect(stopAgain.stdout).toContain("No review UI server is running for this branch.");
-  } finally {
-    if (!server.killed) {
-      server.kill();
-      await server.exited;
-    }
-  }
+  const daemonStatePath = join(fixture.home, "review-server.json");
+  expect(existsSync(daemonStatePath)).toBe(true);
+  const daemonPid = JSON.parse(readFileSync(daemonStatePath, "utf8")).pid as number;
+
+  const stop = runPaire(fixture, ["server", "stop"]);
+  expect(stop.exitCode).toBe(0);
+  expect(stop.stdout).toContain("Stopped the review UI server.");
+  expect(
+    existsSync(join(fixture.home, "review-servers", `${session!.id}.json`)),
+  ).toBe(false);
+
+  // The last session unregistered, so the shared daemon shuts itself down.
+  await waitForProcessExit(daemonPid);
+  expect(existsSync(daemonStatePath)).toBe(false);
+
+  const stopAgain = runPaire(fixture, ["server", "stop"]);
+  expect(stopAgain.exitCode).toBe(0);
+  expect(stopAgain.stdout).toContain("No review UI server is running for this branch.");
 });
 
 test("paire server stop removes stale review server state", async () => {
@@ -1915,6 +1960,19 @@ async function waitForServerState(home: string, sessionId: string) {
     await Bun.sleep(50);
   }
   throw new Error("Review server did not start.");
+}
+
+async function waitForProcessExit(pid: number) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await Bun.sleep(50);
+  }
+  throw new Error("Process did not exit.");
 }
 
 function reviewApiUrl(state: { url: string }, path: string) {
