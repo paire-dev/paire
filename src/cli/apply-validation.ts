@@ -121,8 +121,13 @@ const VALID_FILE_DISPOSITIONS = new Set<DraftFileDisposition>([
 export function validateApplyPayload(
   value: unknown,
   opts: { knownClaimIds: Set<string> },
-): { payload?: AgentApplyPayload; issues: ApplyIssue[] } {
+): {
+  payload?: AgentApplyPayload;
+  issues: ApplyIssue[];
+  submittedClaimIds: Set<string>;
+} {
   const issues: ApplyIssue[] = [];
+  const submittedClaimIds = new Set<string>();
   if (!isRecord(value)) {
     issues.push({
       code: "invalid_field",
@@ -130,7 +135,7 @@ export function validateApplyPayload(
       value,
       fix: "The review draft must be a JSON object.",
     });
-    return { issues };
+    return { issues, submittedClaimIds };
   }
 
   const packetId = readRequiredString(value, "packetId", issues);
@@ -138,7 +143,12 @@ export function validateApplyPayload(
   const revisionId = readRequiredString(value, "revisionId", issues);
   const gitFingerprint = readRequiredString(value, "gitFingerprint", issues);
   const files = readFiles(value.files, issues);
-  const threads = readThreads(value.threads, issues, opts.knownClaimIds);
+  const threads = readThreads(
+    value.threads,
+    issues,
+    opts.knownClaimIds,
+    submittedClaimIds,
+  );
 
   if (
     packetId === undefined ||
@@ -148,7 +158,7 @@ export function validateApplyPayload(
     files === undefined ||
     threads === undefined
   ) {
-    return { issues };
+    return { issues, submittedClaimIds };
   }
 
   return {
@@ -161,6 +171,7 @@ export function validateApplyPayload(
       threads,
     },
     issues,
+    submittedClaimIds,
   };
 }
 
@@ -219,10 +230,10 @@ export function checkCoverage(
 export function checkPriorClaims(
   activeClaims: Array<{ id: string; threadId: string }>,
   payload: AgentApplyPayload,
-): ApplyIssue[] {
-  const submittedClaimIds = new Set(
+  submittedClaimIds = new Set(
     payload.threads.flatMap((thread) => thread.claims.map((claim) => claim.id)),
-  );
+  ),
+): ApplyIssue[] {
   return activeClaims
     .filter((claim) => !submittedClaimIds.has(claim.id))
     .map((claim) => ({
@@ -297,6 +308,7 @@ function readThreads(
   value: unknown,
   issues: ApplyIssue[],
   knownClaimIds: Set<string>,
+  submittedClaimIds: Set<string>,
 ) {
   if (!Array.isArray(value)) {
     issues.push({
@@ -356,7 +368,14 @@ function readThreads(
       id,
       title,
       ...(summary ? { summary } : {}),
-      claims: readClaims(thread.claims, field, id, issues, knownClaimIds),
+      claims: readClaims(
+        thread.claims,
+        field,
+        id,
+        issues,
+        knownClaimIds,
+        submittedClaimIds,
+      ),
     });
   });
   return threads;
@@ -368,6 +387,7 @@ function readClaims(
   parentThreadId: string,
   issues: ApplyIssue[],
   knownClaimIds: Set<string>,
+  submittedClaimIds: Set<string>,
 ) {
   const claims: AgentClaim[] = [];
   value.forEach((claim, claimIndex) => {
@@ -384,12 +404,16 @@ function readClaims(
     const id = readPublicId(claim.id, `${field}.id`, issues);
     const rawStatus = claim.agentStatus;
     const agentStatus = readAgentStatus(rawStatus, `${field}.agentStatus`, issues);
+    if (id !== undefined) submittedClaimIds.add(id);
     if (id === undefined || agentStatus === undefined) return;
 
     const isKnownExisting = knownClaimIds.has(id);
     const canHydrateCopy =
       isKnownExisting &&
-      (agentStatus === "unchanged" || agentStatus === "evidence_moved");
+      (agentStatus === "unchanged" ||
+        agentStatus === "evidence_moved" ||
+        agentStatus === "invalidated" ||
+        agentStatus === "superseded");
     const threadId =
       claim.threadId === undefined
         ? parentThreadId
@@ -405,9 +429,10 @@ function readClaims(
       });
     }
 
-    const copy = canHydrateCopy
-      ? readHydratableClaimCopy(claim, field, issues)
-      : readRequiredClaimCopy(claim, field, issues);
+    const copy =
+      canHydrateCopy && !requiresReplacementCopy(claim, agentStatus)
+        ? readHydratableClaimCopy(claim, field, issues)
+        : readRequiredClaimCopy(claim, field, issues);
     const humanStatus = readHumanStatus(claim.humanStatus, `${field}.humanStatus`, issues);
     const evidences = readEvidences(
       claim.evidences,
@@ -472,6 +497,18 @@ function readHydratableClaimCopy(
   return { title, description, importance, before, after };
 }
 
+function requiresReplacementCopy(
+  claim: Record<string, unknown>,
+  agentStatus: ClaimStatus,
+) {
+  return (
+    "title" in claim &&
+    (agentStatus === "evidence_moved" ||
+      agentStatus === "invalidated" ||
+      agentStatus === "superseded")
+  );
+}
+
 function readRequiredClaimCopy(
   claim: Record<string, unknown>,
   field: string,
@@ -506,18 +543,26 @@ function readEvidences(
   isKnownExisting: boolean,
   issues: ApplyIssue[],
 ) {
-  if (value === undefined && agentStatus === "unchanged" && isKnownExisting) {
+  if (
+    value === undefined &&
+    isKnownExisting &&
+    canOmitEvidenceRows(agentStatus)
+  ) {
     return [];
   }
   if (!Array.isArray(value)) {
     issues.push({
       code: "missing_field",
       field: `${claimField}.evidences`,
-      fix: "New, amended, invalidated, superseded, and evidence_moved claims need evidences[]. Unchanged prior claims may omit evidences to preserve the stored rows.",
+      fix: "New, amended, and evidence_moved claims need evidences[]. Unchanged, invalidated, and superseded prior claims may omit evidences to preserve the stored rows.",
     });
     return undefined;
   }
-  if (value.length === 0 && agentStatus === "unchanged" && isKnownExisting) {
+  if (
+    value.length === 0 &&
+    isKnownExisting &&
+    canOmitEvidenceRows(agentStatus)
+  ) {
     return [];
   }
   if (value.length > MAX_EVIDENCES_PER_CLAIM) {
@@ -592,6 +637,14 @@ function readEvidences(
     });
   });
   return evidences;
+}
+
+function canOmitEvidenceRows(agentStatus: ClaimStatus) {
+  return (
+    agentStatus === "unchanged" ||
+    agentStatus === "invalidated" ||
+    agentStatus === "superseded"
+  );
 }
 
 function readRequiredString(

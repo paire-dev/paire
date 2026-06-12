@@ -1204,6 +1204,83 @@ test("--check reports coverage errors without mutating review state", () => {
   db.close();
 });
 
+test("--check and --apply reject title-bearing evidence_moved prior claims without full copy", () => {
+  const fixture = createFixtureRepo();
+  const packet = createSecondSandboxReviewPacket(fixture);
+  const result = sandboxAgentResult(packet, "amended", { minimalAuth: true });
+  const authClaim = result.threads[0]!.claims[0]! as Record<string, unknown>;
+  authClaim.agentStatus = "evidence_moved";
+  authClaim.title = "Moved auth validation evidence";
+  authClaim.evidences = [
+    {
+      filePath: "src/app.ts",
+      startLine: 1,
+      endLine: 6,
+      symbol: "createProject",
+      change: "Auth validation moved to a nearby location.",
+    },
+  ];
+  const resultPath = join(fixture.root, "bad-evidence-moved-result.json");
+  writeFileSync(resultPath, JSON.stringify(result, null, 2));
+
+  const check = runPaire(fixture, ["review", "--check", resultPath]);
+  expect(check.exitCode).toBe(1);
+  expect(check.stderr).toContain("PAIRE_APPLY_REJECTED");
+  expect(check.stderr).toContain('"field": "threads[0].claims[0].importance"');
+  expect(check.stderr).toContain('"field": "threads[0].claims[0].before"');
+  expect(check.stderr).toContain('"field": "threads[0].claims[0].after"');
+  expect(check.stderr).not.toContain('"code": "missing_prior_claim"');
+
+  const apply = runPaire(fixture, ["review", "--apply", resultPath]);
+  expect(apply.exitCode).toBe(1);
+  expect(apply.stderr).toContain("PAIRE_APPLY_REJECTED");
+  expect(apply.stderr).toContain('"field": "threads[0].claims[0].importance"');
+  expect(apply.stderr).not.toContain("Validated claim");
+});
+
+test("apply accepts minimal invalidated prior claims and preserves stored copy", () => {
+  const fixture = createFixtureRepo();
+  const packet = createSecondSandboxReviewPacket(fixture);
+  const result = sandboxAgentResult(packet, "amended", { minimalAuth: true });
+  const authClaim = result.threads[0]!.claims[0]! as Record<string, unknown>;
+  authClaim.agentStatus = "invalidated";
+  const resultPath = join(fixture.root, "minimal-invalidated-result.json");
+  writeFileSync(resultPath, JSON.stringify(result, null, 2));
+
+  const apply = runPaire(fixture, ["review", "--apply", resultPath]);
+  expect(apply.exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const claim = db
+    .query<
+      {
+        title: string;
+        importance: string;
+        beforeText: string | null;
+        afterText: string | null;
+        agentStatus: string;
+      },
+      []
+    >(
+      "select title, importance, beforeText, afterText, agentStatus from claims where id like '%:claim_sandbox_auth_required'",
+    )
+    .get();
+  expect(claim?.agentStatus).toBe("invalidated");
+  expect(claim?.title).toBe("Reject missing users before create");
+  expect(claim?.importance).toBe("minor");
+  expect(claim?.beforeText).toBe("Project creation accepted any user input.");
+  expect(claim?.afterText).toBe(
+    "Project creation rejects missing users before returning data.",
+  );
+  const evidence = db
+    .query<{ count: number }, []>(
+      "select count(*) as count from claim_evidences where claimId like '%:claim_sandbox_auth_required'",
+    )
+    .get();
+  expect(evidence?.count).toBe(1);
+  db.close();
+});
+
 test("new git changes after apply require a fresh packet and do not open browser", () => {
   const fixture = createFixtureRepo();
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
@@ -1763,6 +1840,64 @@ function extractDraftPath(stdout: string) {
     }
   }
   throw new Error(`Draft path missing from output:\n${stdout}`);
+}
+
+function createSecondSandboxReviewPacket(fixture: Fixture) {
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) throw new Error('Unauthorized');",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(fixture.repo, "src/workspace.ts"),
+    [
+      "export function validateWorkspace(input: { name?: string }) {",
+      "  if (!input.name) throw new Error('Missing workspace name');",
+      "  return input.name;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add auth and workspace validation");
+
+  const firstReview = runPaire(fixture, ["review"]);
+  expect(firstReview.exitCode).toBe(0);
+  const firstPacket = JSON.parse(
+    readFileSync(extractPacketPath(firstReview.stdout), "utf8"),
+  );
+  const firstResultPath = join(fixture.root, "initial-sandbox-result.json");
+  writeFileSync(
+    firstResultPath,
+    JSON.stringify(sandboxAgentResult(firstPacket, "new"), null, 2),
+  );
+  const firstApply = runPaire(fixture, ["review", "--apply", firstResultPath]);
+  expect(firstApply.exitCode).toBe(0);
+
+  writeFileSync(
+    join(fixture.repo, "src/workspace.ts"),
+    [
+      "export function validateWorkspace(input: { name?: string }) {",
+      "  if (!input.name) {",
+      "    throw new Error('Missing workspace name');",
+      "  }",
+      "  return input.name.trim();",
+      "}",
+      "",
+      "export const workspaceValidationVersion = 2;",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add workspace validation version");
+
+  const secondReview = runPaire(fixture, ["review"]);
+  expect(secondReview.exitCode).toBe(0);
+  return JSON.parse(readFileSync(extractPacketPath(secondReview.stdout), "utf8"));
 }
 
 async function waitForServerState(home: string, sessionId: string) {

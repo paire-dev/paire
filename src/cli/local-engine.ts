@@ -146,21 +146,8 @@ type StoredAgentClaim = AgentClaim & {
 const LARGE_DIFF_BYTES = 30_000;
 const MAX_INLINE_SNIPPET_CHARS = 4_000;
 const MAX_TOTAL_SNIPPET_CHARS = 18_000;
-const MAX_PACKET_PREVIEW_CHARS = 16_000;
 const MAX_APPLY_PAYLOAD_BYTES = 2_000_000;
-const MAX_THREADS_PER_APPLY = 100;
-const MAX_CLAIMS_PER_THREAD = 200;
-const MAX_EVIDENCES_PER_CLAIM = 50;
-const MAX_ID_CHARS = 160;
-const MAX_TITLE_CHARS = 500;
-const MAX_DESCRIPTION_CHARS = 4_000;
-const MAX_SUMMARY_CHARS = 4_000;
-const MAX_BEHAVIOR_COPY_CHARS = 4_000;
-const MAX_EVIDENCE_CHANGE_CHARS = 1_000;
 const MAX_COMMENT_CHARS = 4_000;
-const MAX_FILE_PATH_CHARS = 1_000;
-const MAX_EVIDENCE_LINE = 1_000_000;
-const MAX_EVIDENCE_SPAN_LINES = 5_000;
 const REVIEW_PORT = 22222;
 const MAX_REVIEW_PORT_ATTEMPTS = 100;
 const REVIEW_SERVER_START_TIMEOUT_MS = 5_000;
@@ -176,21 +163,7 @@ type ReviewServerState = {
   repoRoot: string;
   startedAt: number;
 };
-const VALID_AGENT_STATUSES = new Set([
-  "new",
-  "unchanged",
-  "evidence_moved",
-  "amended",
-  "invalidated",
-  "superseded",
-]);
 const VALID_HUMAN_STATUSES = new Set(["unreviewed", "accepted"]);
-const VALID_CLAIM_IMPORTANCES = new Set([
-  "critical",
-  "important",
-  "minor",
-  "noise",
-]);
 const CLAIM_IMPORTANCE_ORDER: ClaimImportance[] = [
   "critical",
   "important",
@@ -454,10 +427,7 @@ async function applyReviewCommand(
       const preserveExistingThreadCopy =
         !!existingThread &&
         thread.claims.length > 0 &&
-        thread.claims.every((claim) =>
-          claim.agentStatus === "unchanged" ||
-          claim.agentStatus === "evidence_moved"
-        );
+        thread.claims.every((claim) => canPreserveExistingThreadCopy(claim));
       ctx.db
         .prepare(
           `insert into change_threads (id, sessionId, title, summary, updatedAt)
@@ -497,8 +467,7 @@ async function applyReviewCommand(
           .get(claimDbId, session.id);
         const preserveClaimCopy =
           !!existingClaim &&
-          (claim.agentStatus === "unchanged" ||
-            (claim.agentStatus === "evidence_moved" && !claim.title));
+          canPreserveExistingClaimCopy(claim);
         const claimCopy = finalClaimCopy(claim, existingClaim, preserveClaimCopy);
         const claimTitle = claimCopy.title;
         const claimDescription = claimCopy.description;
@@ -540,7 +509,7 @@ async function applyReviewCommand(
               : ++applyOrder,
           );
         const preserveEvidenceRows =
-          claim.agentStatus === "unchanged" &&
+          canPreserveExistingEvidenceRows(claim.agentStatus) &&
           (!claim.evidences || claim.evidences.length === 0);
         const submittedEvidences = claim.evidences ?? [];
         if (!preserveEvidenceRows) {
@@ -737,6 +706,7 @@ async function validateReviewDraft(
         claim.threadId ? [{ id: claim.id, threadId: claim.threadId }] : [],
       ),
       payload,
+      validation.submittedClaimIds,
     ),
     ...checkCoverage(
       packet,
@@ -1104,16 +1074,6 @@ async function writeReviewDraftExport(
   await Bun.write(path, draftJson);
   ensurePrivateFile(path);
   return path;
-}
-
-function packetPreview(packetJson: string) {
-  if (packetJson.length <= MAX_PACKET_PREVIEW_CHARS) return packetJson;
-  const truncated = packetJson.slice(0, MAX_PACKET_PREVIEW_CHARS);
-  return [
-    truncated,
-    "",
-    `... truncated packet preview at ${MAX_PACKET_PREVIEW_CHARS} characters. Read the exported packet path above for the complete current packet.`,
-  ].join("\n");
 }
 
 function draftPreview(packet: Packet, draftPath: string) {
@@ -2133,6 +2093,33 @@ function finalClaimCopy(
     };
   }
   return normalizeClaimCopy(requiredClaimCopy(claim));
+}
+
+function canPreserveExistingThreadCopy(claim: AgentClaim) {
+  return (
+    claim.agentStatus === "unchanged" ||
+    claim.agentStatus === "evidence_moved" ||
+    claim.agentStatus === "invalidated" ||
+    claim.agentStatus === "superseded"
+  );
+}
+
+function canPreserveExistingClaimCopy(claim: AgentClaim) {
+  return (
+    claim.agentStatus === "unchanged" ||
+    ((claim.agentStatus === "evidence_moved" ||
+      claim.agentStatus === "invalidated" ||
+      claim.agentStatus === "superseded") &&
+      !claim.title)
+  );
+}
+
+function canPreserveExistingEvidenceRows(agentStatus: ClaimStatus) {
+  return (
+    agentStatus === "unchanged" ||
+    agentStatus === "invalidated" ||
+    agentStatus === "superseded"
+  );
 }
 
 function requiredImportance(claim: AgentClaim) {
