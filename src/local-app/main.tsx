@@ -88,6 +88,7 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "./components/ui/resizable";
+import { normalizeFilePath, resolveFilePathMatch } from "./file-paths";
 import { cn } from "./lib/utils";
 import "./styles.css";
 
@@ -1125,14 +1126,10 @@ function parseCodeViewItems(rawDiff: string): CodeViewItem[] {
   return parsePatchFiles(rawDiff, "paire-review", false)
     .flatMap((patch) => patch.files)
     .map((fileDiff, index) => ({
-      id: codeViewItemId(fileDiff.name, index),
+      id: codeViewItemId(index),
       type: "diff",
       fileDiff,
     }));
-}
-
-function normalizeFilePath(filePath: string) {
-  return filePath.replace(/^\.\/+/, "").replace(/\\/g, "/");
 }
 
 function parseGitStatusPorcelain(porcelain: string): GitStatusEntry[] {
@@ -1234,29 +1231,16 @@ function gitStatusFromPorcelainCodes(
   return null;
 }
 
-function filePathsMatch(left: string, right: string) {
-  const a = normalizeFilePath(left);
-  const b = normalizeFilePath(right);
-  if (a === b) return true;
-  if (a.endsWith(`/${b}`) || b.endsWith(`/${a}`)) return true;
-  const aBase = a.split("/").pop();
-  const bBase = b.split("/").pop();
-  return aBase != null && aBase === bBase;
-}
-
 function findCodeViewItem(items: CodeViewItem[], filePath: string) {
-  return items.find((item) => {
-    if (item.type !== "diff") return false;
-    return (
-      filePathsMatch(item.fileDiff.name, filePath) ||
-      (item.fileDiff.prevName != null &&
-        filePathsMatch(item.fileDiff.prevName, filePath))
-    );
-  });
+  return resolveFilePathMatch(
+    items.filter((item) => item.type === "diff"),
+    filePath,
+    (item) => [item.fileDiff.name, item.fileDiff.prevName],
+  );
 }
 
-function codeViewItemId(filePath: string, index: number) {
-  return `${index}:${filePath}`;
+function codeViewItemId(index: number) {
+  return `diff-${index}`;
 }
 
 function evidenceSelectionRange(evidence: Evidence) {
