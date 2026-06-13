@@ -199,7 +199,7 @@ const REVIEW_TOKEN_BYTES = 16;
 const REVIEW_TOKEN_HEADER = "x-paire-review-token";
 // Shut the shared daemon down after this long with no requests. Generous so a
 // browser tab left open after the terminal closes keeps working for a while.
-const REVIEW_IDLE_TIMEOUT_MS = 30 * 60_000;
+const REVIEW_IDLE_TIMEOUT_MS = 16 * 60 * 60_000;
 const REVIEW_IDLE_CHECK_MS = 60_000;
 const MAX_WORKTREE_PREVIEW_FILE_BYTES = 1_000_000;
 
