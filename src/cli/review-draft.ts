@@ -139,6 +139,112 @@ export function buildReviewDraft(packet: DraftPacket, activeClaims: AgentClaim[]
   } satisfies ReviewDraft;
 }
 
+export type WorktreeDraftPacket = {
+  packetId: string;
+  sessionId: string;
+  worktreeReviewId: string;
+  worktreeHash: string;
+  gitHead: string;
+  goal: string | null;
+  changedFiles: Array<{
+    path: string;
+    additions: number;
+    deletions: number;
+    summarized: boolean;
+  }>;
+  skipped: string[];
+  touchedSnippets: Array<unknown>;
+  safeInspectionCommands: string[];
+};
+
+export type WorktreeReviewDraft = {
+  formatVersion: 2;
+  packetId: string;
+  sessionId: string;
+  worktreeReviewId: string;
+  worktreeHash: string;
+  gitHead: string;
+  _readonlyHeader: string;
+  instructions: string[];
+  files: DraftFileEntry[];
+  threads: DraftThread[];
+  context: {
+    _readonly: string;
+    goal: string | null;
+    diffCommand: string;
+    skipped: string[];
+    touchedSnippets: Array<unknown>;
+    safeInspectionCommands: string[];
+    claimTemplate: ReviewDraft["context"]["claimTemplate"];
+  };
+};
+
+export const WORKTREE_REVIEW_DRAFT_INSTRUCTIONS = [
+  "This is a WORKTREE review of uncommitted changes. Edit this file in place, then run: paire worktree --apply <this file's path>.",
+  "Worktree claims are stored separately from committed review claims and are keyed to the current worktree diff (worktreeHash). If you change the working tree, regenerate this draft.",
+  "Group claims into threads by review area; put the area a reviewer must understand first as the first thread.",
+  "importance: critical = correctness/security/data-loss; important = meaningful behavior change; minor = polish/tests/config; noise = mechanical churn (group noise in its own thread).",
+  "Leave prior claims that are still accurate exactly as listed (agentStatus \"unchanged\"); never delete a prior claim — mark it invalidated or superseded instead.",
+  "Every file under \"files\" must end up referenced by at least one evidence filePath, or have disposition \"acknowledged\" with a reason. Only acknowledge mechanical/generated churn.",
+  "Evidence startLine/endLine are 1-based line numbers in the working-tree file. Copy them from the N| prefixes in context.touchedSnippets.text; prefer several narrow spans (context.touchedSnippets.addedRanges shows the contiguous groups).",
+  "claim.before/after: one-sentence behavior summaries (null for pure additions/removals); never mention file paths or line numbers. evidence.change: required verb-first imperative one-liner.",
+  "Titles short and verb-first; description only adds detail beyond the title; Markdown allowed.",
+];
+
+export function buildWorktreeReviewDraft(
+  packet: WorktreeDraftPacket,
+  activeClaims: AgentClaim[],
+) {
+  return {
+    formatVersion: 2,
+    packetId: packet.packetId,
+    sessionId: packet.sessionId,
+    worktreeReviewId: packet.worktreeReviewId,
+    worktreeHash: packet.worktreeHash,
+    gitHead: packet.gitHead,
+    _readonlyHeader:
+      "Do not edit packetId, sessionId, worktreeReviewId, worktreeHash, gitHead, or formatVersion. Apply will fail if they change.",
+    instructions: WORKTREE_REVIEW_DRAFT_INSTRUCTIONS,
+    files: packet.changedFiles.map((file) => ({
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+      disposition: file.summarized ? "acknowledged" : "pending",
+      ...(file.summarized
+        ? { reason: "Auto-acknowledged: lockfile/generated churn" }
+        : {}),
+    })),
+    threads: draftThreads(activeClaims),
+    context: {
+      _readonly:
+        "Informational only. Apply ignores context, instructions, and every _-prefixed key.",
+      goal: packet.goal,
+      diffCommand: "git diff -w HEAD (plus untracked files)",
+      skipped: packet.skipped,
+      touchedSnippets: packet.touchedSnippets,
+      safeInspectionCommands: packet.safeInspectionCommands,
+      claimTemplate: {
+        id: "claim_<short_snake_case_slug>",
+        threadId: "thread_<slug>",
+        title: "<short, verb-first>",
+        agentStatus: "new",
+        importance: "<critical|important|minor|noise>",
+        evidences: [
+          {
+            filePath: "<changed file>",
+            startLine: 0,
+            endLine: 0,
+            change: "<imperative one-liner>",
+          },
+        ],
+        before: "<behavior before, or null>",
+        after: "<behavior after, or null>",
+        description: "<optional detail beyond the title>",
+      },
+    },
+  } satisfies WorktreeReviewDraft;
+}
+
 export function stripDraftAnnotations(raw: unknown): unknown {
   if (Array.isArray(raw)) {
     return raw.map((item) => stripDraftAnnotations(item));

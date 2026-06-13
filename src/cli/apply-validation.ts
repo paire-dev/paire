@@ -60,6 +60,16 @@ export type AgentApplyPayload = {
   threads: AgentThread[];
 };
 
+export type AgentWorktreeApplyPayload = {
+  packetId: string;
+  sessionId: string;
+  worktreeReviewId: string;
+  worktreeHash: string;
+  gitHead: string;
+  files: DraftFileEntry[];
+  threads: AgentThread[];
+};
+
 export type ValidationPacket = {
   changedFiles: Array<{ path: string }>;
 };
@@ -75,6 +85,8 @@ export type ApplyIssue = {
     | "missing_files_section"
     | "stale_fingerprint"
     | "unknown_revision"
+    | "unknown_worktree_review"
+    | "stale_worktree"
     | "payload_too_large"
     | "dirty_worktree";
   fix: string;
@@ -175,9 +187,69 @@ export function validateApplyPayload(
   };
 }
 
+export function validateWorktreeApplyPayload(
+  value: unknown,
+  opts: { knownClaimIds: Set<string> },
+): {
+  payload?: AgentWorktreeApplyPayload;
+  issues: ApplyIssue[];
+  submittedClaimIds: Set<string>;
+} {
+  const issues: ApplyIssue[] = [];
+  const submittedClaimIds = new Set<string>();
+  if (!isRecord(value)) {
+    issues.push({
+      code: "invalid_field",
+      field: "$",
+      value,
+      fix: "The worktree review draft must be a JSON object.",
+    });
+    return { issues, submittedClaimIds };
+  }
+
+  const packetId = readRequiredString(value, "packetId", issues);
+  const sessionId = readRequiredString(value, "sessionId", issues);
+  const worktreeReviewId = readRequiredString(value, "worktreeReviewId", issues);
+  const worktreeHash = readRequiredString(value, "worktreeHash", issues);
+  const gitHead = readRequiredString(value, "gitHead", issues);
+  const files = readFiles(value.files, issues);
+  const threads = readThreads(
+    value.threads,
+    issues,
+    opts.knownClaimIds,
+    submittedClaimIds,
+  );
+
+  if (
+    packetId === undefined ||
+    sessionId === undefined ||
+    worktreeReviewId === undefined ||
+    worktreeHash === undefined ||
+    gitHead === undefined ||
+    files === undefined ||
+    threads === undefined
+  ) {
+    return { issues, submittedClaimIds };
+  }
+
+  return {
+    payload: {
+      packetId,
+      sessionId,
+      worktreeReviewId,
+      worktreeHash,
+      gitHead,
+      files,
+      threads,
+    },
+    issues,
+    submittedClaimIds,
+  };
+}
+
 export function checkCoverage(
   packet: ValidationPacket,
-  payload: AgentApplyPayload,
+  payload: Pick<AgentApplyPayload, "files" | "threads">,
   preservedEvidencePaths: Iterable<string>,
 ): ApplyIssue[] {
   const issues: ApplyIssue[] = [];
@@ -229,7 +301,7 @@ export function checkCoverage(
 
 export function checkPriorClaims(
   activeClaims: Array<{ id: string; threadId: string }>,
-  payload: AgentApplyPayload,
+  payload: Pick<AgentApplyPayload, "threads">,
   submittedClaimIds = new Set(
     payload.threads.flatMap((thread) => thread.claims.map((claim) => claim.id)),
   ),
@@ -244,11 +316,15 @@ export function checkPriorClaims(
     }));
 }
 
-export function formatRejection(draftPath: string, issues: ApplyIssue[]) {
+export function formatRejection(
+  draftPath: string,
+  issues: ApplyIssue[],
+  applyCommand = "paire review --apply",
+) {
   return [
     "PAIRE_APPLY_REJECTED",
     "Fix every issue listed in the JSON below by editing the draft file, then re-run:",
-    `paire review --apply ${draftPath}`,
+    `${applyCommand} ${draftPath}`,
     "",
     JSON.stringify(
       {

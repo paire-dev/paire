@@ -33,6 +33,7 @@ import {
   FileCode,
   FolderTree,
   Highlighter,
+  Info,
   ListChevronsDownUp,
   ListChevronsUpDown,
   ListOrdered,
@@ -144,6 +145,29 @@ type ReviewData = {
   burden: string;
   generatedAt: number;
   threads: Thread[];
+};
+
+type WorktreeDiffData = {
+  diff: string;
+  files: Array<{ path: string; additions: number; deletions: number }>;
+  skipped: string[];
+  worktreeHash?: string;
+};
+
+type WorktreeReviewData = {
+  worktreeHash: string;
+  state: "none" | "pending_agent" | "applied";
+  stale: boolean;
+  appliedHash: string | null;
+  draftPath: string | null;
+  burden: string;
+  generatedAt: number;
+  threads: Thread[];
+};
+
+type ClaimApi = {
+  post: (claimId: string, humanStatus: HumanStatus) => Promise<HumanStatus>;
+  queryKey: readonly unknown[];
 };
 
 type EvidenceSelection = {
@@ -287,6 +311,33 @@ async function fetchReviewDiff() {
   return payload.diff ?? "";
 }
 
+async function fetchWorktreeDiff() {
+  const response = await fetch("/api/worktree/diff", {
+    cache: "no-store",
+    headers: reviewApiHeaders(),
+  });
+  if (!response.ok) {
+    throw new ReviewApiError("Failed to load worktree diff.", response.status);
+  }
+  const payload = (await response.json()) as Partial<WorktreeDiffData>;
+  return {
+    diff: payload.diff ?? "",
+    files: payload.files ?? [],
+    skipped: payload.skipped ?? [],
+  };
+}
+
+async function fetchWorktreeReview() {
+  const response = await fetch("/api/worktree/review", {
+    cache: "no-store",
+    headers: reviewApiHeaders(),
+  });
+  if (!response.ok) {
+    throw new ReviewApiError("Failed to load worktree review.", response.status);
+  }
+  return (await response.json()) as WorktreeReviewData;
+}
+
 async function postClaimHumanStatus(claimId: string, humanStatus: HumanStatus) {
   const response = await fetch(
     `/api/claims/${encodeURIComponent(claimId)}/human-status`,
@@ -298,6 +349,35 @@ async function postClaimHumanStatus(claimId: string, humanStatus: HumanStatus) {
   );
   if (!response.ok) throw new Error("Failed to update claim status.");
   return humanStatus;
+}
+
+async function postWorktreeClaimHumanStatus(
+  claimId: string,
+  humanStatus: HumanStatus,
+) {
+  const response = await fetch(
+    `/api/worktree/claims/${encodeURIComponent(claimId)}/human-status`,
+    {
+      method: "POST",
+      headers: reviewApiHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ humanStatus }),
+    },
+  );
+  if (!response.ok) throw new Error("Failed to update claim status.");
+  return humanStatus;
+}
+
+const committedClaimApi: ClaimApi = {
+  post: postClaimHumanStatus,
+  queryKey: ["review"],
+};
+const worktreeClaimApi: ClaimApi = {
+  post: postWorktreeClaimHumanStatus,
+  queryKey: ["worktree-review"],
+};
+const ClaimApiContext = React.createContext<ClaimApi>(committedClaimApi);
+function useClaimApi() {
+  return React.useContext(ClaimApiContext);
 }
 
 function getActiveClaimId(target: EventTarget | null) {
@@ -391,12 +471,55 @@ function ReviewScreen() {
   const { data: rawDiff = "", isError: isDiffError } = useQuery({
     queryKey: ["review-diff"],
     queryFn: fetchReviewDiff,
+    enabled: data?.git.clean === true,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    retry: shouldRetryReviewQuery,
+  });
+  const {
+    data: worktreeDiff = { diff: "", files: [], skipped: [] },
+    isError: isWorktreeDiffError,
+  } = useQuery({
+    queryKey: ["worktree-diff"],
+    queryFn: fetchWorktreeDiff,
+    enabled: data?.git.clean === false,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    retry: shouldRetryReviewQuery,
+  });
+  const {
+    data: worktreeReview = {
+      worktreeHash: "",
+      state: "none" as const,
+      stale: false,
+      appliedHash: null,
+      draftPath: null,
+      burden: "0 claims",
+      generatedAt: 0,
+      threads: [] as Thread[],
+    },
+  } = useQuery({
+    queryKey: ["worktree-review"],
+    queryFn: fetchWorktreeReview,
+    enabled: data?.git.clean === false,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
     retry: shouldRetryReviewQuery,
   });
 
-  const codeItems = React.useMemo(() => parseCodeViewItems(rawDiff), [rawDiff]);
+  const isDirty = data?.git.clean === false;
+  const worktreeHasClaims = isDirty && worktreeReview.threads.length > 0;
+  const showClaimsLayout = !isDirty || worktreeHasClaims;
+  const claimApi = isDirty ? worktreeClaimApi : committedClaimApi;
+  const reviewThreads = isDirty ? worktreeReview.threads : (data?.threads ?? []);
+  const reviewBurden = isDirty ? worktreeReview.burden : (data?.burden ?? "");
+
+  const activeDiff = isDirty ? worktreeDiff.diff : rawDiff;
+  const activeDiffError = isDirty ? isWorktreeDiffError : isDiffError;
+  const codeItems = React.useMemo(
+    () => parseCodeViewItems(activeDiff),
+    [activeDiff],
+  );
   const gitStatusEntries = React.useMemo(
     () => buildFileTreeGitStatus(codeItems, data?.git.status ?? ""),
     [codeItems, data?.git.status],
@@ -409,8 +532,8 @@ function ReviewScreen() {
   );
   const showLoadingState = useDelayedValue(isLoading, LOADING_STATE_DELAY_MS);
   const filteredThreads = React.useMemo(
-    () => (data ? filterThreads(data.threads, humanStatusFilter) : []),
-    [data, humanStatusFilter],
+    () => filterThreads(reviewThreads, humanStatusFilter),
+    [reviewThreads, humanStatusFilter],
   );
   const allReviewItemsOpen =
     filteredThreads.length > 0 &&
@@ -512,9 +635,36 @@ function ReviewScreen() {
     );
   }
 
+  if (isDirty && !worktreeHasClaims) {
+    return (
+      <main className={pageClassName}>
+        <header className="mb-5 flex flex-wrap items-center justify-between gap-3 p-2">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <ProjectIdentity projectKey={data.session.projectKey} />
+              <Badge variant="outline">{data.git.branch}</Badge>
+            </div>
+          </div>
+          <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
+            <Badge variant="outline">Working tree</Badge>
+            <ModeToggle />
+          </div>
+        </header>
+        <WorktreePreview
+          codeItems={codeItems}
+          codeViewRef={codeViewRef}
+          diffError={activeDiffError}
+          draftPath={worktreeReview.draftPath}
+          gitStatus={gitStatusEntries}
+          worktreeDiff={worktreeDiff}
+        />
+      </main>
+    );
+  }
+
   const reviewContent = (
     <ReviewClaims
-      allThreads={data.threads}
+      allThreads={reviewThreads}
       filteredThreads={filteredThreads}
       openClaims={openClaims}
       openThreads={openThreads}
@@ -526,12 +676,12 @@ function ReviewScreen() {
   );
   const reviewPanel = (
     <ReviewScrollPanel contained={isDesktopLayout}>
-      {!data.git.clean ? <DirtyWorktreeAlert /> : null}
       {reviewContent}
     </ReviewScrollPanel>
   );
 
   return (
+    <ClaimApiContext.Provider value={claimApi}>
     <main className={isDesktopLayout ? desktopPageClassName : pageClassName}>
       <header
         className={cn(
@@ -543,6 +693,7 @@ function ReviewScreen() {
           <div className="flex flex-wrap items-center gap-2">
             <ProjectIdentity projectKey={data.session.projectKey} />
             <Badge variant="outline">{data.git.branch}</Badge>
+            {isDirty ? <Badge variant="outline">Working tree</Badge> : null}
           </div>
         </div>
         <HumanFilterNav
@@ -552,7 +703,7 @@ function ReviewScreen() {
           onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
         />
         <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
-          <Badge variant="outline">{data.burden}</Badge>
+          <Badge variant="outline">{reviewBurden}</Badge>
           {!isDesktopLayout ? (
             <MobileCodePanelButton
               open={codePanelOpen}
@@ -563,13 +714,33 @@ function ReviewScreen() {
         </div>
       </header>
 
+      {isDirty && worktreeReview.stale ? (
+        <Alert className="mb-4 shrink-0 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+          <AlertTriangle />
+          <AlertTitle>Not the latest changes</AlertTitle>
+          <AlertDescription className="text-amber-900 dark:text-amber-200">
+            <div className="flex flex-wrap items-start gap-2">
+              <p className="min-w-0 flex-1">
+                These worktree claims were applied to an earlier version of your
+                working tree. The diff has changed since. Regenerate the draft
+                and amend the claims to match the current changes.
+              </p>
+              <CopyAgentPromptButton
+                label="Copy amend prompt"
+                text={staleWorktreePrompt(worktreeReview.draftPath)}
+              />
+            </div>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       {isDesktopLayout ? (
         <ResizableReviewLayout
           codePanel={
             <ReviewCodePanel
               codeViewRef={codeViewRef}
               className="h-full min-h-0"
-              diffError={isDiffError}
+              diffError={activeDiffError}
               gitStatus={gitStatusEntries}
               items={codeItems}
               open={codePanelOpen}
@@ -587,7 +758,7 @@ function ReviewScreen() {
           {reviewPanel}
           <ReviewCodeSheet
             codeViewRef={codeViewRef}
-            diffError={isDiffError}
+            diffError={activeDiffError}
             gitStatus={gitStatusEntries}
             items={codeItems}
             open={codePanelOpen}
@@ -598,6 +769,7 @@ function ReviewScreen() {
         </>
       )}
     </main>
+    </ClaimApiContext.Provider>
   );
 }
 
@@ -894,10 +1066,10 @@ function HumanFilterButton({
 
 function ReviewScrollPanel({
   children,
-  contained,
+  contained = false,
 }: {
   children: React.ReactNode;
-  contained: boolean;
+  contained?: boolean;
 }) {
   const content = <div className="mx-auto w-full max-w-3xl">{children}</div>;
 
@@ -932,6 +1104,7 @@ function ReviewClaims({
   onThreadOpenChange: (threadId: string, open: boolean) => void;
 }) {
   const queryClient = useQueryClient();
+  const claimApi = useClaimApi();
   const claimButtonRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const filteredClaims = React.useMemo(
     () =>
@@ -1014,13 +1187,13 @@ function ReviewClaims({
     }: {
       claimId: string;
       humanStatus: HumanStatus;
-    }) => postClaimHumanStatus(claimId, humanStatus),
+    }) => claimApi.post(claimId, humanStatus),
     onSuccess: (humanStatus, { claimId }) => {
       if (humanStatus === "accepted") {
         onClaimOpenChange(claimId, false);
         focusNextUnapprovedAfter(claimId);
       }
-      return queryClient.invalidateQueries({ queryKey: ["review"] });
+      return queryClient.invalidateQueries({ queryKey: claimApi.queryKey });
     },
   });
 
@@ -1306,10 +1479,159 @@ function requestCodeViewScroll(
   return () => window.cancelAnimationFrame(frame);
 }
 
-const DIRTY_WORKTREE_AGENT_PROMPT =
-  "commit changes; paire it; and follow all the instructions to review and apply.";
+function WorktreePreview({
+  codeItems,
+  codeViewRef,
+  diffError,
+  draftPath,
+  gitStatus,
+  worktreeDiff,
+}: {
+  codeItems: CodeViewItem[];
+  codeViewRef: React.RefObject<CodeViewHandle<undefined> | null>;
+  diffError: boolean;
+  draftPath: string | null;
+  gitStatus: GitStatusEntry[];
+  worktreeDiff: WorktreeDiffData;
+}) {
+  const [selectedEvidence, setSelectedEvidence] =
+    React.useState<EvidenceSelection | null>(null);
+  const additions = worktreeDiff.files.reduce(
+    (sum, file) => sum + file.additions,
+    0,
+  );
+  const deletions = worktreeDiff.files.reduce(
+    (sum, file) => sum + file.deletions,
+    0,
+  );
 
-function CopyAgentPromptButton({ text }: { text: string }) {
+  return (
+    <ReviewScrollPanel>
+      <section className="space-y-4">
+        <Alert className="border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+          <AlertTriangle />
+          <AlertTitle className="flex flex-wrap items-center gap-2">
+            <span>Uncommitted changes</span>
+            <Badge variant="outline" className="border-amber-300/80">
+              {worktreeDiff.files.length} files
+            </Badge>
+            <span className="font-mono text-sm">
+              +{additions} -{deletions}
+            </span>
+          </AlertTitle>
+          <AlertDescription className="text-amber-900 dark:text-amber-200">
+            <div className="flex flex-wrap items-start gap-2">
+              <p className="min-w-0 flex-1">
+                Previewing your working tree. Paire reviews these uncommitted
+                changes separately from committed claims. No worktree claims
+                have been applied for this diff yet.
+              </p>
+              <CopyAgentPromptButton
+                label="Copy review prompt"
+                text={DIRTY_WORKTREE_AGENT_PROMPT}
+              />
+            </div>
+          </AlertDescription>
+        </Alert>
+
+        {draftPath ? (
+          <Alert>
+            <Bot />
+            <AlertTitle>Worktree review in progress</AlertTitle>
+            <AlertDescription>
+              <div className="flex flex-wrap items-start gap-2">
+                <p className="min-w-0 flex-1">
+                  Paire generated a worktree review draft. Your coding agent may
+                  still be filling it in and applying it. If it has stopped, copy
+                  the apply command below and finish the review.
+                </p>
+                <CopyAgentPromptButton
+                  tone="neutral"
+                  label="Copy apply command"
+                  text={worktreeApplyPrompt(draftPath)}
+                />
+              </div>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        <Alert>
+          <Info />
+          <AlertTitle>These are uncommitted changes</AlertTitle>
+          <AlertDescription>
+            This preview shows your working tree. Paire reviews these changes
+            separately from committed claims; commit them when you are ready.
+          </AlertDescription>
+        </Alert>
+
+        {!worktreeDiff.diff.trim() && !diffError ? (
+          <EmptyState
+            title="No textual changes"
+            description="The worktree is dirty, but Paire did not find textual changes to preview. Mode-only, submodule, binary, or oversized file changes may still be present."
+          />
+        ) : null}
+
+        {worktreeDiff.skipped.length > 0 ? (
+          <Alert>
+            <TriangleAlert />
+            <AlertTitle>Some files were not previewed</AlertTitle>
+            <AlertDescription>
+              <ul className="mt-2 list-disc space-y-1 pl-5 font-mono text-xs">
+                {worktreeDiff.skipped.map((path) => (
+                  <li key={path}>{path}</li>
+                ))}
+              </ul>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        <ReviewCodePanel
+          codeViewRef={codeViewRef}
+          canCollapse={false}
+          className="h-[min(72vh,56rem)] min-h-[28rem]"
+          diffError={diffError}
+          gitStatus={gitStatus}
+          items={codeItems}
+          open
+          selectedEvidence={selectedEvidence}
+          onOpenChange={() => undefined}
+          onSelectedEvidenceChange={setSelectedEvidence}
+        />
+      </section>
+    </ReviewScrollPanel>
+  );
+}
+
+const DIRTY_WORKTREE_AGENT_PROMPT =
+  "paire it; and follow all the instructions to review and apply the worktree review draft.";
+
+function worktreeApplyPrompt(draftPath: string) {
+  return [
+    `Fill the worktree review draft at ${draftPath} in place (group claims into threads, cover every changed file with evidence), then run:`,
+    `paire worktree --apply ${draftPath}`,
+    "Fix any PAIRE_APPLY_REJECTED issues it lists and re-run until it exits 0.",
+  ].join("\n");
+}
+
+function staleWorktreePrompt(draftPath: string | null) {
+  return [
+    "The working tree changed since the worktree review was applied. Regenerate the draft and amend the claims:",
+    "Run: paire it",
+    `Then edit the prefilled draft${draftPath ? ` at ${draftPath}` : ""} in place — it carries the prior claims as "unchanged"; update the ones the new diff changed, keep accurate ones as "unchanged", and cover every changed file.`,
+    `Finally run: paire worktree --apply ${draftPath ?? "<draft path>"}`,
+    "Fix any PAIRE_APPLY_REJECTED issues and re-run until it exits 0.",
+  ].join("\n");
+}
+
+function CopyAgentPromptButton({
+  label = "Copy agent prompt",
+  text,
+  tone = "amber",
+}: {
+  label?: string;
+  text: string;
+  tone?: "amber" | "neutral";
+}) {
   const [copied, setCopied] = React.useState(false);
 
   const copy = async () => {
@@ -1323,9 +1645,13 @@ function CopyAgentPromptButton({ text }: { text: string }) {
       type="button"
       size="sm"
       variant="outline"
-      className="shrink-0 border-amber-300/80 bg-amber-100/60 h-6 px-2 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60"
-      title="Copy agent prompt"
-      aria-label="Copy agent prompt for coding agent"
+      className={cn(
+        "shrink-0 h-6 px-2",
+        tone === "amber" &&
+          "border-amber-300/80 bg-amber-100/60 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60",
+      )}
+      title={label}
+      aria-label={`${label} for coding agent`}
       onClick={() => void copy()}
     >
       {copied ? (
@@ -1336,30 +1662,10 @@ function CopyAgentPromptButton({ text }: { text: string }) {
       ) : (
         <>
           <Bot className="size-3.5" aria-hidden />
-          <span className="text-xs">Copy agent prompt</span>
+          <span className="text-xs">{label}</span>
         </>
       )}
     </Button>
-  );
-}
-
-function DirtyWorktreeAlert() {
-  return (
-    <Alert className="mb-4 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
-      <AlertTriangle />
-      <AlertTitle>
-        These are <strong>not</strong> the latest changes.
-      </AlertTitle>
-      <AlertDescription className="text-amber-900 dark:text-amber-200">
-        <div className="flex flex-wrap items-start gap-2">
-          <p className="min-w-0 flex-1">
-            Commit your worktree changes, then run <code>paire review</code>{" "}
-            again to review the latest committed code.
-          </p>
-          <CopyAgentPromptButton text={DIRTY_WORKTREE_AGENT_PROMPT} />
-        </div>
-      </AlertDescription>
-    </Alert>
   );
 }
 
@@ -2060,6 +2366,7 @@ function DiffViewControls({
 }
 
 function ReviewCodePanel({
+  canCollapse = true,
   codeViewRef,
   className,
   diffError,
@@ -2070,6 +2377,7 @@ function ReviewCodePanel({
   onOpenChange,
   onSelectedEvidenceChange,
 }: {
+  canCollapse?: boolean;
   codeViewRef: React.RefObject<CodeViewHandle<undefined> | null>;
   className?: string;
   diffError: boolean;
@@ -2129,17 +2437,19 @@ function ReviewCodePanel({
     >
       <div className="flex min-h-11 items-center justify-between gap-2 border-b px-3">
         <div className="flex min-w-0 items-center gap-2">
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            className="size-8"
-            aria-label="Collapse code panel"
-            title="Collapse code panel"
-            onClick={() => onOpenChange(false)}
-          >
-            <PanelRightClose data-icon="inline-start" />
-          </Button>
+          {canCollapse ? (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="size-8"
+              aria-label="Collapse code panel"
+              title="Collapse code panel"
+              onClick={() => onOpenChange(false)}
+            >
+              <PanelRightClose data-icon="inline-start" />
+            </Button>
+          ) : null}
           <Badge variant="outline" className="text-muted-foreground">
             {items.length} {items.length === 1 ? "file" : "files"}
           </Badge>
@@ -2337,12 +2647,13 @@ function ClaimActions({
   onStatusChange?: (humanStatus: HumanStatus) => void;
 }) {
   const queryClient = useQueryClient();
+  const claimApi = useClaimApi();
   const statusMutation = useMutation({
     mutationFn: (humanStatus: HumanStatus) =>
-      postClaimHumanStatus(claim.id, humanStatus),
+      claimApi.post(claim.id, humanStatus),
     onSuccess: (humanStatus) => {
       onStatusChange?.(humanStatus);
-      return queryClient.invalidateQueries({ queryKey: ["review"] });
+      return queryClient.invalidateQueries({ queryKey: claimApi.queryKey });
     },
   });
 

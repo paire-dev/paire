@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "paire-review-ui",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["src/cli.ts", "_review-serve"],
+      "port": 22222,
+      "autoPort": false
+    },
+    {
+      "name": "paire-cli-dev",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["src/cli.ts"],
+      "port": 22222
+    }
+  ]
+}

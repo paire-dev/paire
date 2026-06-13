@@ -7,22 +7,30 @@ import {
   checkPriorClaims,
   formatRejection,
   validateApplyPayload,
+  validateWorktreeApplyPayload,
   type AgentApplyPayload,
   type AgentClaim,
   type AgentEvidence,
   type AgentThread,
+  type AgentWorktreeApplyPayload,
   type ApplyIssue,
   type ClaimImportance,
   type ClaimStatus,
   type HumanStatus,
 } from "./apply-validation";
-import { buildReviewDraft, stripDraftAnnotations } from "./review-draft";
+import {
+  buildReviewDraft,
+  buildWorktreeReviewDraft,
+  stripDraftAnnotations,
+  type WorktreeDraftPacket,
+} from "./review-draft";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -91,6 +99,35 @@ export type ClaimRevisionRow = {
   importance: ClaimImportance;
   evidencesJson: string;
   createdAt: number;
+};
+
+type WorktreeReviewRow = {
+  id: string;
+  sessionId: string;
+  worktreeHash: string;
+  gitHead: string;
+  state: "pending_agent" | "applied";
+  packetJson: string | null;
+  draftPath: string | null;
+  payloadJson: string | null;
+  createdAt: number;
+  updatedAt: number;
+  appliedAt: number | null;
+};
+
+type WorktreePacket = {
+  packetId: string;
+  sessionId: string;
+  projectKey: string;
+  worktreeReviewId: string;
+  worktreeHash: string;
+  gitHead: string;
+  goal: string | null;
+  changedFiles: ChangedFile[];
+  skipped: string[];
+  touchedSnippets: TouchedSnippet[];
+  activeClaims: Array<AgentClaim & { threadTitle: string }>;
+  safeInspectionCommands: string[];
 };
 
 type GitState = {
@@ -164,6 +201,7 @@ const REVIEW_TOKEN_HEADER = "x-paire-review-token";
 // browser tab left open after the terminal closes keeps working for a while.
 const REVIEW_IDLE_TIMEOUT_MS = 30 * 60_000;
 const REVIEW_IDLE_CHECK_MS = 60_000;
+const MAX_WORKTREE_PREVIEW_FILE_BYTES = 1_000_000;
 
 // Per-session record of "where is this branch's review UI". The pid/port now
 // point at the shared daemon; many sessions share them.
@@ -216,6 +254,8 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         return 0;
       case "review":
         return await reviewCommand(rest, ctx);
+      case "worktree":
+        return await worktreeCommand(rest, ctx);
       case "it":
         await itCommand(rest, ctx);
         return 0;
@@ -387,7 +427,8 @@ async function reviewCommand(args: string[], ctx: Context): Promise<number> {
     return 0;
   }
   if (!git.clean) {
-    ctx.stdout(dirtyWorktreeMessage(git));
+    const draft = await createWorktreeReviewDraft(ctx, session, git);
+    ctx.stdout(worktreeActionRequiredMessage({ git, draft }));
     await openReviewUi(ctx, session, git, open);
     return 0;
   }
@@ -670,6 +711,635 @@ async function checkReviewCommand(checkPath: string, ctx: Context) {
   }
   ctx.stdout("PAIRE_DRAFT_OK");
   return 0;
+}
+
+const WORKTREE_APPLY_COMMAND = "paire worktree --apply";
+
+async function worktreeCommand(args: string[], ctx: Context): Promise<number> {
+  const parsed = parseFlags(args);
+  const applyPath = stringFlag(parsed, "apply");
+  const checkPath = stringFlag(parsed, "check");
+  const open = parsed.flags.has("open");
+  if (applyPath || parsed.flags.has("stdin")) {
+    return await applyWorktreeReviewCommand(
+      applyPath,
+      parsed.flags.has("stdin"),
+      open,
+      ctx,
+    );
+  }
+  if (checkPath) {
+    return await checkWorktreeReviewCommand(checkPath, ctx);
+  }
+  ctx.stderr(
+    "Usage: paire worktree --apply <file> | --check <file> [--open]\nRun paire it on a dirty worktree to generate the worktree review draft first.",
+  );
+  return 1;
+}
+
+type ReadyWorktreeApply = {
+  payload: AgentWorktreeApplyPayload;
+  session: SessionRow;
+  git: GitState;
+  review: WorktreeReviewRow;
+  packet: WorktreePacket;
+  priorPayload: AgentWorktreeApplyPayload | null;
+};
+
+async function applyWorktreeReviewCommand(
+  applyPath: string | undefined,
+  useStdin: boolean,
+  open: boolean,
+  ctx: Context,
+) {
+  const draftPath = useStdin
+    ? "(stdin)"
+    : resolveRequiredPath(applyPath, "Missing --apply file.");
+  const result = await validateWorktreeReviewDraft(draftPath, useStdin, ctx);
+  if (result.issues.length > 0 || !result.ready) {
+    ctx.stderr(formatRejection(draftPath, result.issues, WORKTREE_APPLY_COMMAND));
+    return 1;
+  }
+  const { payload, session, git, review, priorPayload } = result.ready;
+  const merged = mergeWorktreePayload(priorPayload, payload);
+  const now = Date.now();
+  ctx.db
+    .prepare(
+      "update worktree_reviews set state = 'applied', payloadJson = ?, gitHead = ?, updatedAt = ?, appliedAt = ? where id = ?",
+    )
+    .run(JSON.stringify(merged), payload.gitHead, now, now, review.id);
+  ctx.stdout(formatWorktreeStatus(session, git, merged));
+  await openReviewUi(ctx, session, git, open);
+  return 0;
+}
+
+async function checkWorktreeReviewCommand(checkPath: string, ctx: Context) {
+  const draftPath = resolve(checkPath);
+  const result = await validateWorktreeReviewDraft(draftPath, false, ctx);
+  if (result.issues.length > 0 || !result.ready) {
+    ctx.stderr(formatRejection(draftPath, result.issues, WORKTREE_APPLY_COMMAND));
+    return 1;
+  }
+  ctx.stdout("PAIRE_DRAFT_OK");
+  return 0;
+}
+
+async function validateWorktreeReviewDraft(
+  draftPath: string,
+  useStdin: boolean,
+  ctx: Context,
+): Promise<{ ready?: ReadyWorktreeApply; issues: ApplyIssue[] }> {
+  const raw = useStdin
+    ? await new Response(Bun.stdin).text()
+    : await Bun.file(draftPath).text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return {
+      issues: [
+        {
+          code: "invalid_field",
+          field: "$",
+          value: error instanceof Error ? error.message : String(error),
+          fix: "Fix the draft so it is valid JSON, then re-run the command.",
+        },
+      ],
+    };
+  }
+
+  const stripped = stripDraftAnnotations(parsed);
+  const strippedBytes = new TextEncoder().encode(JSON.stringify(stripped)).length;
+  if (strippedBytes > MAX_APPLY_PAYLOAD_BYTES) {
+    return {
+      issues: [
+        {
+          code: "payload_too_large",
+          value: strippedBytes,
+          fix: `The stripped apply payload is too large; keep it under ${MAX_APPLY_PAYLOAD_BYTES} bytes.`,
+        },
+      ],
+    };
+  }
+
+  const sessionId = readStringProperty(stripped, "sessionId");
+  const session = sessionId
+    ? ctx.db
+        .query<SessionRow, [string]>("select * from sessions where id = ?")
+        .get(sessionId)
+    : null;
+  const worktreeReviewId = readStringProperty(stripped, "worktreeReviewId");
+  const review =
+    session && worktreeReviewId
+      ? getWorktreeReviewById(ctx.db, worktreeReviewId)
+      : null;
+  // Prior claims come from this hash's payload when re-applying, otherwise from
+  // the most recent applied worktree review so a draft amended across a diff
+  // change still validates and hydrates unchanged claims.
+  const priorPayload =
+    review && session && review.sessionId === session.id
+      ? parseWorktreePayload(
+          review.state === "applied" && review.payloadJson
+            ? review.payloadJson
+            : (getLatestAppliedWorktreeReview(ctx.db, session.id)?.payloadJson ??
+                null),
+        )
+      : null;
+  const priorActiveClaims = priorPayload
+    ? worktreeActiveClaims(priorPayload)
+    : [];
+  const knownClaimIds = new Set(priorActiveClaims.map((claim) => claim.id));
+  const validation = validateWorktreeApplyPayload(stripped, { knownClaimIds });
+  const issues = [...validation.issues];
+  const payload = validation.payload;
+
+  if (!payload) return { issues };
+  if (!session) {
+    issues.push({
+      code: "unknown_revision",
+      field: "sessionId",
+      value: payload.sessionId,
+      fix: "Run paire it again on the dirty worktree and edit the generated worktree-review-draft.json.",
+    });
+    return { issues };
+  }
+
+  const git = getGitState(session.repoRoot);
+  const worktree = gitWorktreeDiff(session.repoRoot);
+  const currentHash = computeWorktreeHash(git, worktree);
+  if (currentHash !== payload.worktreeHash) {
+    issues.push({
+      code: "stale_worktree",
+      field: "worktreeHash",
+      value: payload.worktreeHash,
+      fix: `The working tree changed since this draft was generated. Run paire it again; the current worktree hash is ${currentHash}.`,
+    });
+  }
+  if (git.head !== payload.gitHead) {
+    issues.push({
+      code: "stale_worktree",
+      field: "gitHead",
+      value: payload.gitHead,
+      fix: `HEAD moved since this draft was generated. Run paire it again; current HEAD is ${git.head}.`,
+    });
+  }
+
+  if (
+    !review ||
+    review.sessionId !== session.id ||
+    review.worktreeHash !== payload.worktreeHash
+  ) {
+    issues.push({
+      code: "unknown_worktree_review",
+      field: "worktreeReviewId",
+      value: payload.worktreeReviewId,
+      fix: "Run paire it again on the dirty worktree and edit the current worktree-review-draft.json.",
+    });
+    return { issues };
+  }
+
+  const packet = parseStoredWorktreePacket(review);
+  if (!packet || packet.packetId !== payload.packetId) {
+    issues.push({
+      code: "unknown_worktree_review",
+      field: "packetId",
+      value: payload.packetId,
+      fix: "Run paire it again; this draft does not match the current worktree packet.",
+    });
+    return { issues };
+  }
+
+  issues.push(
+    ...checkPriorClaims(
+      priorActiveClaims.flatMap((claim) =>
+        claim.threadId ? [{ id: claim.id, threadId: claim.threadId }] : [],
+      ),
+      payload,
+      validation.submittedClaimIds,
+    ),
+    ...checkCoverage(
+      packet,
+      payload,
+      worktreePreservedEvidencePaths(priorPayload, payload),
+    ),
+  );
+
+  if (issues.length > 0) return { issues };
+  return { ready: { payload, session, git, review, packet, priorPayload }, issues };
+}
+
+function worktreePreservedEvidencePaths(
+  priorPayload: AgentWorktreeApplyPayload | null,
+  payload: AgentWorktreeApplyPayload,
+) {
+  if (!priorPayload) return [];
+  const priorEvidencePaths = new Map<string, string[]>();
+  for (const thread of priorPayload.threads) {
+    for (const claim of thread.claims) {
+      priorEvidencePaths.set(
+        claim.id,
+        (claim.evidences ?? []).map((evidence) => evidence.filePath),
+      );
+    }
+  }
+  const paths: string[] = [];
+  for (const thread of payload.threads) {
+    for (const claim of thread.claims) {
+      if (
+        claim.agentStatus !== "unchanged" ||
+        (claim.evidences && claim.evidences.length > 0)
+      ) {
+        continue;
+      }
+      for (const path of priorEvidencePaths.get(claim.id) ?? []) {
+        paths.push(path);
+      }
+    }
+  }
+  return paths;
+}
+
+// Merge a freshly-validated worktree apply payload with the prior applied
+// payload so unchanged/minimal claims keep their stored copy, importance,
+// evidences, and human status. Mirrors the committed apply preserve logic but
+// operates on the JSON payload instead of normalized tables.
+function mergeWorktreePayload(
+  prior: AgentWorktreeApplyPayload | null,
+  next: AgentWorktreeApplyPayload,
+): AgentWorktreeApplyPayload {
+  const priorThreads = new Map<string, AgentThread>();
+  const priorClaims = new Map<string, AgentClaim>();
+  if (prior) {
+    for (const thread of prior.threads) {
+      priorThreads.set(thread.id, thread);
+      for (const claim of thread.claims) priorClaims.set(claim.id, claim);
+    }
+  }
+
+  const threads = next.threads.map((thread) => {
+    const priorThread = priorThreads.get(thread.id);
+    const preserveThreadCopy =
+      !!priorThread &&
+      thread.claims.length > 0 &&
+      thread.claims.every((claim) => canPreserveExistingThreadCopy(claim));
+    const claims = thread.claims.map((claim) =>
+      mergeWorktreeClaim(claim, thread.id, priorClaims.get(claim.id)),
+    );
+    const title = preserveThreadCopy && priorThread ? priorThread.title : thread.title;
+    const summary =
+      preserveThreadCopy && priorThread ? priorThread.summary : thread.summary;
+    return {
+      id: thread.id,
+      title,
+      ...(summary ? { summary } : {}),
+      claims,
+    } satisfies AgentThread;
+  });
+  return { ...next, threads };
+}
+
+function mergeWorktreeClaim(
+  claim: AgentClaim,
+  parentThreadId: string,
+  prior: AgentClaim | undefined,
+): AgentClaim {
+  const threadId = claim.threadId ?? parentThreadId;
+  const hydrate = !!prior && !claim.title;
+  const title = hydrate ? (prior?.title ?? "") : (claim.title ?? "");
+  const description = hydrate
+    ? prior?.description
+    : claim.description;
+  const importance = hydrate
+    ? (prior?.importance ?? "minor")
+    : (claim.importance ?? "minor");
+  const before = hydrate
+    ? (prior?.before ?? null)
+    : (claim.before ?? null);
+  const after = hydrate
+    ? (prior?.after ?? null)
+    : (claim.after ?? null);
+  const preserveEvidence =
+    canPreserveExistingEvidenceRows(claim.agentStatus) &&
+    (!claim.evidences || claim.evidences.length === 0);
+  const evidences = preserveEvidence
+    ? (prior?.evidences ?? [])
+    : (claim.evidences ?? []);
+  const humanStatus =
+    prior && claim.agentStatus !== "unchanged"
+      ? "unreviewed"
+      : (prior?.humanStatus ?? claim.humanStatus ?? "unreviewed");
+  return {
+    id: claim.id,
+    threadId,
+    title,
+    ...(description ? { description } : {}),
+    agentStatus: claim.agentStatus,
+    importance,
+    humanStatus,
+    before,
+    after,
+    evidences,
+  };
+}
+
+function worktreeActiveClaims(
+  payload: AgentWorktreeApplyPayload,
+): Array<AgentClaim & { threadId: string; threadTitle: string }> {
+  const claims: Array<AgentClaim & { threadId: string; threadTitle: string }> = [];
+  for (const thread of payload.threads) {
+    for (const claim of thread.claims) {
+      if (
+        claim.agentStatus === "invalidated" ||
+        claim.agentStatus === "superseded"
+      ) {
+        continue;
+      }
+      claims.push({
+        ...claim,
+        threadId: claim.threadId ?? thread.id,
+        threadTitle: thread.title,
+      });
+    }
+  }
+  return claims;
+}
+
+async function createWorktreeReviewDraft(
+  ctx: Context,
+  session: SessionRow,
+  git: GitState,
+) {
+  const worktree = gitWorktreeDiff(session.repoRoot);
+  const worktreeHash = computeWorktreeHash(git, worktree);
+  const existing = getWorktreeReviewByHash(ctx.db, session.id, worktreeHash);
+  const worktreeReviewId = existing?.id ?? `wtr_${crypto.randomUUID()}`;
+  const packetId = `wpkt_${worktreeReviewId}`;
+  const changedFiles = summarizeChangedFiles(worktree.diff);
+  const safeInspectionCommands = changedFiles
+    .filter((file) => file.summarized)
+    .flatMap((file) => [
+      `git diff --stat -- ${shellQuote(file.path)}`,
+      `git diff --unified=40 -- ${shellQuote(file.path)}`,
+    ]);
+  // Seed the draft with the prior claims so the agent amends them like the
+  // committed flow: reuse this hash's payload if it was already applied,
+  // otherwise carry forward the most recent applied worktree review.
+  const priorPayload = parseWorktreePayload(
+    existing?.payloadJson ??
+      getLatestAppliedWorktreeReview(ctx.db, session.id)?.payloadJson ??
+      null,
+  );
+  const activeClaims = priorPayload ? worktreeActiveClaims(priorPayload) : [];
+  const packet: WorktreePacket = {
+    packetId,
+    sessionId: session.id,
+    projectKey: session.projectKey,
+    worktreeReviewId,
+    worktreeHash,
+    gitHead: git.head,
+    goal: session.goal,
+    changedFiles,
+    skipped: worktree.skipped,
+    touchedSnippets: touchedSnippets(worktree.diff),
+    activeClaims,
+    safeInspectionCommands,
+  };
+  const packetJson = JSON.stringify(packet, null, 2);
+  const packetPath = await writeWorktreePacketExport(ctx, session, packetJson);
+  const draftPacket: WorktreeDraftPacket = {
+    packetId,
+    sessionId: session.id,
+    worktreeReviewId,
+    worktreeHash,
+    gitHead: git.head,
+    goal: session.goal,
+    changedFiles,
+    skipped: worktree.skipped,
+    touchedSnippets: packet.touchedSnippets,
+    safeInspectionCommands,
+  };
+  const draft = buildWorktreeReviewDraft(draftPacket, activeClaims);
+  const draftJson = JSON.stringify(draft, null, 2);
+  const draftPath = await writeWorktreeDraftExport(ctx, session, draftJson);
+  const now = Date.now();
+  if (existing) {
+    ctx.db
+      .prepare(
+        "update worktree_reviews set gitHead = ?, packetJson = ?, draftPath = ?, updatedAt = ? where id = ?",
+      )
+      .run(git.head, packetJson, draftPath, now, worktreeReviewId);
+  } else {
+    ctx.db
+      .prepare(
+        `insert into worktree_reviews (id, sessionId, worktreeHash, gitHead, state, packetJson, draftPath, payloadJson, createdAt, updatedAt, appliedAt)
+         values (?, ?, ?, ?, 'pending_agent', ?, ?, null, ?, ?, null)`,
+      )
+      .run(
+        worktreeReviewId,
+        session.id,
+        worktreeHash,
+        git.head,
+        packetJson,
+        draftPath,
+        now,
+        now,
+      );
+  }
+  return {
+    path: packetPath,
+    draftPath,
+    worktreeHash,
+    changedFiles,
+    skipped: worktree.skipped,
+    applied: existing?.state === "applied",
+    preview: worktreeDraftPreview(packet, draftPath),
+  };
+}
+
+function computeWorktreeHash(
+  git: GitState,
+  worktree: { diff: string; skipped: string[] },
+) {
+  return new Bun.CryptoHasher("sha256")
+    .update(PAIRE_VERSION)
+    .update("\0")
+    .update(git.head)
+    .update("\0")
+    .update(git.status)
+    .update("\0")
+    .update(worktree.diff)
+    .update("\0")
+    .update(worktree.skipped.join("\n"))
+    .digest("hex");
+}
+
+function worktreeDraftPreview(packet: WorktreePacket, draftPath: string) {
+  return [
+    `Worktree draft: ${draftPath}`,
+    `Packet: ${packet.packetId}`,
+    `Worktree hash: ${packet.worktreeHash}`,
+    `HEAD: ${packet.gitHead}`,
+    `Changed files: ${packet.changedFiles.length}`,
+    ...packet.changedFiles
+      .slice(0, 12)
+      .map((file) => `- ${file.path} (+${file.additions}/-${file.deletions})`),
+    ...(packet.changedFiles.length > 12
+      ? [`- ... ${packet.changedFiles.length - 12} more`]
+      : []),
+  ].join("\n");
+}
+
+function worktreeActionRequiredMessage({
+  git,
+  draft,
+}: {
+  git: GitState;
+  draft: {
+    draftPath: string;
+    preview: string;
+    applied: boolean;
+  };
+}) {
+  return [
+    "PAIRE_WORKTREE_REVIEW",
+    "Action required — update the Paire worktree review",
+    "",
+    "These are uncommitted working-tree changes. Paire reviews them separately from",
+    "committed claims and keys the result to the current worktree diff.",
+    "A working-tree preview was opened for the human at the URL below.",
+    "",
+    draft.applied
+      ? "A worktree review was already applied for this exact diff; re-applying updates it."
+      : "No worktree review has been applied for this diff yet.",
+    "",
+    "Three steps. Done when step 3 exits 0.",
+    "",
+    "Step 1 — Inspect the worktree diff",
+    "Run and read:",
+    "git diff -w HEAD",
+    "(plus any untracked files Paire previewed)",
+    "",
+    "Step 2 — Edit the worktree review draft IN PLACE (do not create a new file)",
+    draft.draftPath,
+    "The draft is pre-filled: header IDs, every changed file under \"files\", and all prior",
+    "worktree claims (agentStatus \"unchanged\") are already correct.",
+    "- Cover every \"files\" entry: reference it from a claim's evidences, or set its",
+    "  disposition to \"acknowledged\" with a reason (mechanical/generated churn only).",
+    "- Leave still-accurate prior claims exactly as listed. Never delete a prior claim.",
+    "- Add new claims following context.claimTemplate; copy line numbers from the N|",
+    "  prefixes in context.touchedSnippets. Follow the \"instructions\" in the draft.",
+    "",
+    "Step 3 — Apply",
+    `${WORKTREE_APPLY_COMMAND} ${draft.draftPath}`,
+    "On failure it prints PAIRE_APPLY_REJECTED with a JSON list of exact fixes — edit the",
+    "draft and re-run. On success the Review UI opens automatically.",
+    draft.preview,
+    "",
+    `Current branch: ${git.branch}`,
+    `Current HEAD: ${git.head}`,
+  ].join("\n");
+}
+
+function formatWorktreeStatus(
+  session: SessionRow,
+  git: GitState,
+  payload: AgentWorktreeApplyPayload,
+) {
+  return [
+    "Paire worktree review applied",
+    `Session: ${session.id}`,
+    `Branch: ${git.branch}`,
+    `Worktree hash: ${payload.worktreeHash}`,
+    `HEAD: ${payload.gitHead}`,
+    `Review burden: ${worktreeBurden(payload)}`,
+  ].join("\n");
+}
+
+function worktreeBurden(payload: AgentWorktreeApplyPayload) {
+  const counts = new Map<string, number>();
+  for (const thread of payload.threads) {
+    for (const claim of thread.claims) {
+      counts.set(claim.agentStatus, (counts.get(claim.agentStatus) ?? 0) + 1);
+    }
+  }
+  if (counts.size === 0) return "0 claims";
+  return [...counts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([status, count]) => `${count} ${status}`)
+    .join(", ");
+}
+
+function parseWorktreePayload(
+  payloadJson: string | null,
+): AgentWorktreeApplyPayload | null {
+  if (!payloadJson) return null;
+  try {
+    return JSON.parse(payloadJson) as AgentWorktreeApplyPayload;
+  } catch {
+    return null;
+  }
+}
+
+function parseStoredWorktreePacket(review: WorktreeReviewRow) {
+  if (!review.packetJson) return null;
+  return JSON.parse(review.packetJson) as WorktreePacket;
+}
+
+function getWorktreeReviewByHash(
+  db: Database,
+  sessionId: string,
+  worktreeHash: string,
+) {
+  return db
+    .query<WorktreeReviewRow, [string, string]>(
+      "select * from worktree_reviews where sessionId = ? and worktreeHash = ?",
+    )
+    .get(sessionId, worktreeHash);
+}
+
+function getWorktreeReviewById(db: Database, id: string) {
+  return db
+    .query<WorktreeReviewRow, [string]>(
+      "select * from worktree_reviews where id = ?",
+    )
+    .get(id);
+}
+
+// The most recently applied worktree review for a session, regardless of hash.
+// Used to seed/amend drafts and to keep showing prior claims when the worktree
+// diff has moved on (the claims are then surfaced as stale).
+function getLatestAppliedWorktreeReview(db: Database, sessionId: string) {
+  return db
+    .query<WorktreeReviewRow, [string]>(
+      "select * from worktree_reviews where sessionId = ? and state = 'applied' order by appliedAt desc, updatedAt desc limit 1",
+    )
+    .get(sessionId);
+}
+
+async function writeWorktreePacketExport(
+  ctx: Context,
+  session: SessionRow,
+  packetJson: string,
+) {
+  const directory = projectExportDirectory(ctx, session);
+  ensurePrivateDirectory(directory);
+  const path = join(directory, "worktree-packet.json");
+  await Bun.write(path, packetJson);
+  ensurePrivateFile(path);
+  return path;
+}
+
+async function writeWorktreeDraftExport(
+  ctx: Context,
+  session: SessionRow,
+  draftJson: string,
+) {
+  const directory = projectExportDirectory(ctx, session);
+  ensurePrivateDirectory(directory);
+  const path = join(directory, "worktree-review-draft.json");
+  await Bun.write(path, draftJson);
+  ensurePrivateFile(path);
+  return path;
 }
 
 type ReadyApplyDraft = {
@@ -976,6 +1646,9 @@ async function resetCommand(ctx: Context) {
         .run(sessionId);
       ctx.db.prepare("delete from revisions where sessionId = ?").run(sessionId);
       ctx.db
+        .prepare("delete from worktree_reviews where sessionId = ?")
+        .run(sessionId);
+      ctx.db
         .prepare("update sessions set baseCommit = ?, updatedAt = ? where id = ?")
         .run(baselineFingerprint, updatedAt, sessionId);
       insertAppliedBaselineRevision(ctx.db, sessionId, baselineFingerprint, updatedAt);
@@ -1153,6 +1826,8 @@ function clearProjectReviewExports(ctx: Context, session: SessionRow) {
     "agent-result.json",
     "current-packet.json",
     "review-draft.json",
+    "worktree-packet.json",
+    "worktree-review-draft.json",
   ]) {
     const path = join(directory, filename);
     if (existsSync(path)) unlinkSync(path);
@@ -1237,9 +1912,6 @@ function formatStatus(db: Database, session: SessionRow, git: GitState) {
   return lines.join("\n");
 }
 
-const AGENT_DIRTY_WORKTREE_ONE_LINER =
-  "commit changes; paire it; and follow all the instructions to review and apply.";
-
 function reviewActionRequiredMessage({
   diffFrom,
   diffFromLabel,
@@ -1281,36 +1953,6 @@ function reviewActionRequiredMessage({
   ].join("\n");
 }
 
-function dirtyWorktreeMessage(git: GitState) {
-  return [
-    "PAIRE_NEEDS_COMMITTED_CHANGES",
-    "",
-    "Paire reviews committed code only.",
-    "The current worktree has uncommitted changes, so Paire will not create a review packet from dirty files.",
-    "Opening the existing review UI. It shows committed review state, not the latest worktree changes.",
-    "",
-    "Coding agent workflow — complete every step below in order. Do not skip steps.",
-    "",
-    "Step 1 — Commit worktree changes (required)",
-    "Commit or stash your changes before running Paire.",
-    "",
-    "Step 2 — Run Paire again (required)",
-    "Run: paire it",
-    "(or: commit, then paire review)",
-    "",
-    "Step 3 — Follow every printed instruction through apply (required)",
-    AGENT_DIRTY_WORKTREE_ONE_LINER,
-    "When paire review prints Action required, complete all three steps through paire review --apply.",
-    "Do not stop until apply succeeds; the Review UI opens automatically on success.",
-    "",
-    `Current branch: ${git.branch}`,
-    `Current HEAD: ${git.head}`,
-    "",
-    "Safe inspection:",
-    "`git status --short`",
-    "`git diff --stat`",
-  ].join("\n");
-}
 
 async function printStatusAndOpen(
   session: SessionRow,
@@ -1737,6 +2379,11 @@ function buildReviewRoutes(
     "/": reviewApp,
     "/api/review": sessionRoute(handleReviewRequest),
     "/api/review/diff": sessionRoute(handleReviewDiffRequest),
+    "/api/worktree/diff": sessionRoute(handleWorktreeDiffRequest),
+    "/api/worktree/review": sessionRoute(handleWorktreeReviewRequest),
+    "/api/worktree/claims/:claimId/human-status": sessionRoute(
+      handleWorktreeHumanStatusRequest,
+    ),
     "/api/claims/:claimId/evidence-diff": sessionRoute(
       handleEvidenceDiffRequest,
     ),
@@ -2083,6 +2730,160 @@ async function handleReviewDiffRequest(
   });
 }
 
+async function handleWorktreeDiffRequest(
+  request: Request,
+  session: SessionRow,
+  _ctx: Context,
+) {
+  if (request.method !== "GET") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  const git = getGitState(session.repoRoot);
+  const worktree = gitWorktreeDiff(session.repoRoot);
+  return Response.json({
+    diff: worktree.diff,
+    files: summarizeChangedFiles(worktree.diff).map((file) => ({
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+    })),
+    skipped: worktree.skipped,
+    worktreeHash: computeWorktreeHash(git, worktree),
+  });
+}
+
+async function handleWorktreeReviewRequest(
+  request: Request,
+  session: SessionRow,
+  ctx: Context,
+) {
+  if (request.method !== "GET") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  const git = getGitState(session.repoRoot);
+  const worktree = gitWorktreeDiff(session.repoRoot);
+  const worktreeHash = computeWorktreeHash(git, worktree);
+  const review = getWorktreeReviewByHash(ctx.db, session.id, worktreeHash);
+  const current =
+    review?.state === "applied"
+      ? parseWorktreePayload(review.payloadJson)
+      : null;
+  // When the current diff has no applied review, fall back to the most recent
+  // applied worktree review so prior claims keep showing — flagged as stale so
+  // the UI can prompt the agent to regenerate and amend them.
+  const fallback = current
+    ? null
+    : getLatestAppliedWorktreeReview(ctx.db, session.id);
+  const fallbackPayload = fallback
+    ? parseWorktreePayload(fallback.payloadJson)
+    : null;
+  const payload = current ?? fallbackPayload;
+  const stale = !current && !!payload;
+  return Response.json({
+    worktreeHash,
+    state: review?.state ?? "none",
+    stale,
+    appliedHash: current ? worktreeHash : (fallback?.worktreeHash ?? null),
+    draftPath: review?.draftPath ?? null,
+    burden: payload ? worktreeBurden(payload) : "0 claims",
+    generatedAt: Date.now(),
+    threads: payload ? buildWorktreeReviewThreads(payload) : [],
+  });
+}
+
+async function handleWorktreeHumanStatusRequest(
+  request: Request,
+  session: SessionRow,
+  ctx: Context,
+) {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+  const claimId = (request as Request & { params: { claimId: string } }).params
+    .claimId;
+  const body = (await request.json()) as { humanStatus?: unknown };
+  if (
+    typeof body.humanStatus !== "string" ||
+    !VALID_HUMAN_STATUSES.has(body.humanStatus)
+  ) {
+    return Response.json({ error: "Invalid humanStatus." }, { status: 400 });
+  }
+  const git = getGitState(session.repoRoot);
+  const worktree = gitWorktreeDiff(session.repoRoot);
+  const worktreeHash = computeWorktreeHash(git, worktree);
+  const current = getWorktreeReviewByHash(ctx.db, session.id, worktreeHash);
+  // Update whichever applied review owns the shown claims: this hash when it has
+  // an applied review, otherwise the most recent applied (stale) review.
+  const review =
+    current?.state === "applied"
+      ? current
+      : getLatestAppliedWorktreeReview(ctx.db, session.id);
+  const payload = review ? parseWorktreePayload(review.payloadJson) : null;
+  if (!review || !payload) {
+    return Response.json(
+      { error: "No applied worktree review for this session." },
+      { status: 404 },
+    );
+  }
+  let found = false;
+  for (const thread of payload.threads) {
+    for (const claim of thread.claims) {
+      if (claim.id === claimId) {
+        claim.humanStatus = body.humanStatus as HumanStatus;
+        found = true;
+      }
+    }
+  }
+  if (!found) {
+    return Response.json({ error: "Claim not found." }, { status: 404 });
+  }
+  ctx.db
+    .prepare(
+      "update worktree_reviews set payloadJson = ?, updatedAt = ? where id = ?",
+    )
+    .run(JSON.stringify(payload), Date.now(), review.id);
+  return Response.json({ ok: true });
+}
+
+// Format an applied worktree payload into the thread/claim shape the review UI
+// renders, sorted by importance like committed review data.
+function buildWorktreeReviewThreads(payload: AgentWorktreeApplyPayload) {
+  return payload.threads
+    .map((thread) => ({
+      id: thread.id,
+      title: thread.title,
+      summary: thread.summary ?? "",
+      claims: thread.claims
+        .filter(
+          (claim) =>
+            claim.agentStatus !== "invalidated" &&
+            claim.agentStatus !== "superseded",
+        )
+        .map((claim) => ({
+          id: claim.id,
+          title: claim.title ?? "",
+          description: claim.description,
+          before: claim.before ?? null,
+          after: claim.after ?? null,
+          agentStatus: claim.agentStatus,
+          importance: (claim.importance ?? "minor") as ClaimImportance,
+          humanStatus: (claim.humanStatus ?? "unreviewed") as HumanStatus,
+          updatedAt: claim.updatedAt,
+          evidences: (claim.evidences ?? []).map((evidence) => ({
+            claimId: claim.id,
+            filePath: evidence.filePath,
+            startLine: evidence.startLine,
+            endLine: evidence.endLine,
+            symbol: evidence.symbol,
+            change: evidence.change,
+          })),
+        }))
+        .sort(compareClaimsByImportance),
+    }))
+    .filter((thread) => thread.claims.length > 0)
+    .sort(compareThreadsByImportance);
+}
+
 async function handleCommentRequest(
   request: Request,
   session: SessionRow,
@@ -2333,6 +3134,20 @@ function migrate(db: Database) {
       kind text not null,
       path text not null,
       createdAt integer not null
+    );
+    create table if not exists worktree_reviews (
+      id text primary key,
+      sessionId text not null,
+      worktreeHash text not null,
+      gitHead text not null,
+      state text not null,
+      packetJson text,
+      draftPath text,
+      payloadJson text,
+      createdAt integer not null,
+      updatedAt integer not null,
+      appliedAt integer,
+      unique(sessionId, worktreeHash)
     );
   `);
 }
@@ -2678,6 +3493,45 @@ function gitDiffForCurrentState(
   );
 }
 
+function gitWorktreeDiff(repoRoot: string) {
+  const trackedDiff = gitCommand(["diff", "-w", "HEAD"], repoRoot);
+  const skipped: string[] = [];
+  const parts = trackedDiff.trimEnd() ? [trackedDiff.trimEnd()] : [];
+  const untrackedPaths = gitCommand(
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    repoRoot,
+  )
+    .split("\0")
+    .filter(Boolean);
+
+  for (const filePath of untrackedPaths) {
+    try {
+      const stat = statSync(join(repoRoot, filePath));
+      if (!stat.isFile() || stat.size > MAX_WORKTREE_PREVIEW_FILE_BYTES) {
+        skipped.push(filePath);
+        continue;
+      }
+    } catch {
+      skipped.push(filePath);
+      continue;
+    }
+
+    const diff = gitCommand(
+      ["diff", "--no-index", "--", "/dev/null", filePath],
+      repoRoot,
+      { allowFail: true },
+    );
+    if (!diff.trim()) continue;
+    if (diff.includes("\0") || /^Binary files /m.test(diff)) {
+      skipped.push(filePath);
+      continue;
+    }
+    parts.push(diff.trimEnd());
+  }
+
+  return { diff: parts.join("\n"), skipped };
+}
+
 function gitCommand(
   args: string[],
   cwd: string,
@@ -2875,6 +3729,7 @@ function helpText() {
     "Commands:",
     "  start --base <ref> --goal <text>",
     "  review [--apply <file> | --check <file> | --stdin] [--open]",
+    "  worktree [--apply <file> | --check <file> | --stdin] [--open]",
     "  it [--open]",
     "  status",
     "  sync",

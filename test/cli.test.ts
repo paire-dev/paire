@@ -642,7 +642,7 @@ test("review API loads without embedding raw diffs and serves evidence diffs on 
   }
 });
 
-test("dirty worktree opens review UI with committed-state warning", () => {
+test("dirty worktree opens review UI with a worktree review draft flow", () => {
   const fixture = createFixtureRepo();
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
 
@@ -651,12 +651,16 @@ test("dirty worktree opens review UI with committed-state warning", () => {
 
   const review = runPaire(fixture, ["review", "--open"]);
   expect(review.exitCode).toBe(0);
-  expect(review.stdout).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
-  expect(review.stdout).toContain("Paire reviews committed code only");
+  expect(review.stdout).toContain("PAIRE_WORKTREE_REVIEW");
   expect(review.stdout).toContain(
-    "commit changes; paire it; and follow all the instructions to review and apply.",
+    "Action required — update the Paire worktree review",
   );
-  expect(review.stdout).toContain("Step 2 — Run Paire again (required)");
+  expect(review.stdout).toContain(
+    "A working-tree preview was opened for the human at the URL below.",
+  );
+  expect(review.stdout).toContain("Step 3 — Apply");
+  expect(review.stdout).toContain("paire worktree --apply");
+  expect(review.stdout).toContain("worktree-review-draft.json");
   expect(review.stdout).toContain("Open this URL in the browser:");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
@@ -664,6 +668,464 @@ test("dirty worktree opens review UI with committed-state warning", () => {
   expect(readFileSync(fixture.htmlCapture, "utf8")).toContain(
     'src="./main.tsx"',
   );
+
+  // The draft is written to disk and carries the worktree identity header.
+  const draftPath = extractWorktreeDraftPath(review.stdout);
+  const draft = JSON.parse(readFileSync(draftPath, "utf8"));
+  expect(draft.worktreeReviewId).toMatch(/^wtr_/);
+  expect(draft.worktreeHash).toMatch(/^[0-9a-f]{64}$/);
+  expect(draft.gitHead).toMatch(/^[0-9a-f]{40}$/);
+});
+
+test("worktree diff API returns tracked and untracked changes", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  writeFileSync(
+    join(fixture.repo, "src/new-file.ts"),
+    "export const added = true;\n",
+  );
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ id: string }, []>("select id from sessions").get();
+  db.close();
+  expect(session?.id).toBeTruthy();
+
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  try {
+    const state = await waitForServerState(fixture.home, session!.id);
+    const unauthenticated = await fetch(reviewApiUrl(state, "/api/worktree/diff"));
+    expect(unauthenticated.status).toBe(401);
+
+    const dirtyResponse = await reviewApiFetch(state, "/api/worktree/diff");
+    expect(dirtyResponse.ok).toBe(true);
+    const dirtyPayload = await dirtyResponse.json();
+    expect(dirtyPayload.diff).toContain("diff --git a/src/app.ts b/src/app.ts");
+    expect(dirtyPayload.diff).toContain("diff --git a/src/new-file.ts b/src/new-file.ts");
+    expect(dirtyPayload.diff).toContain("export const value = 2;");
+    expect(dirtyPayload.diff).toContain("export const added = true;");
+    expect(dirtyPayload.skipped).toEqual([]);
+    expect(dirtyPayload.files).toEqual(
+      expect.arrayContaining([
+        { path: "src/app.ts", additions: 1, deletions: 1 },
+        { path: "src/new-file.ts", additions: 1, deletions: 0 },
+      ]),
+    );
+
+    expect(dirtyPayload.worktreeHash).toMatch(/^[0-9a-f]{64}$/);
+
+    commitAll(fixture.repo, "commit dirty worktree");
+    const cleanPayload = await reviewApiFetch(state, "/api/worktree/diff").then(
+      (response) => response.json(),
+    );
+    expect(cleanPayload.diff).toBe("");
+    expect(cleanPayload.files).toEqual([]);
+    expect(cleanPayload.skipped).toEqual([]);
+    expect(cleanPayload.worktreeHash).toMatch(/^[0-9a-f]{64}$/);
+  } finally {
+    runPaire(fixture, ["server", "stop"]);
+  }
+});
+
+test("worktree diff API scopes concurrent sessions by token", async () => {
+  const first = createFixtureRepo();
+  const second = createFixtureRepo({ home: first.home });
+  expect(runPaire(first, ["start", "--base", "main"]).exitCode).toBe(0);
+  expect(runPaire(second, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  writeFileSync(join(first.repo, "src/app.ts"), "export const first = 1;\n");
+  writeFileSync(join(second.repo, "src/app.ts"), "export const second = 2;\n");
+
+  const firstSessionId = getOnlySessionId(first.home, first.repo);
+  const secondSessionId = getOnlySessionId(first.home, second.repo);
+
+  expect(runPaire(first, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  expect(runPaire(second, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  try {
+    const firstState = await waitForServerState(first.home, firstSessionId);
+    const secondState = await waitForServerState(first.home, secondSessionId);
+
+    const firstPayload = await reviewApiFetch(firstState, "/api/worktree/diff").then(
+      (response) => response.json(),
+    );
+    const secondPayload = await reviewApiFetch(secondState, "/api/worktree/diff").then(
+      (response) => response.json(),
+    );
+
+    expect(firstPayload.diff).toContain("export const first = 1;");
+    expect(firstPayload.diff).not.toContain("export const second = 2;");
+    expect(secondPayload.diff).toContain("export const second = 2;");
+    expect(secondPayload.diff).not.toContain("export const first = 1;");
+  } finally {
+    runPaire(second, ["server", "stop"]);
+    runPaire(first, ["server", "stop", "--all"]);
+  }
+});
+
+test("dirty paire it creates then reuses a worktree draft for the current hash", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const first = runPaire(fixture, ["it"]);
+  expect(first.exitCode).toBe(0);
+  expect(first.stdout).toContain("PAIRE_WORKTREE_REVIEW");
+  expect(first.stdout).toContain("paire worktree --apply");
+  const firstPacket = JSON.parse(
+    readFileSync(extractWorktreePacketPath(first.stdout), "utf8"),
+  );
+
+  // Re-running with the same dirty diff reuses the same worktree review row.
+  const second = runPaire(fixture, ["it"]);
+  expect(second.exitCode).toBe(0);
+  const secondPacket = JSON.parse(
+    readFileSync(extractWorktreePacketPath(second.stdout), "utf8"),
+  );
+  expect(secondPacket.worktreeReviewId).toBe(firstPacket.worktreeReviewId);
+  expect(secondPacket.worktreeHash).toBe(firstPacket.worktreeHash);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const rows = db
+    .query<{ count: number }, []>(
+      "select count(*) as count from worktree_reviews",
+    )
+    .get();
+  expect(rows?.count).toBe(1);
+  db.close();
+});
+
+test("paire worktree --apply stores claims without mutating committed tables", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const it = runPaire(fixture, ["it"]);
+  expect(it.exitCode).toBe(0);
+  const packet = JSON.parse(
+    readFileSync(extractWorktreePacketPath(it.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "worktree-result.json");
+  writeFileSync(resultPath, JSON.stringify(worktreeAgentResult(packet), null, 2));
+
+  const apply = runPaire(fixture, ["worktree", "--apply", resultPath]);
+  expect(apply.exitCode).toBe(0);
+  expect(apply.stdout).toContain("Paire worktree review applied");
+  expect(apply.stdout).toContain("Review burden: 1 new");
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const worktreeReview = db
+    .query<{ state: string; payloadJson: string | null }, []>(
+      "select state, payloadJson from worktree_reviews",
+    )
+    .get();
+  expect(worktreeReview?.state).toBe("applied");
+  expect(worktreeReview?.payloadJson).toContain("claim_worktree_value");
+  // Committed review tables are untouched (only the start baseline revision).
+  expect(
+    db.query<{ count: number }, []>("select count(*) as count from claims").get()
+      ?.count,
+  ).toBe(0);
+  expect(
+    db
+      .query<{ count: number }, []>(
+        "select count(*) as count from change_threads",
+      )
+      .get()?.count,
+  ).toBe(0);
+  expect(
+    db
+      .query<{ count: number }, []>(
+        "select count(*) as count from claim_evidences",
+      )
+      .get()?.count,
+  ).toBe(0);
+  expect(
+    db
+      .query<{ count: number }, []>(
+        "select count(*) as count from revisions where state != 'applied' or number != 0",
+      )
+      .get()?.count,
+  ).toBe(0);
+  db.close();
+});
+
+test("changing the dirty diff changes the hash and rejects a stale worktree apply", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const it = runPaire(fixture, ["it"]);
+  const packet = JSON.parse(
+    readFileSync(extractWorktreePacketPath(it.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "stale-worktree-result.json");
+  writeFileSync(resultPath, JSON.stringify(worktreeAgentResult(packet), null, 2));
+
+  // Mutate the working tree so the current worktree hash no longer matches.
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 3;\n");
+  const itAgain = runPaire(fixture, ["it"]);
+  const nextPacket = JSON.parse(
+    readFileSync(extractWorktreePacketPath(itAgain.stdout), "utf8"),
+  );
+  expect(nextPacket.worktreeHash).not.toBe(packet.worktreeHash);
+
+  const apply = runPaire(fixture, ["worktree", "--apply", resultPath]);
+  expect(apply.exitCode).not.toBe(0);
+  expect(apply.stderr).toContain("PAIRE_APPLY_REJECTED");
+  expect(apply.stderr).toContain('"code": "stale_worktree"');
+});
+
+test("re-running dirty paire it reloads applied worktree claims after daemon restart", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const it = runPaire(fixture, ["it"]);
+  const packet = JSON.parse(
+    readFileSync(extractWorktreePacketPath(it.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "reload-worktree-result.json");
+  writeFileSync(resultPath, JSON.stringify(worktreeAgentResult(packet), null, 2));
+  expect(runPaire(fixture, ["worktree", "--apply", resultPath]).exitCode).toBe(0);
+
+  const sessionId = getOnlySessionId(fixture.home, fixture.repo);
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  try {
+    const firstState = await waitForServerState(fixture.home, sessionId);
+    const unauthenticated = await fetch(
+      reviewApiUrl(firstState, "/api/worktree/review"),
+    );
+    expect(unauthenticated.status).toBe(401);
+    const before = await reviewApiFetch(
+      firstState,
+      "/api/worktree/review",
+    ).then((response) => response.json());
+    expect(before.state).toBe("applied");
+    expect(before.threads).toHaveLength(1);
+    expect(before.threads[0].claims[0].id).toBe("claim_worktree_value");
+
+    // Restart the daemon: claims must reload from disk for the same diff.
+    runPaire(fixture, ["server", "stop", "--all"]);
+    expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
+    const secondState = await waitForServerState(fixture.home, sessionId);
+    const after = await reviewApiFetch(
+      secondState,
+      "/api/worktree/review",
+    ).then((response) => response.json());
+    expect(after.state).toBe("applied");
+    expect(after.threads).toHaveLength(1);
+    expect(after.threads[0].claims[0].id).toBe("claim_worktree_value");
+  } finally {
+    runPaire(fixture, ["server", "stop", "--all"]);
+  }
+});
+
+test("committing the worktree returns review to committed mode and leaves worktree claims dormant", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const it = runPaire(fixture, ["it"]);
+  const packet = JSON.parse(
+    readFileSync(extractWorktreePacketPath(it.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "dormant-worktree-result.json");
+  writeFileSync(resultPath, JSON.stringify(worktreeAgentResult(packet), null, 2));
+  expect(runPaire(fixture, ["worktree", "--apply", resultPath]).exitCode).toBe(0);
+
+  commitAll(fixture.repo, "commit the worktree change");
+  const review = runPaire(fixture, ["review"]);
+  expect(review.exitCode).toBe(0);
+  expect(review.stdout).toContain("Action required");
+  expect(review.stdout).not.toContain("PAIRE_WORKTREE_REVIEW");
+
+  // The worktree claims persist (dormant), not promoted into committed tables.
+  const db = new Database(join(fixture.home, "paire.db"));
+  expect(
+    db
+      .query<{ count: number }, []>(
+        "select count(*) as count from worktree_reviews where state = 'applied'",
+      )
+      .get()?.count,
+  ).toBe(1);
+  expect(
+    db.query<{ count: number }, []>("select count(*) as count from claims").get()
+      ?.count,
+  ).toBe(0);
+  db.close();
+});
+
+test("worktree review API scopes concurrent sessions by token", async () => {
+  const first = createFixtureRepo();
+  const second = createFixtureRepo({ home: first.home });
+  expect(runPaire(first, ["start", "--base", "main"]).exitCode).toBe(0);
+  expect(runPaire(second, ["start", "--base", "main"]).exitCode).toBe(0);
+
+  writeFileSync(join(first.repo, "src/app.ts"), "export const value = 2;\n");
+  writeFileSync(join(second.repo, "src/app.ts"), "export const value = 9;\n");
+
+  const firstIt = runPaire(first, ["it"]);
+  const firstPacket = JSON.parse(
+    readFileSync(extractWorktreePacketPath(firstIt.stdout), "utf8"),
+  );
+  const firstResult = join(first.root, "first-worktree-result.json");
+  writeFileSync(
+    firstResult,
+    JSON.stringify(worktreeAgentResult(firstPacket), null, 2),
+  );
+  expect(runPaire(first, ["worktree", "--apply", firstResult]).exitCode).toBe(0);
+
+  // The second session has a dirty tree but no applied worktree review.
+  expect(runPaire(second, ["it"]).exitCode).toBe(0);
+
+  const firstSessionId = getOnlySessionId(first.home, first.repo);
+  const secondSessionId = getOnlySessionId(first.home, second.repo);
+
+  expect(runPaire(first, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  expect(runPaire(second, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  try {
+    const firstState = await waitForServerState(first.home, firstSessionId);
+    const secondState = await waitForServerState(first.home, secondSessionId);
+
+    const firstReview = await reviewApiFetch(
+      firstState,
+      "/api/worktree/review",
+    ).then((response) => response.json());
+    const secondReview = await reviewApiFetch(
+      secondState,
+      "/api/worktree/review",
+    ).then((response) => response.json());
+
+    expect(firstReview.state).toBe("applied");
+    expect(firstReview.threads).toHaveLength(1);
+    expect(secondReview.state).toBe("pending_agent");
+    expect(secondReview.threads).toHaveLength(0);
+    expect(firstReview.worktreeHash).not.toBe(secondReview.worktreeHash);
+  } finally {
+    runPaire(second, ["server", "stop"]);
+    runPaire(first, ["server", "stop", "--all"]);
+  }
+});
+
+test("worktree human status updates persist for the current worktree hash", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const it = runPaire(fixture, ["it"]);
+  const packet = JSON.parse(
+    readFileSync(extractWorktreePacketPath(it.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "human-status-worktree-result.json");
+  writeFileSync(resultPath, JSON.stringify(worktreeAgentResult(packet), null, 2));
+  expect(runPaire(fixture, ["worktree", "--apply", resultPath]).exitCode).toBe(0);
+
+  const sessionId = getOnlySessionId(fixture.home, fixture.repo);
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  try {
+    const state = await waitForServerState(fixture.home, sessionId);
+    const update = await fetch(
+      reviewApiUrl(state, "/api/worktree/claims/claim_worktree_value/human-status"),
+      {
+        method: "POST",
+        headers: {
+          "x-paire-review-token": state.token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ humanStatus: "accepted" }),
+      },
+    );
+    expect(update.ok).toBe(true);
+
+    const review = await reviewApiFetch(state, "/api/worktree/review").then(
+      (response) => response.json(),
+    );
+    expect(review.threads[0].claims[0].humanStatus).toBe("accepted");
+  } finally {
+    runPaire(fixture, ["server", "stop", "--all"]);
+  }
+});
+
+test("worktree review API keeps showing prior claims flagged stale when the diff changes", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const it = runPaire(fixture, ["it"]);
+  const packet = JSON.parse(
+    readFileSync(extractWorktreePacketPath(it.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "stale-show-result.json");
+  writeFileSync(resultPath, JSON.stringify(worktreeAgentResult(packet), null, 2));
+  expect(runPaire(fixture, ["worktree", "--apply", resultPath]).exitCode).toBe(0);
+
+  // Move the working tree on so the applied review no longer matches the diff.
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 5;\n");
+
+  const sessionId = getOnlySessionId(fixture.home, fixture.repo);
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  try {
+    const state = await waitForServerState(fixture.home, sessionId);
+    const review = await reviewApiFetch(state, "/api/worktree/review").then(
+      (response) => response.json(),
+    );
+    expect(review.stale).toBe(true);
+    expect(review.threads).toHaveLength(1);
+    expect(review.threads[0].claims[0].id).toBe("claim_worktree_value");
+    expect(review.appliedHash).toBe(packet.worktreeHash);
+    expect(review.appliedHash).not.toBe(review.worktreeHash);
+
+    // Human status still persists against the stale (latest applied) review.
+    const update = await fetch(
+      reviewApiUrl(
+        state,
+        "/api/worktree/claims/claim_worktree_value/human-status",
+      ),
+      {
+        method: "POST",
+        headers: {
+          "x-paire-review-token": state.token,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ humanStatus: "accepted" }),
+      },
+    );
+    expect(update.ok).toBe(true);
+    const after = await reviewApiFetch(state, "/api/worktree/review").then(
+      (response) => response.json(),
+    );
+    expect(after.stale).toBe(true);
+    expect(after.threads[0].claims[0].humanStatus).toBe("accepted");
+  } finally {
+    runPaire(fixture, ["server", "stop", "--all"]);
+  }
+});
+
+test("dirty paire it after a diff change seeds the draft with prior claims to amend", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const it = runPaire(fixture, ["it"]);
+  const packet = JSON.parse(
+    readFileSync(extractWorktreePacketPath(it.stdout), "utf8"),
+  );
+  const resultPath = join(fixture.root, "seed-amend-result.json");
+  writeFileSync(resultPath, JSON.stringify(worktreeAgentResult(packet), null, 2));
+  expect(runPaire(fixture, ["worktree", "--apply", resultPath]).exitCode).toBe(0);
+
+  // Change the diff, regenerate: the new draft carries the prior claim as unchanged.
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 7;\n");
+  const itAgain = runPaire(fixture, ["it"]);
+  const draft = JSON.parse(
+    readFileSync(extractWorktreeDraftPath(itAgain.stdout), "utf8"),
+  );
+  const claimIds = draft.threads.flatMap((thread: { claims: Array<{ id: string }> }) =>
+    thread.claims.map((claim) => claim.id),
+  );
+  expect(claimIds).toContain("claim_worktree_value");
+  expect(draft.threads[0].claims[0].agentStatus).toBe("unchanged");
 });
 
 test("sessions are scoped to the current git branch", () => {
@@ -1760,7 +2222,7 @@ test("compiled binary spawns review server without script path", async () => {
     stderr: "pipe",
   });
   expect(review.exitCode).toBe(0);
-  expect(text(review.stdout)).toContain("PAIRE_NEEDS_COMMITTED_CHANGES");
+  expect(text(review.stdout)).toContain("PAIRE_WORKTREE_REVIEW");
   expect(text(review.stdout)).toContain("Open this URL in the browser:");
 
   const db = new Database(join(fixture.home, "paire.db"));
@@ -1829,10 +2291,10 @@ test("compiled binary embeds the build version", () => {
   expect(text(result.stdout).trim()).toBe("v9.8.7");
 });
 
-function createUncommittedFixtureRepo(): Fixture {
+function createUncommittedFixtureRepo(options: { home?: string } = {}): Fixture {
   const root = mkdtempSync(join(tmpdir(), "paire-cli-"));
   const repo = join(root, "repo");
-  const home = join(root, "home");
+  const home = options.home ?? join(root, "home");
   const browserCapture = join(root, "browser.txt");
   const htmlCapture = join(root, "review.html");
   run(["git", "init", "-b", "main", repo], root);
@@ -1841,8 +2303,8 @@ function createUncommittedFixtureRepo(): Fixture {
   return fixture;
 }
 
-function createFixtureRepo(): Fixture {
-  const fixture = createUncommittedFixtureRepo();
+function createFixtureRepo(options: { home?: string } = {}): Fixture {
+  const fixture = createUncommittedFixtureRepo(options);
   const { repo } = fixture;
   run(["git", "config", "user.email", "test@example.com"], repo);
   run(["git", "config", "user.name", "Test User"], repo);
@@ -1904,6 +2366,17 @@ function commitAll(repo: string, message: string) {
   run(["git", "commit", "-m", message], repo);
 }
 
+function getOnlySessionId(home: string, repoRoot: string) {
+  const canonicalRepoRoot = gitOutput(["rev-parse", "--show-toplevel"], repoRoot);
+  const db = new Database(join(home, "paire.db"));
+  const session = db
+    .query<{ id: string }, [string]>("select id from sessions where repoRoot = ?")
+    .get(canonicalRepoRoot);
+  db.close();
+  if (!session?.id) throw new Error(`No session found for ${canonicalRepoRoot}`);
+  return session.id;
+}
+
 function text(value: Uint8Array) {
   return new TextDecoder().decode(value);
 }
@@ -1925,6 +2398,81 @@ function extractDraftPath(stdout: string) {
     }
   }
   throw new Error(`Draft path missing from output:\n${stdout}`);
+}
+
+function extractWorktreePacketPath(stdout: string) {
+  return join(dirname(extractWorktreeDraftPath(stdout)), "worktree-packet.json");
+}
+
+function worktreeAgentResult(packet: {
+  packetId: string;
+  sessionId: string;
+  worktreeReviewId: string;
+  worktreeHash: string;
+  gitHead: string;
+  changedFiles: Array<{ path: string; additions: number; deletions: number }>;
+}) {
+  const primaryFilePath = packet.changedFiles.some(
+    (file) => file.path === "src/app.ts",
+  )
+    ? "src/app.ts"
+    : packet.changedFiles[0]?.path;
+  if (!primaryFilePath) throw new Error("Worktree packet has no changed files.");
+  return {
+    packetId: packet.packetId,
+    sessionId: packet.sessionId,
+    worktreeReviewId: packet.worktreeReviewId,
+    worktreeHash: packet.worktreeHash,
+    gitHead: packet.gitHead,
+    files: packet.changedFiles.map((file) => ({
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+      disposition: "pending",
+    })),
+    threads: [
+      {
+        id: "thread_worktree",
+        title: "Worktree changes",
+        summary: "Working-tree edits under review.",
+        claims: [
+          {
+            id: "claim_worktree_value",
+            threadId: "thread_worktree",
+            title: "Adjust exported value",
+            description: "Updates the exported constant in the working tree.",
+            before: "Exported value was the prior constant.",
+            after: "Exported value is the new constant.",
+            agentStatus: "new",
+            importance: "minor",
+            humanStatus: "unreviewed",
+            evidences: [
+              {
+                filePath: primaryFilePath,
+                startLine: 1,
+                endLine: 1,
+                change: "Change the exported value in the working tree.",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function extractWorktreeDraftPath(stdout: string) {
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (
+      trimmed.startsWith("/") &&
+      trimmed.endsWith("worktree-review-draft.json") &&
+      !trimmed.includes("--apply")
+    ) {
+      return trimmed;
+    }
+  }
+  throw new Error(`Worktree draft path missing from output:\n${stdout}`);
 }
 
 function createSecondSandboxReviewPacket(fixture: Fixture) {
