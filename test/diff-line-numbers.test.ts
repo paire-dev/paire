@@ -51,7 +51,7 @@ test("deletions do not advance the new-file counter", () => {
   const { annotatedText, lines } = annotateHunkText(hunk, 10, 10);
 
   expect(annotatedText).toContain("  10| const a = 1");
-  expect(annotatedText).toContain("    |-const b = 2");
+  expect(annotatedText).toContain(" -11|-const b = 2");
   expect(annotatedText).toContain("  11|+const b = 3");
   expect(annotatedText).toContain("  12|+const c = 4");
   expect(annotatedText).toContain("  13| return a + b");

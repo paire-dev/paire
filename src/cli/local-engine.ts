@@ -4,6 +4,7 @@ import { Database } from "bun:sqlite";
 import { addedLineRanges, annotateHunkText } from "./diff-line-numbers";
 import {
   checkCoverage,
+  checkEvidenceSpans,
   checkPriorClaims,
   formatRejection,
   validateApplyPayload,
@@ -119,7 +120,9 @@ type Packet = {
   changedFiles: ChangedFile[];
   totalDiffArtifactPath: string;
   incrementalDiffArtifactPath: string;
+  annotatedDiffPath: string;
   touchedSnippets: TouchedSnippet[];
+  touchedRanges: TouchedRange[];
   activeClaims: Array<AgentClaim & { threadTitle: string }>;
   safeInspectionCommands: string[];
   resultSchema: Record<string, unknown>;
@@ -141,6 +144,11 @@ type TouchedSnippet = {
   text: string;
   addedRanges?: Array<{ startLine: number; endLine: number }>;
   summarized: boolean;
+};
+
+type TouchedRange = {
+  filePath: string;
+  ranges: Array<{ startLine: number; endLine: number }>;
 };
 
 type StoredAgentClaim = AgentClaim & {
@@ -404,7 +412,6 @@ async function reviewCommand(args: string[], ctx: Context): Promise<number> {
     : `base commit ${diffFrom}`;
   ctx.stdout(
     reviewActionRequiredMessage({
-      diffFrom,
       diffFromLabel,
       lastAppliedId: lastApplied?.id ?? null,
       packet,
@@ -800,6 +807,7 @@ async function validateReviewDraft(
       payload,
       preservedEvidencePaths(ctx.db, session.id, payload),
     ),
+    ...checkEvidenceSpans(packet, payload),
   );
 
   if (issues.length > 0) return { issues };
@@ -1027,6 +1035,11 @@ async function createPendingPacket(
     "total-diff",
     totalDiffArtifactPath,
   );
+  const annotatedDiffPath = await writeAnnotatedDiffExport(
+    ctx,
+    session,
+    buildAnnotatedDiff(incrementalDiff),
+  );
   const changedFiles = summarizeChangedFiles(incrementalDiff);
   const safeInspectionCommands = changedFiles
     .filter((file) => file.summarized)
@@ -1034,6 +1047,14 @@ async function createPendingPacket(
       `git diff --stat -- ${shellQuote(file.path)}`,
       `git diff --unified=40 -- ${shellQuote(file.path)}`,
     ]);
+  // Double-check evidence line numbers against the real file: nl -ba numbers the
+  // post-change file with the same coordinate system evidence spans use.
+  safeInspectionCommands.push(
+    ...changedFiles
+      .filter((file) => file.additions > 0)
+      .slice(0, 20)
+      .map((file) => `nl -ba -- ${shellQuote(file.path)}`),
+  );
   const packet: Packet = {
     packetId,
     sessionId: session.id,
@@ -1050,7 +1071,9 @@ async function createPendingPacket(
     changedFiles,
     totalDiffArtifactPath,
     incrementalDiffArtifactPath,
+    annotatedDiffPath,
     touchedSnippets: touchedSnippets(incrementalDiff),
+    touchedRanges: touchedRanges(incrementalDiff),
     activeClaims: getActiveClaims(ctx.db, session.id),
     safeInspectionCommands,
     resultSchema: {
@@ -1073,7 +1096,8 @@ async function createPendingPacket(
       "Set agentStatus to one of: new, unchanged, evidence_moved, amended, invalidated, superseded.",
       "For unchanged claims, keep the existing thread title, thread summary, claim title, claim description, claim before, and claim after byte-for-byte. Only update evidence spans and evidence change lines if the code moved.",
       "Put every evidence span under the claim that depends on it. Use multiple files and ranges to cover the entire change.",
-      "Evidence startLine/endLine are 1-based line numbers in the post-change file (HEAD). Copy them from the N| prefixes in touchedSnippets.text.",
+      "Evidence startLine/endLine are 1-based line numbers in the post-change file (HEAD). Copy them from the N| prefixes in the annotated diff at annotatedDiffPath (also mirrored in touchedSnippets.text); -N| marks a removed line by its old number — never copy a -N.",
+      "Double-check a span by running nl -ba on the file (in safeInspectionCommands): it numbers the post-change file with the same coordinate system evidence uses.",
       "Prefer multiple narrow evidence spans over one hunk-wide span when a claim depends on distinct changed regions. Use touchedSnippets.addedRanges as a guide for contiguous added-line groups.",
       "When a claim spans non-contiguous line ranges or files, add separate evidence objects under the same claim rather than one oversized range.",
       "Format human-facing thread title, thread summary, claim title, and claim description with Markdown.",
@@ -1117,6 +1141,7 @@ async function createPendingPacket(
   return {
     path: packetPath,
     draftPath,
+    annotatedDiffPath: packet.annotatedDiffPath,
     preview: draftPreview(packet, draftPath),
   };
 }
@@ -1153,6 +1178,7 @@ function clearProjectReviewExports(ctx: Context, session: SessionRow) {
     "agent-result.json",
     "current-packet.json",
     "review-draft.json",
+    "annotated-diff.txt",
   ]) {
     const path = join(directory, filename);
     if (existsSync(path)) unlinkSync(path);
@@ -1168,6 +1194,19 @@ async function writeCurrentPacketExport(
   ensurePrivateDirectory(directory);
   const path = join(directory, "current-packet.json");
   await Bun.write(path, packetJson);
+  ensurePrivateFile(path);
+  return path;
+}
+
+async function writeAnnotatedDiffExport(
+  ctx: Context,
+  session: SessionRow,
+  annotatedDiff: string,
+) {
+  const directory = projectExportDirectory(ctx, session);
+  ensurePrivateDirectory(directory);
+  const path = join(directory, "annotated-diff.txt");
+  await Bun.write(path, annotatedDiff);
   ensurePrivateFile(path);
   return path;
 }
@@ -1241,25 +1280,31 @@ const AGENT_DIRTY_WORKTREE_ONE_LINER =
   "commit changes; paire it; and follow all the instructions to review and apply.";
 
 function reviewActionRequiredMessage({
-  diffFrom,
   diffFromLabel,
   lastAppliedId,
   packet,
 }: {
-  diffFrom: string;
   diffFromLabel: string;
   lastAppliedId: string | null;
-  packet: { path: string; draftPath: string; preview: string };
+  packet: {
+    path: string;
+    draftPath: string;
+    annotatedDiffPath: string;
+    preview: string;
+  };
 }) {
   return [
     "Action required — update the Paire review",
     "",
     "Three steps. Done when step 3 exits 0.",
     "",
-    "Step 1 — Inspect the diff",
-    "Run and read:",
-    `git diff ${diffFrom}..HEAD`,
-    `(${diffFromLabel})`,
+    "Step 1 — Read the annotated diff",
+    "Read this file:",
+    packet.annotatedDiffPath,
+    `(diff range: ${diffFromLabel})`,
+    "Format legend: `N|+ added` and `N|  context` carry the post-change line number N —",
+    "copy N into evidence startLine/endLine. `-N|- removed` shows the old line number;",
+    "never copy a -N.",
     lastAppliedId ? `Last applied Paire revision: ${lastAppliedId}` : "Last applied Paire revision: none",
     "",
     "Step 2 — Edit the review draft IN PLACE (do not create a new file)",
@@ -1269,8 +1314,9 @@ function reviewActionRequiredMessage({
     "- Cover every \"files\" entry: reference it from a claim's evidences, or set its",
     "  disposition to \"acknowledged\" with a reason (mechanical/generated churn only).",
     "- Leave still-accurate prior claims exactly as listed. Never delete a prior claim.",
-    "- Add new claims following context.claimTemplate; copy line numbers from the N|",
-    "  prefixes in context.touchedSnippets. Follow the \"instructions\" in the draft.",
+    `- Add new claims following context.claimTemplate; copy line numbers from the N|`,
+    `  prefixes in the annotated diff at ${packet.annotatedDiffPath}; never copy a -N|`,
+    "  (removed line) number. Follow the \"instructions\" in the draft.",
     "",
     "Step 3 — Apply",
     `paire review --apply ${packet.draftPath}`,
@@ -2781,6 +2827,60 @@ function touchedSnippets(diff: string): TouchedSnippet[] {
     return [];
   }
   return snippets;
+}
+
+function buildAnnotatedDiff(diff: string): string {
+  try {
+    const patches = parsePatchFiles(diff, "paire-annotated", false);
+    const sections: string[] = [];
+    for (const file of patches.flatMap((patch) => patch.files)) {
+      const raw = fileToRawDiff(diff, file.name);
+      const summarize = shouldSummarizeFile(file.name, raw);
+      sections.push(`=== ${file.name} ===`);
+      if (summarize) {
+        sections.push(
+          `[summarized: ${file.name} is too large or generated; inspect the artifact diff path instead]`,
+        );
+        continue;
+      }
+      for (const hunk of file.hunks) {
+        const rawHunk = rawHunkText(raw, hunk.hunkSpecs ?? "");
+        const annotated = annotateHunkText(
+          rawHunk,
+          hunk.additionStart,
+          hunk.deletionStart,
+        );
+        sections.push(annotated.annotatedText);
+      }
+    }
+    if (sections.length === 0) return diff;
+    return `${sections.join("\n")}\n`;
+  } catch {
+    return diff;
+  }
+}
+
+function touchedRanges(diff: string): TouchedRange[] {
+  try {
+    const patches = parsePatchFiles(diff, "paire-ranges", false);
+    const out: TouchedRange[] = [];
+    for (const file of patches.flatMap((patch) => patch.files)) {
+      const raw = fileToRawDiff(diff, file.name);
+      if (shouldSummarizeFile(file.name, raw)) continue;
+      const ranges: Array<{ startLine: number; endLine: number }> = [];
+      for (const hunk of file.hunks) {
+        if (hunk.additionCount <= 0) continue;
+        ranges.push({
+          startLine: hunk.additionStart,
+          endLine: hunk.additionStart + hunk.additionCount - 1,
+        });
+      }
+      if (ranges.length > 0) out.push({ filePath: file.name, ranges });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 function shouldSummarizeFile(path: string, rawDiff: string) {

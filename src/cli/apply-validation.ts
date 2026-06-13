@@ -61,7 +61,11 @@ export type AgentApplyPayload = {
 };
 
 export type ValidationPacket = {
-  changedFiles: Array<{ path: string }>;
+  changedFiles: Array<{ path: string; summarized?: boolean }>;
+  touchedRanges?: Array<{
+    filePath: string;
+    ranges: Array<{ startLine: number; endLine: number }>;
+  }>;
 };
 
 export type ApplyIssue = {
@@ -76,6 +80,7 @@ export type ApplyIssue = {
     | "stale_fingerprint"
     | "unknown_revision"
     | "payload_too_large"
+    | "evidence_out_of_range"
     | "dirty_worktree";
   fix: string;
   field?: string;
@@ -223,6 +228,59 @@ export function checkCoverage(
       path,
       fix: `Add an evidence span with filePath "${path}" to a claim, or set this file's disposition to "acknowledged" with a reason in the "files" section.`,
     });
+  }
+  return issues;
+}
+
+const EVIDENCE_SPAN_TOLERANCE = 3;
+
+export function checkEvidenceSpans(
+  packet: ValidationPacket,
+  payload: AgentApplyPayload,
+): ApplyIssue[] {
+  // Older pending revisions have no touchedRanges; skip the check for them.
+  if (!packet.touchedRanges) return [];
+  const rangesByFile = new Map<
+    string,
+    Array<{ startLine: number; endLine: number }>
+  >();
+  for (const entry of packet.touchedRanges) {
+    rangesByFile.set(entry.filePath, entry.ranges);
+  }
+  const summarized = new Set(
+    packet.changedFiles
+      .filter((file) => file.summarized)
+      .map((file) => file.path),
+  );
+
+  const issues: ApplyIssue[] = [];
+  for (const thread of payload.threads) {
+    for (const claim of thread.claims) {
+      // Only new claims must anchor to changed lines; amended/evidence_moved
+      // legitimately re-anchor code that moved elsewhere.
+      if (claim.agentStatus !== "new") continue;
+      for (const evidence of claim.evidences ?? []) {
+        if (summarized.has(evidence.filePath)) continue;
+        const ranges = rangesByFile.get(evidence.filePath);
+        if (!ranges) continue;
+        const intersects = ranges.some(
+          (range) =>
+            evidence.startLine <= range.endLine + EVIDENCE_SPAN_TOLERANCE &&
+            evidence.endLine >= range.startLine - EVIDENCE_SPAN_TOLERANCE,
+        );
+        if (intersects) continue;
+        const rangeList = ranges
+          .map((range) => `${range.startLine}-${range.endLine}`)
+          .join(", ");
+        issues.push({
+          code: "evidence_out_of_range",
+          path: evidence.filePath,
+          claimId: claim.id,
+          threadId: thread.id,
+          fix: `Evidence span ${evidence.startLine}-${evidence.endLine} in "${evidence.filePath}" does not touch any changed lines. Changed line ranges in this file: ${rangeList}. Copy line numbers from the N| prefixes in the annotated diff, or verify with: nl -ba -- ${evidence.filePath}.`,
+        });
+      }
+    }
   }
   return issues;
 }
