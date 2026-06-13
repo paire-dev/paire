@@ -2869,11 +2869,18 @@ function touchedRanges(diff: string): TouchedRange[] {
       if (shouldSummarizeFile(file.name, raw)) continue;
       const ranges: Array<{ startLine: number; endLine: number }> = [];
       for (const hunk of file.hunks) {
-        if (hunk.additionCount <= 0) continue;
-        ranges.push({
-          startLine: hunk.additionStart,
-          endLine: hunk.additionStart + hunk.additionCount - 1,
-        });
+        if (hunk.additionCount > 0) {
+          ranges.push({
+            startLine: hunk.additionStart,
+            endLine: hunk.additionStart + hunk.additionCount - 1,
+          });
+          continue;
+        }
+        // Pure-deletion hunk (no new-side lines): anchor a point range at the
+        // deletion site so the +/-tolerance window keeps deletion-anchored
+        // "new" claims valid instead of dropping coverage for this region.
+        const anchor = Math.max(1, hunk.additionStart);
+        ranges.push({ startLine: anchor, endLine: anchor });
       }
       if (ranges.length > 0) out.push({ filePath: file.name, ranges });
     }

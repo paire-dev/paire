@@ -277,7 +277,7 @@ export function checkEvidenceSpans(
           path: evidence.filePath,
           claimId: claim.id,
           threadId: thread.id,
-          fix: `Evidence span ${evidence.startLine}-${evidence.endLine} in "${evidence.filePath}" does not touch any changed lines. Changed line ranges in this file: ${rangeList}. Copy line numbers from the N| prefixes in the annotated diff, or verify with: nl -ba -- ${evidence.filePath}.`,
+          fix: `Evidence span ${evidence.startLine}-${evidence.endLine} in "${evidence.filePath}" does not touch any changed lines. Changed line ranges in this file: ${rangeList}. Copy line numbers from the N| prefixes in the annotated diff, or verify with: nl -ba -- ${shellQuote(evidence.filePath)}.`,
         });
       }
     }
@@ -926,6 +926,10 @@ function readEvidencePath(value: unknown, field: string, issues: ApplyIssue[]) {
     return undefined;
   }
   return path;
+}
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -71,7 +71,43 @@ test("span outside tolerance is rejected and lists the valid ranges", () => {
   expect(issues[0]?.code).toBe("evidence_out_of_range");
   expect(issues[0]?.fix).toContain("120-140");
   expect(issues[0]?.fix).toContain("Changed line ranges in this file: 45-52");
-  expect(issues[0]?.fix).toContain("nl -ba -- src/foo.ts");
+  expect(issues[0]?.fix).toContain("nl -ba -- 'src/foo.ts'");
+});
+
+test("rejection message shell-quotes paths with spaces", () => {
+  const spaced: ValidationPacket = {
+    changedFiles: [{ path: "src/my file.ts", summarized: false }],
+    touchedRanges: [
+      { filePath: "src/my file.ts", ranges: [{ startLine: 10, endLine: 12 }] },
+    ],
+  };
+  const issues = checkEvidenceSpans(
+    spaced,
+    payload({ filePath: "src/my file.ts", startLine: 100, endLine: 105 }),
+  );
+  expect(issues).toHaveLength(1);
+  expect(issues[0]?.fix).toContain("nl -ba -- 'src/my file.ts'");
+});
+
+test("deletion-anchored point range keeps a nearby new claim valid", () => {
+  // touchedRanges emits a point range (startLine === endLine) for pure-deletion
+  // hunks; a new claim anchored within tolerance of that point must pass.
+  const deletionPacket: ValidationPacket = {
+    changedFiles: [{ path: "src/foo.ts", summarized: false }],
+    touchedRanges: [
+      { filePath: "src/foo.ts", ranges: [{ startLine: 88, endLine: 88 }] },
+    ],
+  };
+  const inRange = checkEvidenceSpans(
+    deletionPacket,
+    payload({ filePath: "src/foo.ts", startLine: 89, endLine: 90 }),
+  );
+  expect(inRange).toEqual([]);
+  const outOfRange = checkEvidenceSpans(
+    deletionPacket,
+    payload({ filePath: "src/foo.ts", startLine: 200, endLine: 201 }),
+  );
+  expect(outOfRange).toHaveLength(1);
 });
 
 test("non-new claims skip the span check", () => {
