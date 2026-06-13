@@ -21,6 +21,7 @@ export type DraftPacket = {
     summarized: boolean;
   }>;
   touchedSnippets: Array<unknown>;
+  annotatedDiffPath: string;
   safeInspectionCommands: string[];
 };
 
@@ -39,6 +40,7 @@ export type ReviewDraft = {
     goal: string | null;
     revisionNumber: number;
     diffCommand: string;
+    annotatedDiffPath: string;
     touchedSnippets: Array<unknown>;
     safeInspectionCommands: string[];
     claimTemplate: {
@@ -84,7 +86,7 @@ export const REVIEW_DRAFT_INSTRUCTIONS = [
   "importance: critical = correctness/security/data-loss; important = meaningful behavior change; minor = polish/tests/config; noise = mechanical churn (group noise in its own thread).",
   "Leave prior claims that are still accurate exactly as listed (agentStatus \"unchanged\"); never delete a prior claim — mark it invalidated or superseded instead.",
   "Every file under \"files\" must end up referenced by at least one evidence filePath, or have disposition \"acknowledged\" with a reason. Only acknowledge mechanical/generated churn.",
-  "Evidence startLine/endLine are 1-based line numbers in the post-change file. Copy them from the N| prefixes in context.touchedSnippets.text; prefer several narrow spans (context.touchedSnippets.addedRanges shows the contiguous groups).",
+  "Evidence startLine/endLine are 1-based line numbers in the post-change file. Read context.annotatedDiffPath and copy them from the N| prefixes; -N| marks a removed line by its old number, so never copy a -N. Double-check with nl -ba on the file (in context.safeInspectionCommands). Prefer several narrow spans (context.touchedSnippets.addedRanges shows the contiguous groups).",
   "claim.before/after: one-sentence behavior summaries (null for pure additions/removals); never mention file paths or line numbers. evidence.change: required verb-first imperative one-liner.",
   "Titles short and verb-first; description only adds detail beyond the title; Markdown allowed.",
 ];
@@ -115,6 +117,7 @@ export function buildReviewDraft(packet: DraftPacket, activeClaims: AgentClaim[]
       goal: packet.goal,
       revisionNumber: packet.revisionNumber,
       diffCommand: `git diff ${packet.previousAppliedFingerprint ?? packet.baseCommit}..HEAD`,
+      annotatedDiffPath: packet.annotatedDiffPath,
       touchedSnippets: packet.touchedSnippets,
       safeInspectionCommands: packet.safeInspectionCommands,
       claimTemplate: {

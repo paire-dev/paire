@@ -63,7 +63,8 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   const review = runPaire(fixture, ["review"]);
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("Action required");
-  expect(review.stdout).toContain("Step 1 — Inspect the diff");
+  expect(review.stdout).toContain("Step 1 — Read the annotated diff");
+  expect(review.stdout).toContain("annotated-diff.txt");
   expect(review.stdout).toContain("Step 2 — Edit the review draft IN PLACE");
   expect(review.stdout).toContain("Step 3 — Apply");
   expect(existsSync(fixture.browserCapture)).toBe(false);
@@ -71,6 +72,12 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   const packetPath = extractPacketPath(review.stdout);
   expect(packetPath).toContain(`${fixture.home}/projects/`);
   const packet = JSON.parse(readFileSync(packetPath, "utf8"));
+  const annotatedDiffPath = join(dirname(packetPath), "annotated-diff.txt");
+  expect(existsSync(annotatedDiffPath)).toBe(true);
+  const annotatedDiff = readFileSync(annotatedDiffPath, "utf8");
+  expect(annotatedDiff).toContain("=== src/app.ts ===");
+  expect(annotatedDiff).toMatch(/\d+\|\+/);
+  expect(annotatedDiff).toMatch(/-\d+\|-/);
   expect(review.stdout).toContain("review-draft.json");
   expect(review.stdout).toContain(packet.currentFingerprint);
   const agentResultPath = join(fixture.root, "review-draft-mutated.json");
@@ -151,6 +158,49 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
   );
+});
+
+test("apply rejects an out-of-range evidence span and accepts the corrected one", () => {
+  const fixture = createFixtureRepo();
+
+  runPaire(fixture, ["start", "--base", "main", "--goal", "Span validation"]);
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "add auth check");
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.exitCode).toBe(0);
+  const packetPath = extractPacketPath(review.stdout);
+  const packet = JSON.parse(readFileSync(packetPath, "utf8"));
+  expect(packet.touchedRanges).toBeTruthy();
+
+  const result = hardcodedAgentResult(packet);
+  result.threads[0]!.claims[0]!.evidences[0]!.startLine = 500;
+  result.threads[0]!.claims[0]!.evidences[0]!.endLine = 505;
+  const draftPath = join(fixture.root, "span-review-draft.json");
+  writeFileSync(draftPath, JSON.stringify(result, null, 2));
+
+  const rejected = runPaire(fixture, ["review", "--apply", draftPath]);
+  expect(rejected.exitCode).not.toBe(0);
+  expect(rejected.stderr).toContain("PAIRE_APPLY_REJECTED");
+  expect(rejected.stderr).toContain("evidence_out_of_range");
+  expect(rejected.stderr).toContain("Changed line ranges in this file: 1-6");
+
+  result.threads[0]!.claims[0]!.evidences[0]!.startLine = 1;
+  result.threads[0]!.claims[0]!.evidences[0]!.endLine = 6;
+  writeFileSync(draftPath, JSON.stringify(result, null, 2));
+  const accepted = runPaire(fixture, ["review", "--apply", draftPath]);
+  expect(accepted.exitCode).toBe(0);
 });
 
 test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", () => {

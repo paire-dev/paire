@@ -18,6 +18,7 @@ export function annotateHunkText(
   let newLine = additionStart;
   let inHunk = false;
   let maxNewLine = additionStart;
+  let maxOldLine = deletionStart;
 
   for (const line of rawLines) {
     if (line.match(HUNK_HEADER)) {
@@ -53,6 +54,7 @@ export function annotateHunkText(
         oldLine,
         newLine: null,
       });
+      maxOldLine = Math.max(maxOldLine, oldLine);
       oldLine += 1;
       continue;
     }
@@ -70,7 +72,11 @@ export function annotateHunkText(
     }
   }
 
-  const width = Math.max(4, String(maxNewLine).length);
+  const width = Math.max(
+    4,
+    String(maxNewLine).length,
+    String(maxOldLine).length + 1,
+  );
   const formatted: string[] = [];
   let parsedIndex = 0;
 
@@ -98,7 +104,9 @@ export function annotateHunkText(
     }
 
     if (prefix === "-" && !line.startsWith("---")) {
-      formatted.push(`${"".padStart(width)}|-${body}`);
+      formatted.push(
+        `${`-${entry?.oldLine ?? ""}`.padStart(width)}|-${body}`,
+      );
       parsedIndex += 1;
       continue;
     }
