@@ -1209,7 +1209,7 @@ function worktreeActionRequiredMessage({
 }) {
   return [
     "PAIRE_WORKTREE_REVIEW",
-    "Action required — update the Paire worktree review",
+    "ACTION REQUIRED — update the Paire worktree review",
     "",
     "These are uncommitted working-tree changes. Paire reviews them separately from",
     "committed claims and keys the result to the current worktree diff.",
@@ -1936,7 +1936,7 @@ function formatStatus(db: Database, session: SessionRow, git: GitState) {
     `Review burden: ${burden}`,
     git.clean
       ? "Suggested inspection: git diff --stat"
-      : "Review blocked: Paire reviews committed code only. Commit worktree changes before running paire review.",
+      : "Worktree review available: run paire it to create or update the worktree review draft.",
   ];
   if (pending?.packetJson) {
     lines.push(
@@ -1966,7 +1966,7 @@ function reviewActionRequiredMessage({
   };
 }) {
   return [
-    "Action required — update the Paire review",
+    "ACTION REQUIRED — update the Paire review",
     "",
     "Three steps. Done when step 3 exits 0.",
     "",

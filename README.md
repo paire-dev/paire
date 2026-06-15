@@ -40,19 +40,19 @@ paire install
 
 ## Use
 
-Commit your work, then run:
+Run:
 
 ```sh
 paire it
 ```
 
-Paire reviews committed code only. If your worktree is dirty, it will ask you to commit or stash first.
+If your worktree is dirty, Paire creates a worktree review draft. If it is clean, Paire reviews committed changes since the last applied revision.
 
-When Paire prints **Action required**, follow the printed steps:
+When Paire prints **ACTION REQUIRED**, follow the printed steps:
 
-1. Inspect the Git diff.
-2. Edit the generated `review-draft.json` in place.
-3. Apply it with `paire review --apply <draft>` until it exits 0.
+1. Inspect the diff Paire names.
+2. Edit the generated draft in place.
+3. Run the apply command Paire prints until it exits 0.
 
 On success, Paire opens the Review UI automatically. The Review UI runs on `127.0.0.1` and shows the applied review state for the current branch.
 
@@ -66,6 +66,8 @@ paire review
 paire review --apply <file>
 paire review --check <file>
 paire review --stdin
+paire worktree --apply <file>
+paire worktree --check <file>
 paire status
 paire sync
 paire reset

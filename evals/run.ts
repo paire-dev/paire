@@ -64,7 +64,7 @@ async function runCase(
     repoDir: workspace.repoDir,
     env: workspace.env,
     prompt:
-      "Run `paire it` and follow every printed instruction until `paire review --apply` exits 0.",
+      "Run `paire it` and follow every printed instruction until the printed apply command exits 0.",
     draftPath,
     goldReview: fixture.gold.goldReview,
     mode: agent,
