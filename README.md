@@ -48,7 +48,7 @@ paire it
 
 If your worktree is dirty, Paire creates a worktree review draft. If it is clean, Paire reviews committed changes since the last applied revision.
 
-When Paire prints **ACTION REQUIRED**, follow the printed steps:
+When Paire prints **ACTION_REQUIRED**, follow the printed steps:
 
 1. Inspect the diff Paire names.
 2. Edit the generated draft in place.

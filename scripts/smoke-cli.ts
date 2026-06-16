@@ -44,7 +44,7 @@ await write(join(repo, "src/workspace.ts"), [
 commitAll("add auth and workspace validation");
 
 const firstReview = runPaire(["review"]);
-assert(firstReview.includes("ACTION REQUIRED"));
+assert(firstReview.includes("ACTION_REQUIRED"));
 assert(!existsSync(browserCapture));
 const firstPacketPath = extractPacketPath(firstReview);
 const firstPacket = await Bun.file(firstPacketPath).json();
@@ -78,7 +78,7 @@ runPaire(["review", "--apply", firstResultPath]);
 
 await Bun.write(browserCapture, "");
 const reopen = runPaire(["review"]);
-assert(!reopen.includes("ACTION REQUIRED"));
+assert(!reopen.includes("ACTION_REQUIRED"));
 assert((await Bun.file(browserCapture).text()).includes("http://127.0.0.1:"));
 
 await write(join(repo, "src/workspace.ts"), [
@@ -95,7 +95,7 @@ await write(join(repo, "src/workspace.ts"), [
 commitAll("add workspace validation version");
 await Bun.write(browserCapture, "");
 const secondReview = runPaire(["review"]);
-assert(secondReview.includes("ACTION REQUIRED"));
+assert(secondReview.includes("ACTION_REQUIRED"));
 assert((await Bun.file(browserCapture).text()) === "");
 const secondPacketPath = extractPacketPath(secondReview);
 const secondPacket = await Bun.file(secondPacketPath).json();

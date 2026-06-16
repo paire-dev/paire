@@ -62,7 +62,7 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
 
   const review = runPaire(fixture, ["review"]);
   expect(review.exitCode).toBe(0);
-  expect(review.stdout).toContain("ACTION REQUIRED");
+  expect(review.stdout).toContain("ACTION_REQUIRED");
   expect(review.stdout).toContain("Step 1 — Read the annotated diff");
   expect(review.stdout).toContain("annotated-diff.txt");
   expect(review.stdout).toContain("Step 2 — Edit the review draft IN PLACE");
@@ -153,7 +153,7 @@ test("agent loop creates a packet, applies hardcoded claims, and opens browser o
   writeFileSync(fixture.browserCapture, "");
   const reviewAgain = runPaire(fixture, ["review", "--open"]);
   expect(reviewAgain.exitCode).toBe(0);
-  expect(reviewAgain.stdout).not.toContain("ACTION REQUIRED");
+  expect(reviewAgain.stdout).not.toContain("ACTION_REQUIRED");
   expect(reviewAgain.stdout).toContain("Open this URL in the browser:");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
@@ -243,7 +243,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
 
   const firstReview = runPaire(fixture, ["review"]);
   expect(firstReview.exitCode).toBe(0);
-  expect(firstReview.stdout).toContain("ACTION REQUIRED");
+  expect(firstReview.stdout).toContain("ACTION_REQUIRED");
   expect(existsSync(fixture.browserCapture)).toBe(false);
   const firstPacket = JSON.parse(
     readFileSync(extractPacketPath(firstReview.stdout), "utf8"),
@@ -278,7 +278,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   writeFileSync(fixture.browserCapture, "");
   const reopen = runPaire(fixture, ["review", "--open"]);
   expect(reopen.exitCode).toBe(0);
-  expect(reopen.stdout).not.toContain("ACTION REQUIRED");
+  expect(reopen.stdout).not.toContain("ACTION_REQUIRED");
   expect(readFileSync(fixture.browserCapture, "utf8")).toContain(
     "http://127.0.0.1:",
   );
@@ -301,7 +301,7 @@ test("real workflow smoke covers tracked, untracked, stale, apply, and reopen", 
   writeFileSync(fixture.browserCapture, "");
   const staleReview = runPaire(fixture, ["review"]);
   expect(staleReview.exitCode).toBe(0);
-  expect(staleReview.stdout).toContain("ACTION REQUIRED");
+  expect(staleReview.stdout).toContain("ACTION_REQUIRED");
   expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
   const secondPacket = JSON.parse(
     readFileSync(extractPacketPath(staleReview.stdout), "utf8"),
@@ -703,7 +703,7 @@ test("dirty worktree opens review UI with a worktree review draft flow", () => {
   expect(review.exitCode).toBe(0);
   expect(review.stdout).toContain("PAIRE_WORKTREE_REVIEW");
   expect(review.stdout).toContain(
-    "ACTION REQUIRED — update the Paire worktree review",
+    "ACTION_REQUIRED — update the Paire worktree review",
   );
   expect(review.stdout).toContain(
     "A working-tree preview was opened for the human at the URL below.",
@@ -987,7 +987,7 @@ test("committing the worktree returns review to committed mode and leaves worktr
   commitAll(fixture.repo, "commit the worktree change");
   const review = runPaire(fixture, ["review"]);
   expect(review.exitCode).toBe(0);
-  expect(review.stdout).toContain("ACTION REQUIRED");
+  expect(review.stdout).toContain("ACTION_REQUIRED");
   expect(review.stdout).not.toContain("PAIRE_WORKTREE_REVIEW");
 
   // The worktree claims persist (dormant), not promoted into committed tables.
@@ -1324,7 +1324,7 @@ test("reset re-baselines review so the next packet covers branch changes since b
   expect(reset.exitCode).toBe(0);
 
   const review = runPaire(fixture, ["review"]);
-  expect(review.stdout).toContain("ACTION REQUIRED");
+  expect(review.stdout).toContain("ACTION_REQUIRED");
   const packet = JSON.parse(
     readFileSync(extractPacketPath(review.stdout), "utf8"),
   );
@@ -1352,7 +1352,7 @@ test("start baselines new sessions at baseCommit so existing branch commits are 
   expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
 
   const review = runPaire(fixture, ["review"]);
-  expect(review.stdout).toContain("ACTION REQUIRED");
+  expect(review.stdout).toContain("ACTION_REQUIRED");
   const packet = JSON.parse(
     readFileSync(extractPacketPath(review.stdout), "utf8"),
   );
@@ -1411,7 +1411,7 @@ test("committed files that started untracked are included in review packets", ()
   commitAll(fixture.repo, "add workspace validator");
 
   const review = runPaire(fixture, ["review"]);
-  expect(review.stdout).toContain("ACTION REQUIRED");
+  expect(review.stdout).toContain("ACTION_REQUIRED");
   const packet = JSON.parse(
     readFileSync(extractPacketPath(review.stdout), "utf8"),
   );
@@ -1796,7 +1796,7 @@ test("new git changes after apply require a fresh packet and do not open browser
   writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 4;\n");
   commitAll(fixture.repo, "change value to four");
   const staleReview = runPaire(fixture, ["review"]);
-  expect(staleReview.stdout).toContain("ACTION REQUIRED");
+  expect(staleReview.stdout).toContain("ACTION_REQUIRED");
   expect(readFileSync(fixture.browserCapture, "utf8")).toBe("");
 });
 
@@ -1910,7 +1910,7 @@ test("paire install appends agent instructions to AGENTS.md and CLAUDE.md", () =
   expect(agents).toContain("<!-- paire -->");
   expect(agents).toContain("<!-- /paire -->");
   expect(agents).toContain("Run `paire it`, then follow only the steps and commands");
-  expect(agents).toContain("**ACTION REQUIRED**");
+  expect(agents).toContain("**ACTION_REQUIRED**");
   expect(agents).toContain("printed apply command");
   expect(agents).toContain("During Paire review, skip tests");
   expect(claude).toContain("<!-- paire -->");
@@ -2019,7 +2019,7 @@ test("it aliases review and status/sync avoid push or commit suggestions", () =>
   commitAll(fixture.repo, "change value to two");
 
   const it = runPaire(fixture, ["it"]);
-  expect(it.stdout).toContain("ACTION REQUIRED");
+  expect(it.stdout).toContain("ACTION_REQUIRED");
 
   const status = runPaire(fixture, ["status"]);
   expect(status.stdout).toContain("Paire status");

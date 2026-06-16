@@ -1209,7 +1209,7 @@ function worktreeActionRequiredMessage({
 }) {
   return [
     "PAIRE_WORKTREE_REVIEW",
-    "ACTION REQUIRED — update the Paire worktree review",
+    "ACTION_REQUIRED — update the Paire worktree review",
     "",
     "These are uncommitted working-tree changes. Paire reviews them separately from",
     "committed claims and keys the result to the current worktree diff.",
@@ -1966,7 +1966,7 @@ function reviewActionRequiredMessage({
   };
 }) {
   return [
-    "ACTION REQUIRED — update the Paire review",
+    "ACTION_REQUIRED — update the Paire review",
     "",
     "Three steps. Done when step 3 exits 0.",
     "",

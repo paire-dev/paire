@@ -14,7 +14,7 @@ export const PAIRE_AGENT_INSTRUCTIONS = [
   "",
   "Run `paire it`, then follow only the steps and commands it prints.",
   "",
-  "- If it prints **ACTION REQUIRED**, inspect the diff it names, edit the named draft in place, then run the printed apply command.",
+  "- If it prints **ACTION_REQUIRED**, inspect the diff it names, edit the named draft in place, then run the printed apply command.",
   "- If apply prints `PAIRE_APPLY_REJECTED`, fix the same draft using the listed issues, then rerun the same apply command.",
   "- Stop when Paire exits without an action, or when the printed apply command exits 0.",
   "- During Paire review, skip tests, typecheck, builds, and extra diffs unless Paire prints them.",
