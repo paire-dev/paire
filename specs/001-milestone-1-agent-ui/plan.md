@@ -1,359 +1,489 @@
-# Implementation Plan: Claim Add/Edit API for Review JSON Updates
+# Implementation Plan: Claim Command Reflector Refactor
 
 ## Summary
 
-Ship a focused Paire workflow improvement that lets agents update a review through explicit claim-level commands instead of manually editing the entire review JSON draft. The primary interface is a new CLI flow such as `paire claim add` and `paire claim edit`, backed by a review JSON mutation API that validates claim patches, preserves existing review state, and gives agents clear, progressive feedback about pending and completed subagent work.
+Refactor Paire so agents update review state through a first-class claim command reflector instead of editing review JSON drafts. The new workflow is command-driven: Paire emits a review context, agents add or update claims with `paire claim add` / `paire claim edit`, and Paire reflects those commands into the canonical review state, validation layer, and UI.
 
-This plan intentionally replaces broader Milestone 1 UI/release work. The only feature in scope is making claim-scoped review updates easy, safe, and observable for agents.
+This is a complete feature refactor, not a minimal patch. The JSON-draft editing approach should be removed from the primary agent workflow. Agents should never need to open, understand, preserve, or rewrite the full review JSON shape.
 
-## Problem
+## Current Schema Findings
 
-Today, agents are expected to edit a full JSON review draft by hand. That is brittle because the agent must understand the entire JSON schema, preserve unrelated fields, avoid syntax errors, and manually coordinate multiple claim updates. This creates unnecessary cognitive overhead and makes parallel subagent review work harder to track.
+The existing implementation is centered on mutable draft JSON:
 
-A better interface is for agents to declare one review finding at a time:
+- Committed reviews use `ReviewDraft` with `formatVersion`, `packetId`, `sessionId`, `revisionId`, `gitFingerprint`, `files`, and nested `threads[].claims[]`.
+- Worktree reviews use `WorktreeReviewDraft` with similar fields plus `worktreeReviewId`, `worktreeHash`, and `gitHead`.
+- Claim validation currently accepts `AgentClaim` values nested under threads, with `agentStatus` values of `new`, `unchanged`, `evidence_moved`, `amended`, `invalidated`, and `superseded`.
+- Human review state is separate from agent claim state and currently uses `humanStatus: "unreviewed" | "accepted"`.
+- Importance currently uses `critical`, `important`, `minor`, and `noise`.
+- Evidence currently uses `filePath`, `startLine`, `endLine`, optional `symbol`, optional fingerprints/revision ids, and `change`.
+- Coverage validation is currently file-oriented: every changed file must be covered by evidence or acknowledged with a reason.
+- Existing generated instructions explicitly tell agents to edit draft JSON in place and run an apply command.
 
-```sh
-paire claim add \
-  --session ses_8c46ffd3c-4068-4713-84ee-fef226e0db3ef \
-  --title "Add JWT validation to login" \
-  --importance critical \
-  --thread-id thread_auth \
-  --before "Login accepted any password" \
-  --after "Login validates JWT tokens" \
-  --evidence "src/auth.ts:45-62:Add JWT.verify() call"
-```
+The refactor should replace this with a command/event surface and a canonical review-state schema that Paire owns end-to-end.
 
-The CLI and API should own JSON loading, patching, schema validation, conflict detection, and persistence. Agents should only need to provide claim intent and evidence.
+## Product Direction
+
+Paire becomes the reflector between agent intent and review state:
+
+1. Paire exports read-only review context for the current committed or worktree change set.
+2. Agents inspect that context and invoke claim commands.
+3. Each claim command is parsed, validated, and reflected into canonical review state immediately.
+4. The local UI displays the reflected state progressively, including claim/subagent progress.
+5. Finalization validates coverage and consistency without requiring a raw JSON apply step.
 
 ## Goals
 
-- Add a claim-scoped mutation interface for review drafts and review sessions.
-- Support `paire claim add` for creating a new claim without opening or editing raw JSON.
-- Support `paire claim edit` for modifying an existing claim by id, title, thread, status, importance, before/after text, and evidence.
-- Preserve and validate the existing review JSON structure automatically.
-- Track claim/subagent work state as `pending`, `in_progress`, `complete`, or `blocked` so the UI can show progressive feedback.
-- Provide helpful CLI usage, examples, validation errors, and apply/retry guidance.
-- Keep the full JSON draft path as a fallback, not the primary agent workflow.
+- Remove manual full-JSON draft editing from the agent workflow.
+- Add `paire claim add` for creating review claims directly from CLI flags or structured stdin.
+- Add `paire claim edit` for updating claim content, evidence, assignment, and workflow status.
+- Add `paire claim list` and `paire claim show` so agents can discover current state safely.
+- Add a canonical claim-state schema owned by Paire rather than by editable draft JSON.
+- Add a reflector layer that converts claim commands into validated review-state updates.
+- Support committed and worktree reviews through the same claim command model.
+- Track subagent work with explicit `workStatus` values and show them in the UI.
+- Preserve current validation strengths: file coverage, known-file checks, evidence span checks, stale revision checks, and clear rejection messages.
+- Update agent instructions so claim commands are the only documented happy path.
 
 ## Non-Goals
 
-- Do not redesign the full local review UI beyond the minimum needed to show claim work state.
-- Do not add file-level comments or a general `paire comments` feature.
-- Do not require agents to manually edit full review JSON for normal claim creation.
-- Do not implement remote collaboration, auth, or cloud sync.
-- Do not change the underlying review schema more than necessary to support claim mutation and state.
-- Do not include release/tagging work in this feature plan.
+- Do not keep manual review JSON editing as a supported workflow.
+- Do not describe the new schema as a compatibility adapter for the old draft schema.
+- Do not rely on agents preserving unrelated JSON fields.
+- Do not add a migration-first implementation path; this plan is for a fresh refactor of the review-state write path.
+- Do not add remote/cloud collaboration.
+- Do not add general-purpose comments or file-level discussion threads.
+- Do not ship a large unrelated UI redesign.
 
-## User Experience
+## Canonical Review State Schema
 
-### Agent creates a claim
+Create a canonical Paire-owned review state that is written only through Paire commands and APIs.
 
-```sh
-paire claim add \
-  --session ses_8c46ffd3c-4068-4713-84ee-fef226e0db3ef \
-  --title "Add JWT validation to login" \
-  --importance critical \
-  --thread-id thread_auth \
-  --before "Login accepted any password" \
-  --after "Login validates JWT tokens" \
-  --evidence "src/auth.ts:45-62:Add JWT.verify() call"
+```ts
+type ReviewMode = "committed" | "worktree";
+
+type ReviewState = {
+  schemaVersion: 3;
+  reviewId: string;
+  sessionId: string;
+  mode: ReviewMode;
+  revision: ReviewRevisionRef;
+  goal: string | null;
+  files: ReviewFileState[];
+  threads: ReviewThreadState[];
+  claims: ReviewClaimState[];
+  events: ReviewEvent[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ReviewRevisionRef = {
+  packetId: string;
+  revisionId?: string;
+  gitFingerprint?: string;
+  worktreeReviewId?: string;
+  worktreeHash?: string;
+  gitHead?: string;
+};
+
+type ReviewFileState = {
+  path: string;
+  additions: number;
+  deletions: number;
+  summarized: boolean;
+  coverageStatus: "pending" | "covered" | "acknowledged";
+  acknowledgementReason?: string;
+};
+
+type ReviewThreadState = {
+  id: string;
+  title: string;
+  summary?: string;
+  order: number;
+};
+
+type ClaimLifecycleStatus =
+  | "active"
+  | "invalidated"
+  | "superseded";
+
+type ClaimWorkStatus =
+  | "pending"
+  | "in_progress"
+  | "complete"
+  | "blocked";
+
+type ClaimImportance = "critical" | "important" | "minor" | "noise";
+
+type ReviewClaimState = {
+  id: string;
+  threadId: string;
+  title: string;
+  importance: ClaimImportance;
+  lifecycleStatus: ClaimLifecycleStatus;
+  workStatus: ClaimWorkStatus;
+  humanStatus: "unreviewed" | "accepted";
+  before: string | null;
+  after: string | null;
+  description?: string;
+  evidences: ReviewEvidenceState[];
+  assignee?: string;
+  supersedesClaimId?: string;
+  blockedReason?: string;
+  order: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ReviewEvidenceState = {
+  id: string;
+  claimId: string;
+  filePath: string;
+  startLine: number;
+  endLine: number;
+  change: string;
+  symbol?: string;
+  fingerprint?: string;
+  revisionId?: string;
+};
+
+type ReviewEvent = {
+  id: string;
+  type:
+    | "claim_added"
+    | "claim_edited"
+    | "claim_status_changed"
+    | "evidence_added"
+    | "evidence_removed"
+    | "file_acknowledged"
+    | "review_finalized";
+  actor: "agent" | "subagent" | "human" | "system";
+  claimId?: string;
+  filePath?: string;
+  summary: string;
+  createdAt: string;
+};
 ```
 
-Expected output:
+### Schema Changes Required
 
-```text
-CLAIM_ADDED claim_01J...
-Session: ses_8c46ffd3c-4068-4713-84ee-fef226e0db3ef
-Thread: thread_auth
-Status: pending
-Evidence: 1 span
+- Replace nested editable `threads[].claims[]` as the write model with top-level canonical `threads` and `claims` collections.
+- Split claim status into:
+  - `lifecycleStatus` for review semantics: `active`, `invalidated`, `superseded`.
+  - `workStatus` for agent/subagent progress: `pending`, `in_progress`, `complete`, `blocked`.
+  - `humanStatus` for reviewer approval: `unreviewed`, `accepted`.
+- Keep the existing importance vocabulary: `critical`, `important`, `minor`, `noise`.
+- Keep the existing evidence vocabulary: `filePath`, `startLine`, `endLine`, and `change`.
+- Add stable `evidence.id` values so evidence can be edited or removed independently.
+- Add `events[]` so the UI and CLI can reflect progressive updates without diffing whole JSON documents.
+- Add `coverageStatus` to files so coverage can be updated by evidence reflection or explicit acknowledgement commands.
+- Replace generated JSON draft instructions with command instructions.
 
-Next:
-  paire claim edit --session ses_... --claim claim_01J... --status complete
-  paire review apply --session ses_...
-```
+## CLI Surface
 
-### Agent updates claim status
-
-```sh
-paire claim edit \
-  --session ses_8c46ffd3c-4068-4713-84ee-fef226e0db3ef \
-  --claim claim_01J... \
-  --status complete
-```
-
-Expected output:
-
-```text
-CLAIM_UPDATED claim_01J...
-Status: pending -> complete
-```
-
-### Agent adds evidence to an existing claim
-
-```sh
-paire claim edit \
-  --session ses_8c46ffd3c-4068-4713-84ee-fef226e0db3ef \
-  --claim claim_01J... \
-  --evidence "src/auth.ts:70-84:Reject expired JWT tokens"
-```
-
-Expected output:
-
-```text
-CLAIM_UPDATED claim_01J...
-Evidence: 1 -> 2 spans
-```
-
-### Agent gets help
-
-```sh
-paire claim add --help
-paire claim edit --help
-```
-
-Help output must include:
-
-- Required flags.
-- Supported importance values.
-- Supported status values.
-- Evidence format examples.
-- Thread id guidance.
-- How to find the current session id.
-- A complete copy-pasteable example.
-
-## Public Interfaces
-
-### CLI
-
-Add a new top-level claim command group:
+Add a top-level command group:
 
 ```text
 paire claim add [options]
 paire claim edit [options]
 paire claim list [options]
 paire claim show [options]
+paire claim evidence add [options]
+paire claim evidence remove [options]
+paire file acknowledge [options]
+paire review finalize [options]
 ```
 
-#### `paire claim add`
+### `paire claim add`
 
-Required options:
+Creates a new claim and immediately reflects it into the active review state.
 
-- `--session <session-id>`: target review session.
-- `--title <text>`: concise claim title.
-- `--importance <low|medium|high|critical>`: finding importance.
-- `--thread-id <thread-id>`: thread/group id for related findings.
-- `--before <text>`: old behavior or problem statement.
-- `--after <text>`: expected fixed behavior or proposed state.
-- `--evidence <path:start-end:summary>`: one evidence span. Repeatable.
+```sh
+paire claim add \
+  --session ses_8c46ffd3c-4068-4713-84ee-fef226e0db3ef \
+  --title "Add JWT validation to login" \
+  --importance critical \
+  --thread-id thread_auth \
+  --before "Login accepted any password" \
+  --after "Login validates JWT tokens" \
+  --evidence "src/auth.ts:45-62:Add JWT.verify() call"
+```
 
-Optional options:
-
-- `--status <pending|in_progress|complete|blocked>`: defaults to `pending`.
-- `--claim-id <claim-id>`: optional deterministic id for advanced callers; otherwise generated.
-- `--assignee <label>`: agent/subagent label responsible for the claim.
-- `--notes <text>`: short implementation or review note.
-- `--json`: print machine-readable output.
-
-#### `paire claim edit`
-
-Required options:
+Required flags:
 
 - `--session <session-id>`.
-- `--claim <claim-id>`.
+- `--title <text>`.
+- `--importance <critical|important|minor|noise>`.
+- `--thread-id <thread-id>`.
+- `--before <text|null>`.
+- `--after <text|null>`.
+- At least one `--evidence <path:start-end:change>` unless the file is acknowledged separately.
 
-Optional patch options:
+Optional flags:
+
+- `--thread-title <text>` to create or rename the thread title.
+- `--description <markdown>`.
+- `--work-status <pending|in_progress|complete|blocked>`; default `pending`.
+- `--assignee <label>`.
+- `--claim-id <id>` for deterministic advanced workflows.
+- `--json` for machine-readable output.
+
+Expected output:
+
+```text
+CLAIM_ADDED claim_01J...
+Thread: thread_auth
+Importance: critical
+Work status: pending
+Evidence: 1 span
+Coverage: src/auth.ts covered
+```
+
+### `paire claim edit`
+
+Updates claim fields without rewriting the entire review.
+
+```sh
+paire claim edit \
+  --session ses_8c46ffd3c-4068-4713-84ee-fef226e0db3ef \
+  --claim claim_01J... \
+  --work-status complete
+```
+
+Editable fields:
 
 - `--title <text>`.
-- `--importance <low|medium|high|critical>`.
+- `--importance <critical|important|minor|noise>`.
 - `--thread-id <thread-id>`.
-- `--before <text>`.
-- `--after <text>`.
-- `--status <pending|in_progress|complete|blocked>`.
-- `--evidence <path:start-end:summary>`: append evidence by default.
-- `--replace-evidence`: replace evidence instead of appending.
+- `--thread-title <text>`.
+- `--before <text|null>`.
+- `--after <text|null>`.
+- `--description <markdown>`.
+- `--lifecycle-status <active|invalidated|superseded>`.
+- `--work-status <pending|in_progress|complete|blocked>`.
+- `--human-status <unreviewed|accepted>` for UI/human flows only.
 - `--assignee <label>`.
-- `--notes <text>`.
+- `--blocked-reason <text>`.
+- `--supersedes <claim-id>`.
 - `--json`.
 
-#### `paire claim list`
+### `paire claim evidence add`
 
-Print claim ids, titles, importance, status, thread id, assignee, and evidence count for a session. This gives agents a safe way to discover ids before editing.
+Adds evidence to an existing claim and updates file coverage.
 
-#### `paire claim show`
-
-Print one claim in readable form, with `--json` support for automation.
-
-### Internal API
-
-Add a small review mutation layer used by the CLI:
-
-```ts
-type ClaimStatus = "pending" | "in_progress" | "complete" | "blocked";
-type ClaimImportance = "low" | "medium" | "high" | "critical";
-
-type ClaimEvidenceInput = {
-  path: string;
-  startLine: number;
-  endLine: number;
-  summary: string;
-};
-
-type ClaimAddInput = {
-  sessionId: string;
-  claimId?: string;
-  threadId: string;
-  title: string;
-  importance: ClaimImportance;
-  status?: ClaimStatus;
-  before: string;
-  after: string;
-  evidence: ClaimEvidenceInput[];
-  assignee?: string;
-  notes?: string;
-};
-
-type ClaimEditInput = {
-  sessionId: string;
-  claimId: string;
-  patch: Partial<Omit<ClaimAddInput, "sessionId" | "claimId">> & {
-    evidenceMode?: "append" | "replace";
-  };
-};
+```sh
+paire claim evidence add \
+  --session ses_... \
+  --claim claim_01J... \
+  --evidence "src/auth.ts:70-84:Reject expired JWT tokens"
 ```
 
-The API should:
+### `paire claim evidence remove`
 
-- Load the current review draft/session.
-- Validate patch fields before writing.
-- Generate ids when omitted.
-- Create the thread if `--thread-id` does not exist, or attach to the existing thread if it does.
-- Normalize evidence spans.
-- Preserve unrelated claims, comments, metadata, and ordering.
-- Write atomically to avoid corrupting the review JSON.
-- Return structured success/error data for both human and `--json` CLI output.
+Removes one evidence span by id and recomputes file coverage.
 
-## Data Model Changes
+```sh
+paire claim evidence remove \
+  --session ses_... \
+  --claim claim_01J... \
+  --evidence evid_01J...
+```
 
-Add minimal claim metadata:
+### `paire file acknowledge`
+
+Replaces direct edits to the old `files[]` draft section.
+
+```sh
+paire file acknowledge \
+  --session ses_... \
+  --path bun.lock \
+  --reason "Generated lockfile churn"
+```
+
+### `paire review finalize`
+
+Runs final validation for the active review state. This replaces `paire review --apply <draft.json>` as the agent completion step.
+
+```sh
+paire review finalize --session ses_...
+```
+
+Finalize must check:
+
+- Revision freshness.
+- Worktree hash freshness for worktree reviews.
+- Every changed file is covered or acknowledged.
+- Evidence paths are known changed files.
+- New evidence spans intersect touched ranges where range data exists.
+- Required claim fields are present.
+- Blocked claims include `blockedReason`.
+- Superseded claims include `supersedesClaimId`.
+
+## Reflector API
+
+Create a dedicated module that applies command intents to canonical review state:
 
 ```ts
-type ReviewClaim = {
-  id: string;
-  threadId: string;
-  title: string;
-  importance: "low" | "medium" | "high" | "critical";
-  status: "pending" | "in_progress" | "complete" | "blocked";
-  before: string;
-  after: string;
-  evidence: Array<{
+type ReflectorCommand =
+  | { type: "claim.add"; input: ClaimAddInput }
+  | { type: "claim.edit"; input: ClaimEditInput }
+  | { type: "evidence.add"; input: EvidenceAddInput }
+  | { type: "evidence.remove"; input: EvidenceRemoveInput }
+  | { type: "file.acknowledge"; input: FileAcknowledgeInput }
+  | { type: "review.finalize"; input: ReviewFinalizeInput };
+
+type ReflectorResult = {
+  state: ReviewState;
+  events: ReviewEvent[];
+  coverageDelta: Array<{
     path: string;
-    startLine: number;
-    endLine: number;
-    summary: string;
+    before: ReviewFileState["coverageStatus"];
+    after: ReviewFileState["coverageStatus"];
   }>;
-  assignee?: string;
-  notes?: string;
-  createdAt: string;
-  updatedAt: string;
 };
 ```
 
-If the current schema already stores equivalent fields under threads, implement this as a compatibility layer rather than a disruptive migration. The CLI should accept claim inputs and map them to the existing persisted shape.
+The reflector must:
 
-## Validation Rules
+- Load the active canonical review state by session id.
+- Validate command input before mutating state.
+- Apply exactly one command per transaction.
+- Recompute affected file coverage after evidence or acknowledgement changes.
+- Append a review event for every successful reflected command.
+- Persist atomically.
+- Return human-readable CLI output and optional machine-readable `--json` output.
+- Reject invalid commands without changing state.
 
-- `--session` must reference an existing review session or draft.
-- `--title`, `--before`, and `--after` must be non-empty.
-- `--importance` must be one of `low`, `medium`, `high`, or `critical`.
-- `--status` must be one of `pending`, `in_progress`, `complete`, or `blocked`.
-- Evidence must match `path:start-end:summary` or `path:line:summary`.
-- Evidence line numbers must be positive integers and `startLine <= endLine`.
-- Duplicate evidence spans should be deduplicated unless the summary differs materially.
-- Editing a missing claim must fail with a clear `CLAIM_NOT_FOUND` error and suggest `paire claim list --session <id>`.
-- Invalid input must not modify the review draft.
+## Agent Workflow
 
-## UI Integration
+### Start or refresh context
 
-Keep UI work minimal and directly tied to this feature:
+`paire it` should print a command-oriented prompt instead of a draft-editing prompt:
 
-- Show each claim's status badge: `pending`, `in_progress`, `complete`, or `blocked`.
-- If present, show `assignee` so users can see which subagent owns the work.
-- Update the review panel progressively as claim edits arrive in the backing review data.
-- Sort or group claims by thread while preserving stable claim order within each thread.
-- Do not add large new review surfaces, comment threads, or release dashboards.
+```text
+Review context ready.
+Session: ses_...
+Changed files: 4
+Inspect:
+  paire review context --session ses_...
+Add claims:
+  paire claim add --session ses_... --title ... --importance ... --thread-id ... --before ... --after ... --evidence path:start-end:change
+Finish:
+  paire review finalize --session ses_...
+```
+
+### Subagent workflow
+
+A parent agent can assign work to subagents by giving each one a file area or thread id. Subagents update progress directly:
+
+```sh
+paire claim add --session ses_... --thread-id thread_auth --assignee subagent-auth --work-status in_progress ...
+paire claim edit --session ses_... --claim claim_... --work-status complete
+```
+
+The UI should show this progressively as each command reflects into state.
+
+## UI Requirements
+
+Update the local review UI to read canonical review state:
+
+- Render top-level `threads` and `claims` by joining `claims.threadId` to `threads.id`.
+- Show `workStatus` badges: `pending`, `in_progress`, `complete`, `blocked`.
+- Show `lifecycleStatus` separately from `humanStatus`.
+- Show `assignee` when present.
+- Show reflected event history in a compact activity area or per-claim timestamp summary.
+- Recompute filters using canonical claim fields rather than draft-agent statuses.
+- Continue to support accepting/unaccepting claims through a Paire-owned API endpoint that updates `humanStatus`.
+
+## Validation Requirements
+
+Preserve and move the existing validation logic into the reflector/finalize path:
+
+- Validate ids as public ids with length limits.
+- Validate claim title, description, before/after copy, evidence change copy, and thread summary length limits.
+- Validate claim importance against `critical`, `important`, `minor`, `noise`.
+- Validate lifecycle, work, and human statuses independently.
+- Validate evidence path safety and changed-file membership.
+- Validate evidence spans against touched ranges when available.
+- Validate all changed files are covered or acknowledged before finalize succeeds.
+- Validate stale committed fingerprints and stale worktree hashes.
+- Validate blocked/superseded lifecycle requirements.
+- Emit stable error codes such as `CLAIM_NOT_FOUND`, `INVALID_EVIDENCE`, `FILE_NOT_COVERED`, `STALE_REVIEW`, and `INVALID_STATUS`.
 
 ## Implementation Steps
 
-1. **Map the current review schema**
-   - Identify where session review JSON is created, loaded, validated, and applied.
-   - Document how claims/threads/evidence are represented today.
-   - Choose the smallest compatibility adapter that supports claim add/edit without forcing a schema rewrite.
+1. **Introduce canonical review state**
+   - Define `ReviewState`, `ReviewClaimState`, `ReviewEvidenceState`, `ReviewThreadState`, `ReviewFileState`, and `ReviewEvent` types.
+   - Store committed and worktree review state in this canonical shape.
+   - Make the local review API read this shape.
 
-2. **Create claim mutation utilities**
-   - Add pure functions for `addClaim`, `editClaim`, `listClaims`, and `showClaim`.
-   - Add evidence parsing and normalization helpers.
-   - Add validation helpers that return stable error codes and actionable messages.
+2. **Build the reflector module**
+   - Add pure reducers for claim add/edit, evidence add/remove, file acknowledge, and review finalize.
+   - Add transaction helpers for load/validate/apply/persist.
+   - Add event emission and coverage recomputation.
 
-3. **Wire CLI commands**
-   - Add `paire claim add`.
-   - Add `paire claim edit`.
-   - Add `paire claim list` and `paire claim show` for discovery.
-   - Add complete help text and copy-pasteable examples.
-   - Support `--json` output for automation.
+3. **Replace JSON-draft apply commands**
+   - Remove the generated instruction path that tells agents to edit draft JSON.
+   - Replace `paire review --apply <draft>` and `paire worktree --apply <draft>` in agent guidance with `paire review finalize --session <id>`.
+   - Keep internal packet/context generation read-only.
 
-4. **Persist safely**
-   - Ensure mutations are atomic.
-   - Preserve unrelated JSON fields exactly where possible.
-   - Handle concurrent or repeated subagent updates without data loss.
-   - Emit concise success output that identifies what changed.
+4. **Wire CLI commands**
+   - Implement `paire claim add`.
+   - Implement `paire claim edit`.
+   - Implement `paire claim list`.
+   - Implement `paire claim show`.
+   - Implement `paire claim evidence add`.
+   - Implement `paire claim evidence remove`.
+   - Implement `paire file acknowledge`.
+   - Implement `paire review finalize`.
+   - Add `--help` examples for every command.
 
-5. **Expose progressive state in UI**
-   - Add status badges and optional assignee labels to claim rendering.
-   - Ensure updates from claim commands are visible when the UI reloads or refreshes data.
-   - Keep styling consistent with existing shadcn/Base UI patterns.
+5. **Update agent instructions**
+   - Rewrite installed Paire instructions to describe only command-based review updates.
+   - Include copy-pasteable examples.
+   - Explain evidence format and safe inspection commands.
+   - Explain subagent progress updates via `workStatus`.
 
-6. **Update agent instructions**
-   - Make claim add/edit the recommended workflow.
-   - Keep manual JSON editing documented only as an escape hatch.
-   - Include the exact `paire claim add` example from this plan.
-   - Explain when to mark claims `pending`, `in_progress`, `complete`, or `blocked`.
+6. **Update local UI**
+   - Read canonical review state.
+   - Display work, lifecycle, and human statuses separately.
+   - Show assignee/progress feedback.
+   - Show coverage status for changed files.
 
-7. **Test and validate**
-   - Add unit tests for evidence parsing, validation, add, edit, list, and show behavior.
-   - Add CLI tests for success and error cases.
-   - Add regression tests proving unrelated review JSON is preserved.
-   - Add UI verification for status/assignee rendering if UI files change.
+7. **Move tests to the new workflow**
+   - Replace draft-JSON edit tests with claim-command tests.
+   - Add reflector reducer tests.
+   - Add finalize validation tests.
+   - Add UI/API shape tests.
 
 ## Test Plan
 
 - `bun test`.
-- `bun run typecheck` if the project defines it.
-- CLI success cases:
-  - `paire claim add` creates a valid claim.
-  - `paire claim edit --status complete` updates only status.
-  - `paire claim edit --evidence ...` appends evidence.
-  - `paire claim edit --replace-evidence --evidence ...` replaces evidence.
-  - `paire claim list` prints discoverable claim ids.
-  - `paire claim show --json` emits machine-readable claim data.
-- CLI failure cases:
-  - Missing session.
-  - Missing required fields.
-  - Invalid importance.
-  - Invalid status.
-  - Invalid evidence format.
-  - Missing claim id on edit.
-- Data preservation tests:
-  - Existing claims are unchanged after adding a new claim.
-  - Existing unrelated review metadata is unchanged after editing one claim.
-  - Invalid edits leave the review JSON byte-for-byte unchanged.
+- `bun run typecheck`.
+- Command tests:
+  - `paire claim add` creates canonical claim state and event entries.
+  - `paire claim edit --work-status complete` updates progress only.
+  - `paire claim evidence add` updates claim evidence and file coverage.
+  - `paire claim evidence remove` recomputes coverage.
+  - `paire file acknowledge` marks a file acknowledged with a reason.
+  - `paire review finalize` passes only when review state is fresh and coverage is complete.
+- Validation tests:
+  - Invalid status is rejected without persistence.
+  - Unknown claim is rejected without persistence.
+  - Unknown file evidence is rejected without persistence.
+  - Out-of-range evidence is rejected without persistence.
+  - Stale committed fingerprint is rejected.
+  - Stale worktree hash is rejected.
+- UI/API tests:
+  - Review API returns canonical top-level `threads`, `claims`, `files`, and `events`.
+  - UI renders work status and assignee.
+  - Human status updates mutate only `humanStatus`.
 
 ## Acceptance Criteria
 
-- An agent can add a claim with one command and never manually edit full JSON.
-- An agent can edit claim status and evidence with one command.
-- CLI help is sufficient for a new agent to construct valid commands without knowing the full review JSON schema.
-- The mutation API validates inputs before writing and returns stable, actionable error messages.
-- Review JSON remains valid after every successful mutation.
-- The UI can display claim work state so users get progressive feedback from subagent work.
-- Manual full-JSON editing remains available only as a fallback path.
+- The agent happy path uses only Paire commands, not manual JSON edits.
+- The plan and instructions no longer present JSON draft editing as a supported fallback.
+- Claim commands update canonical review state immediately and atomically.
+- `paire review finalize --session <id>` replaces draft apply as the completion gate.
+- The canonical schema separates lifecycle, work, and human status.
+- The UI can show progressive subagent work from reflected events and work statuses.
+- Existing validation guarantees are preserved in the new reflector/finalize architecture.
