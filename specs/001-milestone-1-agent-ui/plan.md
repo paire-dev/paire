@@ -69,8 +69,10 @@ type ReviewState = {
   revision: ReviewRevisionRef;
   goal: string | null;
   files: ReviewFileState[];
+  fileProgress: ReviewFileProgress;
   threads: ReviewThreadState[];
   claims: ReviewClaimState[];
+  claimHistory: ReviewClaimRevision[];
   events: ReviewEvent[];
   createdAt: string;
   updatedAt: string;
@@ -92,6 +94,14 @@ type ReviewFileState = {
   summarized: boolean;
   coverageStatus: "pending" | "covered" | "acknowledged";
   acknowledgementReason?: string;
+};
+
+type ReviewFileProgress = {
+  total: number;
+  covered: number;
+  acknowledged: number;
+  pending: number;
+  pendingFiles: string[];
 };
 
 type ReviewThreadState = {
@@ -132,6 +142,16 @@ type ReviewClaimState = {
   order: number;
   createdAt: string;
   updatedAt: string;
+};
+
+type ReviewClaimRevision = {
+  id: string;
+  claimId: string;
+  version: number;
+  snapshot: ReviewClaimState;
+  eventId: string;
+  actor: "agent" | "subagent" | "human" | "system";
+  createdAt: string;
 };
 
 type ReviewEvidenceState = {
@@ -176,7 +196,29 @@ type ReviewEvent = {
 - Add stable `evidence.id` values so evidence can be edited or removed independently.
 - Add `events[]` so the UI and CLI can reflect progressive updates without diffing whole JSON documents.
 - Add `coverageStatus` to files so coverage can be updated by evidence reflection or explicit acknowledgement commands.
+- Add `fileProgress` as deterministic file-only progress, derived from `files[].coverageStatus`.
+- Add `claimHistory` as the source of claim edit history and time travel. Events remain lightweight activity entries; claim versions live in `claimHistory`, not inside event payloads.
 - Replace generated JSON draft instructions with command instructions.
+
+### File Coverage and Progress Rules
+
+- Initialize every changed file as `coverageStatus: "pending"` unless it is automatically summarized/generated and explicitly acknowledged with a reason.
+- Recompute file coverage inside the reflector after every evidence add/remove and file acknowledgement command.
+- Mark a file `covered` when at least one active, non-superseded claim has valid evidence whose `filePath` matches the file.
+- Mark a file `acknowledged` only through `paire file acknowledge --path <path> --reason <text>` or equivalent system acknowledgement for generated/summarized churn; the reason is required.
+- Mark a file back to `pending` when its last valid active evidence is removed and it has no acknowledgement.
+- Prefer `covered` over `acknowledged` if a file has both active evidence and an acknowledgement, because evidence is stronger than acknowledgement.
+- Derive `fileProgress` from the current file states only: `total`, `covered`, `acknowledged`, `pending`, and sorted `pendingFiles`. Do not estimate progress from claims, events, or agent work status.
+- `paire review finalize` succeeds only when `fileProgress.pending === 0` and freshness/evidence validation also passes.
+
+### Claim History Rules
+
+- Store claim edit history in `claimHistory`, not in `events`.
+- Create revision `version: 1` when a claim is added, with `snapshot` equal to the created `ReviewClaimState`.
+- Append a new `ReviewClaimRevision` whenever a command changes claim content, status, thread assignment, evidence, assignee, supersession, or blocked reason.
+- Do not append a claim revision for commands that leave the claim snapshot unchanged.
+- Keep `claims[]` as the current materialized state. `claimHistory[]` is append-only and powers UI version browsing, claim-level time travel, and version comparison.
+- The UI should be able to show older claim versions by selecting a `claimHistory` entry for a claim, without rewinding the whole review/session state.
 
 ## CLI Surface
 
@@ -334,11 +376,13 @@ type ReflectorCommand =
 type ReflectorResult = {
   state: ReviewState;
   events: ReviewEvent[];
+  claimRevisions: ReviewClaimRevision[];
   coverageDelta: Array<{
     path: string;
     before: ReviewFileState["coverageStatus"];
     after: ReviewFileState["coverageStatus"];
   }>;
+  fileProgress: ReviewFileProgress;
 };
 ```
 
@@ -348,7 +392,9 @@ The reflector must:
 - Validate command input before mutating state.
 - Apply exactly one command per transaction.
 - Recompute affected file coverage after evidence or acknowledgement changes.
+- Recompute deterministic `fileProgress` after any coverage change.
 - Append a review event for every successful reflected command.
+- Append a `ReviewClaimRevision` for every command that changes a claim snapshot.
 - Persist atomically.
 - Return human-readable CLI output and optional machine-readable `--json` output.
 - Reject invalid commands without changing state.
@@ -391,6 +437,8 @@ Update the local review UI to read canonical review state:
 - Show `lifecycleStatus` separately from `humanStatus`.
 - Show `assignee` when present.
 - Show reflected event history in a compact activity area or per-claim timestamp summary.
+- Show claim history/version browsing from `claimHistory`, allowing reviewers to inspect older versions of a claim without rewinding the whole session.
+- Show deterministic file review progress from `fileProgress`: files reviewed, files pending, and pending file list.
 - Recompute filters using canonical claim fields rather than draft-agent statuses.
 - Continue to support accepting/unaccepting claims through a Paire-owned API endpoint that updates `humanStatus`.
 
@@ -405,6 +453,7 @@ Preserve and move the existing validation logic into the reflector/finalize path
 - Validate evidence path safety and changed-file membership.
 - Validate evidence spans against touched ranges when available.
 - Validate all changed files are covered or acknowledged before finalize succeeds.
+- Validate `fileProgress` is derived from file coverage state and has no pending files before finalize succeeds.
 - Validate stale committed fingerprints and stale worktree hashes.
 - Validate blocked/superseded lifecycle requirements.
 - Emit stable error codes such as `CLAIM_NOT_FOUND`, `INVALID_EVIDENCE`, `FILE_NOT_COVERED`, `STALE_REVIEW`, and `INVALID_STATUS`.
@@ -412,14 +461,14 @@ Preserve and move the existing validation logic into the reflector/finalize path
 ## Implementation Steps
 
 1. **Introduce canonical review state**
-   - Define `ReviewState`, `ReviewClaimState`, `ReviewEvidenceState`, `ReviewThreadState`, `ReviewFileState`, and `ReviewEvent` types.
+   - Define `ReviewState`, `ReviewClaimState`, `ReviewClaimRevision`, `ReviewEvidenceState`, `ReviewThreadState`, `ReviewFileState`, `ReviewFileProgress`, and `ReviewEvent` types.
    - Store committed and worktree review state in this canonical shape.
    - Make the local review API read this shape.
 
 2. **Build the reflector module**
    - Add pure reducers for claim add/edit, evidence add/remove, file acknowledge, and review finalize.
    - Add transaction helpers for load/validate/apply/persist.
-   - Add event emission and coverage recomputation.
+   - Add event emission, claim revision append, coverage recomputation, and file progress recomputation.
 
 3. **Replace JSON-draft apply commands**
    - Remove the generated instruction path that tells agents to edit draft JSON.
@@ -448,6 +497,8 @@ Preserve and move the existing validation logic into the reflector/finalize path
    - Display work, lifecycle, and human statuses separately.
    - Show assignee/progress feedback.
    - Show coverage status for changed files.
+   - Show deterministic file progress from `fileProgress`.
+   - Show claim version history from `claimHistory`.
 
 7. **Move tests to the new workflow**
    - Replace draft-JSON edit tests with claim-command tests.
@@ -460,11 +511,11 @@ Preserve and move the existing validation logic into the reflector/finalize path
 - `bun test`.
 - `bun run typecheck`.
 - Command tests:
-  - `paire claim add` creates canonical claim state and event entries.
-  - `paire claim edit --work-status complete` updates progress only.
+  - `paire claim add` creates canonical claim state, claim history, and event entries.
+  - `paire claim edit --work-status complete` updates progress only and appends a claim revision.
   - `paire claim evidence add` updates claim evidence and file coverage.
-  - `paire claim evidence remove` recomputes coverage.
-  - `paire file acknowledge` marks a file acknowledged with a reason.
+  - `paire claim evidence remove` recomputes coverage and file progress.
+  - `paire file acknowledge` marks a file acknowledged with a reason and recomputes file progress.
   - `paire review finalize` passes only when review state is fresh and coverage is complete.
 - Validation tests:
   - Invalid status is rejected without persistence.
@@ -474,8 +525,10 @@ Preserve and move the existing validation logic into the reflector/finalize path
   - Stale committed fingerprint is rejected.
   - Stale worktree hash is rejected.
 - UI/API tests:
-  - Review API returns canonical top-level `threads`, `claims`, `files`, and `events`.
+  - Review API returns canonical top-level `threads`, `claims`, `claimHistory`, `files`, `fileProgress`, and `events`.
   - UI renders work status and assignee.
+  - UI renders deterministic file progress and pending files.
+  - UI can show older claim versions from `claimHistory`.
   - Human status updates mutate only `humanStatus`.
 
 ## Acceptance Criteria
@@ -486,4 +539,6 @@ Preserve and move the existing validation logic into the reflector/finalize path
 - `paire review finalize --session <id>` replaces draft apply as the completion gate.
 - The canonical schema separates lifecycle, work, and human status.
 - The UI can show progressive subagent work from reflected events and work statuses.
+- The UI can browse previous versions of a claim from `claimHistory`.
+- Review progress is deterministic and file-based via `fileProgress`, including pending file count/list.
 - Existing validation guarantees are preserved in the new reflector/finalize architecture.
