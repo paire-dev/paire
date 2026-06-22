@@ -23,7 +23,7 @@ Three concrete pain points:
 
 ### Branch Summary
 
-- The top of the review panel shows a one-sentence summary of what the PR changes.
+- The top of the review panel shows a short summary (a few sentences) of what the PR changes.
 - The summary is derived automatically; no manual editing is required.
 - The derivation source is transparent so reviewers can tell how confident the summary is.
 
