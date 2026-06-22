@@ -148,6 +148,7 @@ const filteredCodeItems = React.useMemo(() => {
 - Set `selectedClaimId` when a `ClaimCard` opens; clear it when the active claim closes.
 - Clear `selectedClaimId` when the reset button is clicked (see §4).
 - Keyboard `j`/`k` navigation already calls `onClaimOpenChange`; filtering follows automatically.
+- Add `←`/`→` keyboard navigation to cycle between evidence spans within the selected claim, scrolling the code panel to each span in turn.
 
 ### 4. Filter Affordance in Code Panel Toolbar
 
@@ -185,17 +186,21 @@ Render when active (`items.length < totalItems`):
 
 Rendered inside `ReviewCodePanel`, between the toolbar and the `CodeView`, only when `selectedClaimId` is set.
 
+The breadcrumb follows the full navigation path: **Thread > Claim > Evidence > Code**.
+
 ```tsx
 function ClaimBreadcrumb({
+  thread,
   claim,
   selectedEvidence,
   items,
 }: {
+  thread: Thread | null;
   claim: Claim | null;
   selectedEvidence: EvidenceSelection | null;
   items: CodeViewItem[];
 }) {
-  if (!claim) return null;
+  if (!claim || !thread) return null;
 
   const activeItem = selectedEvidence
     ? items.find((i) => i.id === selectedEvidence.id)
@@ -207,9 +212,9 @@ function ClaimBreadcrumb({
 
   return (
     <div className="flex items-center gap-1 border-b px-3 py-1.5 text-xs text-muted-foreground overflow-hidden shrink-0">
-      <span className="truncate max-w-[40%] font-medium text-foreground">
-        {claim.title}
-      </span>
+      <span className="truncate font-medium">{thread.title}</span>
+      <ChevronRight className="size-3 shrink-0" aria-hidden />
+      <span className="truncate font-medium text-foreground">{claim.title}</span>
       {activePath && (
         <>
           <ChevronRight className="size-3 shrink-0" aria-hidden />
@@ -229,7 +234,7 @@ function ClaimBreadcrumb({
 }
 ```
 
-Pass the `Claim` object (looked up from `selectedClaimId` + `allClaims`) and `filteredCodeItems` down through `ReviewCodePanel` props.
+Pass the `Thread` and `Claim` objects (looked up from `selectedClaimId` + `reviewThreads`) and `filteredCodeItems` down through `ReviewCodePanel` props.
 
 ## Implementation Steps
 
@@ -238,10 +243,12 @@ Pass the `Claim` object (looked up from `selectedClaimId` + `allClaims`) and `fi
 3. **UI: update `ReviewData` and `WorktreeReviewData` types** in `main.tsx`.
 4. **UI: add `ReviewSummary`** — render above `ReviewClaims` in the scroll panel.
 5. **UI: add `ReviewStats`** — replace the burden badge in the header.
-6. **UI: add `selectedClaimId` state and `allClaims` memo** to `ReviewScreen`.
-7. **UI: compute `filteredCodeItems`** and pass to `ReviewCodePanel`/`ReviewCodeSheet`.
-8. **UI: update `ReviewCodePanel`** — accept `totalItems` + `onClearFilter`; render filter affordance.
-9. **UI: add `ClaimBreadcrumb`** — render inside `ReviewCodePanel` above `CodeView`.
+6. **UI: add loading skeleton** — replace the current `null` loading return with a skeleton layout matching the header + claim panel structure.
+7. **UI: add `selectedClaimId` state and `allClaims` memo** to `ReviewScreen`.
+8. **UI: compute `filteredCodeItems`** and pass to `ReviewCodePanel`/`ReviewCodeSheet`.
+9. **UI: update `ReviewCodePanel`** — accept `totalItems` + `onClearFilter`; render filter affordance.
+10. **UI: add `ClaimBreadcrumb`** — render inside `ReviewCodePanel` above `CodeView`; pass thread + claim objects.
+11. **UI: add `←`/`→` keyboard navigation** — cycle through evidence spans of the selected claim.
 
 ## Test Plan
 
@@ -261,8 +268,10 @@ Pass the `Claim` object (looked up from `selectedClaimId` + `allClaims`) and `fi
 - Opening a claim sets `filteredCodeItems` to only that claim's files.
 - Closing the claim (or clicking X) restores `codeItems`.
 - Code panel toolbar shows `N of M files` + X when filtered.
-- `ClaimBreadcrumb` shows `title → file` with no evidence selected.
-- `ClaimBreadcrumb` shows `title → file → start–end` with evidence selected.
+- `ClaimBreadcrumb` shows `thread → claim → file` with no evidence selected.
+- `ClaimBreadcrumb` shows `thread → claim → file → start–end` with evidence selected.
 - `ClaimBreadcrumb` absent when no claim filter is active.
 - `j`/`k` keyboard navigation updates `selectedClaimId` correctly.
+- `←`/`→` keyboard navigation cycles through evidence spans of the selected claim.
+- Loading skeleton renders during initial page load (before first API response).
 - All existing interactions (evidence scroll, human status toggle, theme toggle) unchanged.
