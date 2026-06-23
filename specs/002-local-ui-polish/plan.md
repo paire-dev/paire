@@ -308,7 +308,9 @@ Pass the `Thread` and `Claim` objects (looked up from `selectedClaimId` + `revie
 
 **UI:**
 - `ReviewSummary` renders when text is non-empty; absent when empty.
-- `ReviewStats` shows `+N / -N / N files` with correct numbers.
+- `ReviewStats` bar segments are proportional to their line counts; critical + important + minor sum matches total non-noise/non-uncategorized lines.
+- `ReviewStats` noise and uncategorized indicators show correct line and file counts.
+- A file referenced by claims of multiple importance levels is counted at the highest level only.
 - Opening a claim sets `filteredCodeItems` to only that claim's files.
 - Closing the claim (or clicking X) restores `codeItems`.
 - Code panel toolbar shows `N of M files` + X when filtered.
