@@ -8,7 +8,7 @@ Three concrete pain points:
 
 1. **No overall summary.** A reviewer must read all claim threads before understanding what the PR changes. There is no one-line answer to "what is this PR?"
 
-2. **Confusing stats.** The header shows a burden string like `"29 new"`. It is not clear whether that counts files, claims, or lines. Reviewers expect GitHub-style stats: lines added, lines deleted, files changed.
+2. **Confusing stats.** The header shows a burden string like `"29 new"`. It is not clear whether that counts files, claims, or lines. Raw line counts also treat a 1,000-line lockfile change the same as a 10-line security fix — the numbers are meaningless without context.
 
 3. **No claim-to-code focus.** The code panel shows every changed file all the time. Selecting a claim scrolls to its evidence but does not narrow the view — reviewers still have to locate the relevant file themselves among all changed files.
 
@@ -17,7 +17,7 @@ Three concrete pain points:
 - A reviewer opening the UI should immediately understand what the PR is about.
 - A reviewer clicking into a claim should see only the code that claim is about.
 - A reviewer looking at the code panel should know which claim and file they are currently viewing.
-- Stats in the header should be unambiguous and match what developers expect from code review tools.
+- Stats in the header should immediately communicate how much of the change demands attention, not just how big the change is.
 
 ## Requirements
 
@@ -29,8 +29,11 @@ Three concrete pain points:
 
 ### Stats Display
 
-- The header shows total lines added, total lines deleted, and total files changed.
-- Per-file line counts are available when the reviewer opens the code panel.
+- The header shows an importance-weighted line breakdown bar with always-visible counts — no hover required.
+- The bar has three segments: critical, important, and minor. Each segment is sized by the total lines touched (additions + deletions combined) at that importance level, and shows its count directly.
+- When a file is referenced by claims of multiple importance levels, it is counted at the highest level.
+- Noise files appear outside the bar as a separate muted indicator showing both line count and file count (e.g., `1.2k lines in 3 files`).
+- Files with no claim coverage at all appear as a distinct "no category" indicator, separate from noise.
 - The stats are consistent between committed and worktree reviews.
 
 ### Claim-Scoped File Filtering
@@ -56,7 +59,7 @@ Three concrete pain points:
 ## Success Criteria
 
 - A reviewer can answer "what is this PR about?" without opening any claim.
-- A reviewer can answer "how big is this change?" from the header alone.
+- A reviewer can answer "how much of this change needs my attention?" from the header alone.
 - Expanding a claim shows only the files that claim touches, with no manual navigation needed.
 - A reviewer always knows which claim they are reviewing while looking at code.
 - All existing interactions — keyboard navigation, evidence scrolling, human status toggle — continue to work.
