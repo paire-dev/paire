@@ -47,10 +47,13 @@ type ReviewData = {
     source: "goal" | "threads" | "branch";
   };
   stats: {
-    filesChanged: number;
-    additions: number;
-    deletions: number;
-    files: Array<{ path: string; additions: number; deletions: number }>;
+    breakdown: {
+      critical: number;   // combined lines touched (additions + deletions)
+      important: number;
+      minor: number;
+      noise: { lines: number; files: number };
+      uncategorized: { lines: number; files: number }; // files with no claim coverage
+    };
   };
 };
 ```
@@ -63,7 +66,12 @@ type ReviewData = {
 
 **`stats` derivation:**
 
-Source from `DraftPacket.changedFiles` (already tracked per session). Sum `additions`/`deletions` for totals; pass `changedFiles` as `files` directly.
+1. For each changed file, compute `lines = additions + deletions`.
+2. Determine the file's importance: the highest importance of any active claim whose evidence references that file. If no claim covers the file, it is `uncategorized`.
+3. Accumulate `lines` into the matching bucket (`critical`, `important`, `minor`, `noise`, or `uncategorized`).
+4. `noise` and `uncategorized` also track `files` (count of distinct files in that bucket).
+
+Source data: `DraftPacket.changedFiles` for file line counts; active claims in the applied review for importance lookup.
 
 ### Extend `WorktreeReviewData`
 
@@ -91,25 +99,61 @@ function ReviewSummary({ summary }: { summary: ReviewData["summary"] }) {
 - Render for both committed and worktree paths.
 - No visual distinction by `source` in v1; source is available for future use.
 
-### 2. Stats Badge — `ReviewStats`
+### 2. Importance Breakdown Bar — `ReviewStats`
 
 Replace `<Badge variant="outline">{reviewBurden}</Badge>` in the header.
 
+The bar shows critical / important / minor as proportional colored segments with their line counts always visible. Noise and uncategorized appear outside the bar, muted.
+
 ```tsx
 function ReviewStats({ stats }: { stats: ReviewData["stats"] }) {
+  const { breakdown } = stats;
+  const barTotal = breakdown.critical + breakdown.important + breakdown.minor;
+
   return (
-    <Badge variant="outline" className="font-mono text-xs gap-1">
-      <span className="text-green-600 dark:text-green-400">+{stats.additions}</span>
-      <span className="text-muted-foreground">/</span>
-      <span className="text-red-600 dark:text-red-400">-{stats.deletions}</span>
-      <span className="text-muted-foreground">/</span>
-      <span>{stats.filesChanged} {stats.filesChanged === 1 ? "file" : "files"}</span>
-    </Badge>
+    <div className="flex items-center gap-2 text-xs">
+      {barTotal > 0 && (
+        <div className="flex h-2 w-24 overflow-hidden rounded-full">
+          <BarSegment value={breakdown.critical} total={barTotal} className="bg-violet-500" />
+          <BarSegment value={breakdown.important} total={barTotal} className="bg-orange-500" />
+          <BarSegment value={breakdown.minor} total={barTotal} className="bg-muted-foreground" />
+        </div>
+      )}
+      <div className="flex items-center gap-1.5 font-mono">
+        {breakdown.critical > 0 && (
+          <span className="text-violet-500">{fmt(breakdown.critical)}</span>
+        )}
+        {breakdown.important > 0 && (
+          <span className="text-orange-500">{fmt(breakdown.important)}</span>
+        )}
+        {breakdown.minor > 0 && (
+          <span className="text-muted-foreground">{fmt(breakdown.minor)}</span>
+        )}
+        {breakdown.noise.lines > 0 && (
+          <span className="text-muted-foreground/50">
+            {fmt(breakdown.noise.lines)} in {breakdown.noise.files}f noise
+          </span>
+        )}
+        {breakdown.uncategorized.lines > 0 && (
+          <span className="text-muted-foreground/50">
+            {fmt(breakdown.uncategorized.lines)} in {breakdown.uncategorized.files}f uncategorized
+          </span>
+        )}
+      </div>
+    </div>
   );
+}
+
+// formats line counts: 1200 → "1.2k"
+function fmt(n: number) { ... }
+
+function BarSegment({ value, total, className }: { value: number; total: number; className: string }) {
+  if (value === 0) return null;
+  return <div className={className} style={{ width: `${(value / total) * 100}%` }} />;
 }
 ```
 
-While the API is being updated, fall back to computing stats from `worktreeDiff.files` for the worktree path (already available client-side).
+While the API is being updated, fall back to placing all lines from `worktreeDiff.files` into `uncategorized` for the worktree path.
 
 ### 3. Claim-Scoped Filtering
 
