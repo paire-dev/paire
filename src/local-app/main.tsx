@@ -808,7 +808,7 @@ function ReviewScreen() {
               gitStatus={gitStatusEntries}
               items={filteredCodeItems}
               totalItems={codeItems.length}
-              onClearFilter={() => setSelectedClaimId(null)}
+              onClearFilter={() => { setSelectedClaimId(null); setSelectedEvidence(null); }}
               selectedClaim={selectedClaim}
               selectedThread={selectedThread}
               open={codePanelOpen}
@@ -830,7 +830,7 @@ function ReviewScreen() {
             gitStatus={gitStatusEntries}
             items={filteredCodeItems}
             totalItems={codeItems.length}
-            onClearFilter={() => setSelectedClaimId(null)}
+            onClearFilter={() => { setSelectedClaimId(null); setSelectedEvidence(null); }}
             selectedClaim={selectedClaim}
             selectedThread={selectedThread}
             open={codePanelOpen}
@@ -2690,13 +2690,28 @@ function ClaimBreadcrumb({
 
   return (
     <div className="flex items-center gap-1 border-b px-3 py-1.5 text-xs text-muted-foreground overflow-hidden shrink-0">
-      <span className="truncate font-medium">{thread.title}</span>
+      <Tooltip>
+        <TooltipTrigger render={<span className="truncate font-medium" />}>
+          {thread.title}
+        </TooltipTrigger>
+        <TooltipContent>{thread.title}</TooltipContent>
+      </Tooltip>
       <ChevronRight className="size-3 shrink-0" aria-hidden />
-      <span className="truncate font-medium text-foreground">{claim.title}</span>
+      <Tooltip>
+        <TooltipTrigger render={<span className="truncate font-medium text-foreground" />}>
+          {claim.title}
+        </TooltipTrigger>
+        <TooltipContent>{claim.title}</TooltipContent>
+      </Tooltip>
       {activePath && (
         <>
           <ChevronRight className="size-3 shrink-0" aria-hidden />
-          <span className="truncate font-mono">{activePath}</span>
+          <Tooltip>
+            <TooltipTrigger render={<span className="truncate font-mono" />}>
+              {activePath}
+            </TooltipTrigger>
+            <TooltipContent>{activePath}</TooltipContent>
+          </Tooltip>
         </>
       )}
       {selectedEvidence && activePath && (
