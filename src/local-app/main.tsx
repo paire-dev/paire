@@ -47,6 +47,7 @@ import {
   Square,
   TriangleAlert,
   WrapText,
+  X,
 } from "lucide-react";
 import * as React from "react";
 import { createRoot } from "react-dom/client";
@@ -455,6 +456,7 @@ function ReviewScreen() {
   const [codePanelOpen, setCodePanelOpen] = React.useState(false);
   const [selectedEvidence, setSelectedEvidence] =
     React.useState<EvidenceSelection | null>(null);
+  const [selectedClaimId, setSelectedClaimId] = React.useState<string | null>(null);
   const codeViewRef = React.useRef<CodeViewHandle<undefined>>(null);
   const {
     data,
@@ -525,6 +527,36 @@ function ReviewScreen() {
     [codeItems, data?.git.status],
   );
 
+  const allClaims = React.useMemo(
+    () => reviewThreads.flatMap((t) => t.claims),
+    [reviewThreads],
+  );
+
+  const filteredCodeItems = React.useMemo(() => {
+    if (!selectedClaimId) return codeItems;
+    const claim = allClaims.find((c) => c.id === selectedClaimId);
+    if (!claim || claim.evidences.length === 0) return codeItems;
+    const paths = new Set(claim.evidences.map((e) => normalizeFilePath(e.filePath)));
+    return codeItems.filter(
+      (item) =>
+        item.type === "diff" &&
+        (paths.has(normalizeFilePath(item.fileDiff.name)) ||
+          (item.fileDiff.prevName != null &&
+            paths.has(normalizeFilePath(item.fileDiff.prevName)))),
+    );
+  }, [codeItems, selectedClaimId, allClaims]);
+
+  const selectedClaim = React.useMemo(
+    () => allClaims.find((c) => c.id === selectedClaimId) ?? null,
+    [allClaims, selectedClaimId],
+  );
+
+  const selectedThread = React.useMemo(
+    () =>
+      reviewThreads.find((t) => t.claims.some((c) => c.id === selectedClaimId)) ?? null,
+    [reviewThreads, selectedClaimId],
+  );
+
   const evidenceIsSelected = React.useCallback(
     (evidence: Evidence) =>
       isEvidenceSelected(evidence, selectedEvidence, codeItems),
@@ -547,6 +579,11 @@ function ReviewScreen() {
   }, []);
   const setClaimOpen = React.useCallback((claimId: string, open: boolean) => {
     setOpenClaims((current) => ({ ...current, [claimId]: open }));
+    if (open) {
+      setSelectedClaimId(claimId);
+    } else {
+      setSelectedClaimId((current) => (current === claimId ? null : current));
+    }
   }, []);
   const setAllReviewItemsOpen = React.useCallback(
     (open: boolean) => {
@@ -605,6 +642,33 @@ function ReviewScreen() {
     },
     [codeItems],
   );
+
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (event.metaKey || event.altKey || event.ctrlKey) return;
+      if (!selectedClaimId) return;
+      if (isTypingTarget(event.target)) return;
+
+      const claim = allClaims.find((c) => c.id === selectedClaimId);
+      if (!claim || claim.evidences.length === 0) return;
+
+      event.preventDefault();
+      const evidences = claim.evidences;
+      const currentIndex = evidences.findIndex((e) =>
+        isEvidenceSelected(e, selectedEvidence, codeItems),
+      );
+      const delta = event.key === "ArrowRight" ? 1 : -1;
+      const fallbackIndex = delta === 1 ? -1 : 0;
+      const baseIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
+      const nextIndex = (baseIndex + delta + evidences.length) % evidences.length;
+      const nextEvidence = evidences[nextIndex];
+      if (nextEvidence) scrollToEvidence(nextEvidence);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedClaimId, allClaims, selectedEvidence, codeItems, scrollToEvidence]);
 
   if (isLoading) {
     if (!showLoadingState) return null;
@@ -742,7 +806,11 @@ function ReviewScreen() {
               className="h-full min-h-0"
               diffError={activeDiffError}
               gitStatus={gitStatusEntries}
-              items={codeItems}
+              items={filteredCodeItems}
+              totalItems={codeItems.length}
+              onClearFilter={() => { setSelectedClaimId(null); setSelectedEvidence(null); }}
+              selectedClaim={selectedClaim}
+              selectedThread={selectedThread}
               open={codePanelOpen}
               selectedEvidence={selectedEvidence}
               onOpenChange={setCodePanelOpen}
@@ -760,7 +828,11 @@ function ReviewScreen() {
             codeViewRef={codeViewRef}
             diffError={activeDiffError}
             gitStatus={gitStatusEntries}
-            items={codeItems}
+            items={filteredCodeItems}
+            totalItems={codeItems.length}
+            onClearFilter={() => { setSelectedClaimId(null); setSelectedEvidence(null); }}
+            selectedClaim={selectedClaim}
+            selectedThread={selectedThread}
             open={codePanelOpen}
             selectedEvidence={selectedEvidence}
             onOpenChange={setCodePanelOpen}
@@ -869,6 +941,10 @@ function ReviewCodeSheet({
   diffError,
   gitStatus,
   items,
+  totalItems,
+  onClearFilter,
+  selectedClaim,
+  selectedThread,
   open,
   selectedEvidence,
   onOpenChange,
@@ -878,6 +954,10 @@ function ReviewCodeSheet({
   diffError: boolean;
   gitStatus: GitStatusEntry[];
   items: CodeViewItem[];
+  totalItems?: number;
+  onClearFilter?: () => void;
+  selectedClaim?: Claim | null;
+  selectedThread?: Thread | null;
   open: boolean;
   selectedEvidence: EvidenceSelection | null;
   onOpenChange: (open: boolean) => void;
@@ -901,6 +981,10 @@ function ReviewCodeSheet({
             diffError={diffError}
             gitStatus={gitStatus}
             items={items}
+            totalItems={totalItems}
+            onClearFilter={onClearFilter}
+            selectedClaim={selectedClaim}
+            selectedThread={selectedThread}
             open={open}
             selectedEvidence={selectedEvidence}
             onOpenChange={onOpenChange}
@@ -2372,6 +2456,10 @@ function ReviewCodePanel({
   diffError,
   gitStatus,
   items,
+  totalItems = items.length,
+  onClearFilter,
+  selectedClaim = null,
+  selectedThread = null,
   open,
   selectedEvidence,
   onOpenChange,
@@ -2383,6 +2471,10 @@ function ReviewCodePanel({
   diffError: boolean;
   gitStatus: GitStatusEntry[];
   items: CodeViewItem[];
+  totalItems?: number;
+  onClearFilter?: () => void;
+  selectedClaim?: Claim | null;
+  selectedThread?: Thread | null;
   open: boolean;
   selectedEvidence: EvidenceSelection | null;
   onOpenChange: (open: boolean) => void;
@@ -2451,8 +2543,23 @@ function ReviewCodePanel({
             </Button>
           ) : null}
           <Badge variant="outline" className="text-muted-foreground">
-            {items.length} {items.length === 1 ? "file" : "files"}
+            {items.length < totalItems
+              ? `${items.length} of ${totalItems} files`
+              : `${items.length} ${items.length === 1 ? "file" : "files"}`}
           </Badge>
+          {items.length < totalItems && onClearFilter ? (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="size-7"
+              aria-label="Show all files"
+              title="Show all files"
+              onClick={onClearFilter}
+            >
+              <X />
+            </Button>
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <DiffViewControls
@@ -2482,6 +2589,13 @@ function ReviewCodePanel({
           </Button>
         </div>
       </div>
+
+      <ClaimBreadcrumb
+        thread={selectedThread}
+        claim={selectedClaim}
+        selectedEvidence={selectedEvidence}
+        items={items}
+      />
 
       <div
         className={cn(
@@ -2550,6 +2664,65 @@ function ReviewCodePanel({
         ) : null}
       </div>
     </aside>
+  );
+}
+
+function ClaimBreadcrumb({
+  thread,
+  claim,
+  selectedEvidence,
+  items,
+}: {
+  thread: Thread | null;
+  claim: Claim | null;
+  selectedEvidence: EvidenceSelection | null;
+  items: CodeViewItem[];
+}) {
+  if (!claim || !thread) return null;
+
+  const activeItem = selectedEvidence
+    ? items.find((i) => i.id === selectedEvidence.id)
+    : items[0];
+  const activePath =
+    activeItem?.type === "diff"
+      ? normalizeFilePath(activeItem.fileDiff.name)
+      : null;
+
+  return (
+    <div className="flex items-center gap-1 border-b px-3 py-1.5 text-xs text-muted-foreground overflow-hidden shrink-0">
+      <Tooltip>
+        <TooltipTrigger render={<span className="truncate font-medium" />}>
+          {thread.title}
+        </TooltipTrigger>
+        <TooltipContent>{thread.title}</TooltipContent>
+      </Tooltip>
+      <ChevronRight className="size-3 shrink-0" aria-hidden />
+      <Tooltip>
+        <TooltipTrigger render={<span className="truncate font-medium text-foreground" />}>
+          {claim.title}
+        </TooltipTrigger>
+        <TooltipContent>{claim.title}</TooltipContent>
+      </Tooltip>
+      {activePath && (
+        <>
+          <ChevronRight className="size-3 shrink-0" aria-hidden />
+          <Tooltip>
+            <TooltipTrigger render={<span className="truncate font-mono" />}>
+              {activePath}
+            </TooltipTrigger>
+            <TooltipContent>{activePath}</TooltipContent>
+          </Tooltip>
+        </>
+      )}
+      {selectedEvidence && activePath && (
+        <>
+          <ChevronRight className="size-3 shrink-0" aria-hidden />
+          <span className="font-mono tabular-nums shrink-0">
+            {selectedEvidence.range.start}–{selectedEvidence.range.end}
+          </span>
+        </>
+      )}
+    </div>
   );
 }
 
