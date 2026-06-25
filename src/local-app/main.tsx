@@ -1884,7 +1884,7 @@ function ThreadGroup({
       className="flex flex-col gap-1"
     >
       <section className="contents">
-        <div className="flex flex-col gap-1 py-2 sticky top-0 z-10 bg-linear-to-b from-muted to-transparent backdrop-blur-xs supports-backdrop-filter:bg-muted/80">
+        <div className={cn("flex flex-col gap-1 py-2 sticky top-0 z-10 bg-linear-to-b from-muted to-transparent backdrop-blur-xs supports-backdrop-filter:bg-muted/80 border-l-2 pl-1.5 transition-colors", open ? "border-primary/50" : "border-transparent")}>
           <div className="min-w-0">
             <div className="flex items-start justify-between gap-3">
               <h2 className="min-w-0 text-base font-semibold leading-snug w-full">
@@ -1916,7 +1916,7 @@ function ThreadGroup({
             </div>
           </div>
         </div>
-        <CollapsibleContent className="flex flex-col gap-1 sm:pl-8">
+        <CollapsibleContent className="flex flex-col gap-1 ml-1.5 border-l border-border/50 sm:pl-7 pl-4">
           {thread.summary ? (
             <div className="text-lg leading-relaxed pb-2 max-w-prose">
               <AiText source={thread.summary} />
