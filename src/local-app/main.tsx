@@ -2019,15 +2019,15 @@ function ClaimCard({
     >
       <Card
         className={cn(
-          "relative gap-0 overflow-hidden py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
+          "relative gap-0 overflow-hidden py-0 shadow-none border-border/60 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
           // claimImportanceColor(claim.importance),
           claim.humanStatus === "accepted" &&
             "bg-background/50 text-muted-foreground",
         )}
         title={claim.importance}
       >
-        <CardHeader className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start sm:justify-between px-4 sm:px-6">
-          <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug w-full">
+        <CardHeader className="flex flex-col gap-2 py-2.5 sm:flex-row sm:items-start sm:justify-between px-3 sm:px-4">
+          <CardTitle className="flex min-w-0 flex-1 text-sm font-medium leading-snug w-full">
             <CollapsibleTrigger
               ref={onTriggerRef}
               className="group -ml-3 flex min-w-0 items-start gap-1 rounded-md px-1 text-left w-full"
