@@ -1359,20 +1359,25 @@ function ReviewClaims({
       ) : filteredThreads.length === 0 ? (
         <EmptyState>No claims match the current filters.</EmptyState>
       ) : (
-        filteredThreads.map((thread) => (
-          <ThreadGroup
-            key={thread.id}
-            thread={thread}
-            open={openThreads[thread.id] !== false}
-            openClaims={openClaims}
-            isEvidenceSelected={isEvidenceSelected}
-            onEvidenceSelect={onEvidenceSelect}
-            onClaimApproved={focusNextUnapprovedAfter}
-            onClaimOpenChange={onClaimOpenChange}
-            onClaimTriggerRef={setClaimButtonRef}
-            onThreadOpenChange={onThreadOpenChange}
-          />
-        ))
+        <>
+          <p className="px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Groups of changes
+          </p>
+          {filteredThreads.map((thread) => (
+            <ThreadGroup
+              key={thread.id}
+              thread={thread}
+              open={openThreads[thread.id] !== false}
+              openClaims={openClaims}
+              isEvidenceSelected={isEvidenceSelected}
+              onEvidenceSelect={onEvidenceSelect}
+              onClaimApproved={focusNextUnapprovedAfter}
+              onClaimOpenChange={onClaimOpenChange}
+              onClaimTriggerRef={setClaimButtonRef}
+              onThreadOpenChange={onThreadOpenChange}
+            />
+          ))}
+        </>
       )}
     </section>
   );
@@ -1879,14 +1884,14 @@ function ThreadGroup({
       className="flex flex-col gap-1"
     >
       <section className="contents">
-        <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-linear-to-b from-muted to-transparent backdrop-blur-xs supports-backdrop-filter:bg-muted/80">
+        <div className="flex flex-col gap-1 py-2 sticky top-0 z-10 bg-linear-to-b from-muted to-transparent backdrop-blur-xs supports-backdrop-filter:bg-muted/80">
           <div className="min-w-0">
             <div className="flex items-start justify-between gap-3">
-              <h2 className="min-w-0 text-3xl font-light leading-snug w-full">
+              <h2 className="min-w-0 text-base font-semibold leading-snug w-full">
                 <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted w-full">
                   <ChevronRight
                     className={cn(
-                      "size-7 shrink-0 text-muted-foreground transition-transform",
+                      "size-4 shrink-0 text-muted-foreground transition-transform",
                       open && "rotate-90",
                     )}
                     aria-hidden
@@ -1917,7 +1922,7 @@ function ThreadGroup({
               <AiText source={thread.summary} />
             </div>
           ) : null}
-          <div className="grid gap-3">
+          <div className="grid gap-1.5">
             {thread.claims.map((claim) => (
               <ClaimCard
                 key={claim.id}
@@ -2025,7 +2030,7 @@ function ClaimCard({
           <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug w-full">
             <CollapsibleTrigger
               ref={onTriggerRef}
-              className="group -ml-3 flex min-w-0 items-center gap-1 rounded-md px-1 text-left w-full"
+              className="group -ml-3 flex min-w-0 items-start gap-1 rounded-md px-1 text-left w-full"
               onKeyDown={(event) => {
                 if (event.key !== "Enter" && event.key !== " ") return;
                 event.preventDefault();
