@@ -1916,7 +1916,7 @@ function ThreadGroup({
             </div>
           </div>
         </div>
-        <CollapsibleContent className="flex flex-col gap-1 ml-1.5 border-l border-border/50 sm:pl-7 pl-4">
+        <CollapsibleContent className="flex flex-col gap-1 border-l border-border/50 sm:pl-7 pl-4">
           {thread.summary ? (
             <div className="text-lg leading-relaxed pb-2 max-w-prose">
               <AiText source={thread.summary} />
