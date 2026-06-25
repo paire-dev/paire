@@ -22,18 +22,19 @@ const selectedFixtures = selectFixtures(args.fixtures ?? DEFAULT_FIXTURES);
 const paireBin = args["paire-bin"] ?? DEFAULT_PAIRE_BIN;
 const results: EvalCaseResult[] = [];
 
-for (const fixture of selectedFixtures) {
-  for (const agent of selectedAgents) {
-    results.push(await runCase(fixture, agent, paireBin));
-  }
-}
-
 const resultDir = join(
   "evals",
   "results",
   `${new Date().toISOString().replace(/[:.]/g, "-")}-local`,
 );
 mkdirSync(resultDir, { recursive: true });
+
+for (const fixture of selectedFixtures) {
+  for (const agent of selectedAgents) {
+    results.push(await runCase(fixture, agent, paireBin, resultDir));
+  }
+}
+
 writeFileSync(join(resultDir, "run.json"), JSON.stringify({ results }, null, 2));
 writeFileSync(join(resultDir, "scoreboard.md"), renderScoreboard(results));
 writeFileSync(
@@ -51,6 +52,7 @@ async function runCase(
   fixture: FixtureSpec,
   agent: string,
   paireBin: string,
+  resultDir: string,
 ) {
   const workspace = await createEvalWorkspace(fixture);
   const start = runPaire(workspace, paireBin, ["start", "--base", "main"]);
@@ -71,7 +73,7 @@ async function runCase(
     workspace,
     paireBin,
   });
-  return await objectiveMetrics({
+  const metrics = await objectiveMetrics({
     fixture: fixture.id,
     agent,
     transcript: agentResult.transcript,
@@ -80,6 +82,15 @@ async function runCase(
     draftPath,
     expectedCoveredFiles: fixture.gold.expectedCoveredFiles,
   });
+
+  const failed = !metrics.firstAttemptApplySuccess || metrics.fileCoverage < 1;
+  if (failed && agentResult.transcript) {
+    const transcriptPath = join(resultDir, `transcript-${agent}-${fixture.id}.txt`);
+    writeFileSync(transcriptPath, agentResult.transcript);
+    console.error(`  transcript → ${transcriptPath}`);
+  }
+
+  return metrics;
 }
 
 function runAgent(
