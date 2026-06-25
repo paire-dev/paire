@@ -140,10 +140,27 @@ type Thread = {
   claims: Claim[];
 };
 
+type ReviewSummaryData = {
+  text: string;
+  source: "goal" | "threads" | "branch";
+};
+
+type ReviewStatsData = {
+  breakdown: {
+    critical: number;
+    important: number;
+    minor: number;
+    noise: { lines: number; files: number };
+    uncategorized: { lines: number; files: number };
+  };
+};
+
 type ReviewData = {
   session: { goal: string | null; projectKey: string };
   git: { branch: string; head: string; clean: boolean; status: string };
   burden: string;
+  summary: ReviewSummaryData;
+  stats: ReviewStatsData;
   generatedAt: number;
   threads: Thread[];
 };
@@ -162,6 +179,8 @@ type WorktreeReviewData = {
   appliedHash: string | null;
   draftPath: string | null;
   burden: string;
+  summary: ReviewSummaryData;
+  stats: ReviewStatsData;
   generatedAt: number;
   threads: Thread[];
 };
@@ -200,6 +219,15 @@ const proseClassName =
   "min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_p]:m-0 [&_ul]:m-0 [&_ol]:m-0 [&_ul]:pl-5 [&_ol]:pl-5 [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em]";
 const REVIEW_TOKEN_STORAGE_KEY = "paire-review-token";
 const LOADING_STATE_DELAY_MS = 250;
+const EMPTY_REVIEW_STATS: ReviewStatsData = {
+  breakdown: {
+    critical: 0,
+    important: 0,
+    minor: 0,
+    noise: { lines: 0, files: 0 },
+    uncategorized: { lines: 0, files: 0 },
+  },
+};
 const reviewToken = resolveReviewToken();
 
 function resolveReviewToken() {
@@ -497,6 +525,8 @@ function ReviewScreen() {
       appliedHash: null,
       draftPath: null,
       burden: "0 claims",
+      summary: { text: "", source: "branch" as const },
+      stats: EMPTY_REVIEW_STATS,
       generatedAt: 0,
       threads: [] as Thread[],
     },
@@ -514,7 +544,12 @@ function ReviewScreen() {
   const showClaimsLayout = !isDirty || worktreeHasClaims;
   const claimApi = isDirty ? worktreeClaimApi : committedClaimApi;
   const reviewThreads = isDirty ? worktreeReview.threads : (data?.threads ?? []);
-  const reviewBurden = isDirty ? worktreeReview.burden : (data?.burden ?? "");
+  const reviewSummary = isDirty
+    ? worktreeReview.summary
+    : (data?.summary ?? { text: "", source: "branch" as const });
+  const reviewStats = isDirty
+    ? worktreeReview.stats
+    : (data?.stats ?? EMPTY_REVIEW_STATS);
 
   const activeDiff = isDirty ? worktreeDiff.diff : rawDiff;
   const activeDiffError = isDirty ? isWorktreeDiffError : isDiffError;
@@ -674,10 +709,7 @@ function ReviewScreen() {
     if (!showLoadingState) return null;
     return (
       <main className={pageClassName}>
-        <EmptyState
-          title="Opening review"
-          description="Preparing the latest review state."
-        />
+        <ReviewLoadingSkeleton />
       </main>
     );
   }
@@ -740,6 +772,7 @@ function ReviewScreen() {
   );
   const reviewPanel = (
     <ReviewScrollPanel contained={isDesktopLayout}>
+      <ReviewSummary summary={reviewSummary} />
       {reviewContent}
     </ReviewScrollPanel>
   );
@@ -767,7 +800,7 @@ function ReviewScreen() {
           onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
         />
         <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
-          <Badge variant="outline">{reviewBurden}</Badge>
+          <ReviewStats stats={reviewStats} />
           {!isDesktopLayout ? (
             <MobileCodePanelButton
               open={codePanelOpen}
@@ -1163,6 +1196,162 @@ function ReviewScrollPanel({
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-8">
         {content}
+      </div>
+    </div>
+  );
+}
+
+function ReviewSummary({ summary }: { summary: ReviewSummaryData }) {
+  if (!summary.text) return null;
+  return (
+    <p className="max-w-prose pb-4 text-lg leading-relaxed text-muted-foreground">
+      {summary.text}
+    </p>
+  );
+}
+
+function ReviewStats({ stats }: { stats: ReviewStatsData }) {
+  const { breakdown } = stats;
+  const barTotal =
+    breakdown.critical + breakdown.important + breakdown.minor;
+  const hasAnyLines =
+    barTotal > 0 ||
+    breakdown.noise.lines > 0 ||
+    breakdown.uncategorized.lines > 0;
+
+  if (!hasAnyLines) {
+    return (
+      <Badge variant="outline" className="text-muted-foreground">
+        0 lines
+      </Badge>
+    );
+  }
+
+  return (
+    <div className="flex max-w-full flex-wrap items-center justify-end gap-2 text-xs">
+      {barTotal > 0 ? (
+        <div
+          className="flex h-2 w-24 overflow-hidden rounded-full bg-muted"
+          aria-hidden="true"
+        >
+          <ReviewStatsSegment
+            value={breakdown.critical}
+            total={barTotal}
+            className="bg-violet-500"
+          />
+          <ReviewStatsSegment
+            value={breakdown.important}
+            total={barTotal}
+            className="bg-orange-500"
+          />
+          <ReviewStatsSegment
+            value={breakdown.minor}
+            total={barTotal}
+            className="bg-muted-foreground"
+          />
+        </div>
+      ) : null}
+      <div className="flex max-w-full flex-wrap items-center justify-end gap-x-2 gap-y-1 font-mono">
+        {breakdown.critical > 0 ? (
+          <span className="text-violet-500">
+            {formatLineCount(breakdown.critical)} critical
+          </span>
+        ) : null}
+        {breakdown.important > 0 ? (
+          <span className="text-orange-500">
+            {formatLineCount(breakdown.important)} important
+          </span>
+        ) : null}
+        {breakdown.minor > 0 ? (
+          <span className="text-muted-foreground">
+            {formatLineCount(breakdown.minor)} minor
+          </span>
+        ) : null}
+        {breakdown.noise.lines > 0 ? (
+          <span className="text-muted-foreground/70">
+            {formatLineCount(breakdown.noise.lines)} lines in{" "}
+            {breakdown.noise.files} {pluralize("file", breakdown.noise.files)}{" "}
+            noise
+          </span>
+        ) : null}
+        {breakdown.uncategorized.lines > 0 ? (
+          <span className="text-muted-foreground/70">
+            {formatLineCount(breakdown.uncategorized.lines)} lines in{" "}
+            {breakdown.uncategorized.files}{" "}
+            {pluralize("file", breakdown.uncategorized.files)} uncategorized
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ReviewStatsSegment({
+  value,
+  total,
+  className,
+}: {
+  value: number;
+  total: number;
+  className: string;
+}) {
+  if (value <= 0 || total <= 0) return null;
+  return (
+    <div
+      className={className}
+      style={{ width: `${(value / total) * 100}%` }}
+    />
+  );
+}
+
+function formatLineCount(value: number) {
+  if (value < 1000) return String(value);
+  const formatted = (value / 1000).toFixed(value < 10_000 ? 1 : 0);
+  return `${formatted.replace(/\.0$/, "")}k`;
+}
+
+function pluralize(word: string, count: number) {
+  return count === 1 ? word : `${word}s`;
+}
+
+function ReviewLoadingSkeleton() {
+  return (
+    <div className="mx-auto w-full max-w-6xl py-2">
+      <div className="mb-5 grid gap-4 p-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="h-7 w-36 animate-pulse rounded bg-muted" />
+          <div className="h-6 w-24 animate-pulse rounded bg-muted" />
+        </div>
+        <div className="flex justify-center gap-1">
+          <div className="h-7 w-16 animate-pulse rounded bg-muted" />
+          <div className="h-7 w-20 animate-pulse rounded bg-muted" />
+          <div className="h-7 w-16 animate-pulse rounded bg-muted" />
+        </div>
+        <div className="flex justify-start gap-2 sm:justify-end">
+          <div className="h-6 w-32 animate-pulse rounded bg-muted" />
+          <div className="h-7 w-7 animate-pulse rounded bg-muted" />
+        </div>
+      </div>
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-3.5">
+        <div className="mb-1 flex flex-col gap-2">
+          <div className="h-5 w-4/5 animate-pulse rounded bg-muted" />
+          <div className="h-5 w-2/3 animate-pulse rounded bg-muted" />
+        </div>
+        {[0, 1, 2].map((index) => (
+          <div
+            key={index}
+            className="rounded-lg border bg-card p-4 shadow-xs"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex min-w-0 flex-1 flex-col gap-3">
+                <div className="h-5 w-3/5 animate-pulse rounded bg-muted" />
+                <div className="h-4 w-full animate-pulse rounded bg-muted" />
+                <div className="h-4 w-5/6 animate-pulse rounded bg-muted" />
+              </div>
+              <div className="h-7 w-7 shrink-0 animate-pulse rounded bg-muted" />
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
