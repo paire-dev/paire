@@ -1139,7 +1139,7 @@ function HumanFilterButton({
       type="button"
       size="sm"
       variant={active ? "default" : "ghost"}
-      className="h-7 rounded-none border-0 px-2.5 text-xs shadow-none"
+      className="h-8 rounded-none border-0 px-3 text-xs shadow-none"
       aria-pressed={active}
       onClick={onClick}
     >
@@ -1836,7 +1836,7 @@ function claimImportanceColor(importance: ClaimImportance) {
     case "critical":
       return "shadow-[inset_2px_0_0_var(--color-violet-500)]";
     case "important":
-      return "shadow-[inset_2px_0_0_var(--color-orange-500)]";
+      return "shadow-[inset_2px_0_0_var(--color-amber-500)]";
     case "noise":
       return "shadow-[inset_2px_0_0_var(--color-muted)]";
     case "minor":
@@ -2227,7 +2227,7 @@ function EvidenceBlock({
             aria-pressed={selected}
             className={cn(
               "w-full justify-start text-sm font-normal hover:bg-primary/10 h-auto py-2 text-left",
-              selected ? "bg-primary/30" : "bg-muted/30 text-muted-foreground",
+              selected ? "bg-primary/20 ring-1 ring-primary/40" : "bg-muted/30 text-muted-foreground",
             )}
             onClick={() => onSelect(evidence)}
             id={getEvidenceId(evidence)}
