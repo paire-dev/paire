@@ -2065,22 +2065,20 @@ function ClaimCard({
               </span>
             </CollapsibleTrigger>
           </CardTitle>
-          <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto shrink">
+          <CardAction className="flex flex-wrap items-center justify-end gap-1.5 ml-auto shrink opacity-70">
             {claim.updatedAt ? (
               <ClaimTimeAgo updatedAt={claim.updatedAt} />
             ) : null}
-            <Badge
-              variant={
-                claim.agentStatus !== "unchanged" ? "default" : "secondary"
-              }
-              className={
-                claim.agentStatus !== "unchanged"
-                  ? "border-yellow-200 bg-yellow-100/80 text-yellow-950"
-                  : undefined
-              }
-            >
-              {statusLabel(claim.agentStatus)}
-            </Badge>
+            {claim.agentStatus === "unchanged" ? null : claim.agentStatus === "new" ? (
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <span className="size-1.5 rounded-full bg-amber-400 shrink-0" aria-hidden />
+                new
+              </span>
+            ) : (
+              <Badge variant="secondary" className="text-xs">
+                {statusLabel(claim.agentStatus)}
+              </Badge>
+            )}
             {!open && claim.humanStatus === "accepted" && (
               <span
                 className={cn(
