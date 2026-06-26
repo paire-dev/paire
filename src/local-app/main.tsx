@@ -2949,6 +2949,7 @@ function ClaimActions({
   const queryClient = useQueryClient();
   const claimApi = useClaimApi();
   const [isAccepting, setIsAccepting] = React.useState(false);
+  const [isUnaccepting, setIsUnaccepting] = React.useState(false);
   const statusMutation = useMutation({
     mutationFn: (humanStatus: HumanStatus) =>
       claimApi.post(claim.id, humanStatus),
@@ -2956,11 +2957,11 @@ function ClaimActions({
       onStatusChange?.(humanStatus);
       return queryClient.invalidateQueries({ queryKey: claimApi.queryKey });
     },
-    onSettled: () => setIsAccepting(false),
+    onSettled: () => { setIsAccepting(false); setIsUnaccepting(false); },
   });
 
   const accepted = claim.humanStatus === "accepted";
-  const showAccepted = accepted || isAccepting;
+  const showAccepted = (accepted && !isUnaccepting) || isAccepting;
   return (
     <div className={cn("inline-flex w-full sm:w-auto", className)}>
       <Button
@@ -2968,7 +2969,10 @@ function ClaimActions({
         variant={showAccepted ? "default" : "outline"}
         className="accept-btn"
         data-accepted={showAccepted ? "" : undefined}
-        onMouseDown={() => { if (!accepted) setIsAccepting(true); }}
+        onMouseDown={() => {
+          if (!accepted) setIsAccepting(true);
+          else setIsUnaccepting(true);
+        }}
         onClick={() =>
           statusMutation.mutate(accepted ? "unreviewed" : "accepted")
         }
