@@ -108,7 +108,7 @@ const DIFF_SELECTED_LINE_UNSAFE_CSS = `
 
 type HumanStatus = "unreviewed" | "accepted";
 type ClaimImportance = "critical" | "important" | "minor" | "noise";
-type FilterValue = "all" | string;
+type FilterValue = "all" | "unreviewed" | "accepted" | "new_this_revision";
 
 type Evidence = {
   claimId: string;
@@ -767,7 +767,6 @@ function ReviewScreen() {
           onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
         />
         <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
-          <Badge variant="outline">{reviewBurden}</Badge>
           {!isDesktopLayout ? (
             <MobileCodePanelButton
               open={codePanelOpen}
@@ -1088,7 +1087,13 @@ function HumanFilterNav({
           active={value === "all"}
           onClick={() => onChange("all")}
         >
-          All
+          All claims
+        </HumanFilterButton>
+        <HumanFilterButton
+          active={value === "new_this_revision"}
+          onClick={() => onChange("new_this_revision")}
+        >
+          New this revision
         </HumanFilterButton>
         <HumanFilterButton
           active={value === "unreviewed"}
@@ -1821,12 +1826,15 @@ function ThemeButton({
   );
 }
 
-function filterThreads(threads: Thread[], humanStatus: FilterValue) {
+function filterThreads(threads: Thread[], filter: FilterValue) {
   return threads
     .map((thread) => ({
       ...thread,
       claims: thread.claims.filter((claim) => {
-        return humanStatus === "all" || claim.humanStatus === humanStatus;
+        if (filter === "all") return true;
+        if (filter === "new_this_revision")
+          return ["new", "amended", "superseded"].includes(claim.agentStatus);
+        return claim.humanStatus === filter;
       }),
     }))
     .filter((thread) => thread.claims.length > 0);
