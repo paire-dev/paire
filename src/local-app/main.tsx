@@ -1836,6 +1836,19 @@ function statusLabel(status: string) {
   return status.replaceAll("_", " ");
 }
 
+function claimImportancePillClass(importance: ClaimImportance) {
+  switch (importance) {
+    case "critical":
+      return "bg-violet-500/15 text-violet-400 border-violet-500/30";
+    case "important":
+      return "bg-amber-500/15 text-amber-400 border-amber-500/30";
+    case "minor":
+      return "bg-muted text-muted-foreground border-border";
+    case "noise":
+      return "bg-muted/50 text-muted-foreground/50 border-border/50";
+  }
+}
+
 function claimImportanceColor(importance: ClaimImportance) {
   switch (importance) {
     case "critical":
@@ -2020,7 +2033,6 @@ function ClaimCard({
       <Card
         className={cn(
           "relative gap-0 overflow-hidden py-0 shadow-none border-border/60 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
-          claimImportanceColor(claim.importance),
           claim.humanStatus === "accepted" &&
             "bg-background/50 text-muted-foreground",
         )}
@@ -2065,6 +2077,14 @@ function ClaimCard({
             </CollapsibleTrigger>
           </CardTitle>
           <CardAction className="flex flex-wrap items-center justify-end gap-1.5 ml-auto shrink opacity-70">
+            <span
+              className={cn(
+                "inline-flex items-center rounded-full border px-1.5 py-0.5 text-xs",
+                claimImportancePillClass(claim.importance),
+              )}
+            >
+              {claim.importance}
+            </span>
             {claim.updatedAt ? (
               <ClaimTimeAgo updatedAt={claim.updatedAt} />
             ) : null}
