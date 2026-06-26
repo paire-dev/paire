@@ -1130,7 +1130,7 @@ function HumanFilterNav({
               type="button"
               size="icon"
               variant="outline"
-              className="size-8 cursor-pointer"
+              className="size-8 hover:bg-muted/60 focus-visible:bg-muted/60"
               aria-label={toggleLabel}
               aria-pressed={allReviewItemsOpen}
               onClick={onToggleAll}
@@ -1159,7 +1159,7 @@ function HumanFilterButton({
       type="button"
       size="sm"
       variant={active ? "default" : "ghost"}
-      className="h-8 cursor-pointer rounded-none border-0 px-3 text-xs shadow-none"
+      className="h-8 rounded-none border-0 px-3 text-xs shadow-none hover:bg-muted/60 focus-visible:bg-muted/60"
       aria-pressed={active}
       onClick={onClick}
     >
