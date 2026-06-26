@@ -113,11 +113,13 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 <!-- paire -->
 ## Paire
 
-Run `paire it`, then follow only the steps and commands it prints.
+Run `paire it`, then update review state only with Paire commands.
 
-- If it prints **ACTION_REQUIRED**, inspect the diff it names, edit the named draft in place, then run the printed apply command.
-- If apply prints `PAIRE_APPLY_REJECTED`, fix the same draft using the listed issues, then rerun the same apply command.
-- Stop when Paire exits without an action, or when the printed apply command exits 0.
+- Inspect context with `paire review context`.
+- Add claims with `paire claim add --title ... --importance ... --thread-id ... --before ... --after ... --evidence path:start-end:change`.
+- Update progress with `paire claim edit --claim <id> --work-status <pending|in_progress|complete|blocked>`.
+- Acknowledge generated/mechanical files with `paire file acknowledge --path <path> --reason <text>`.
+- Finish with `paire review finalize`; fix any `PAIRE_COMMAND_REJECTED` issues and rerun the same command.
 - During Paire review, skip tests, typecheck, builds, and extra diffs unless Paire prints them.
 <!-- /paire -->
 

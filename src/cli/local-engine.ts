@@ -42,6 +42,30 @@ import {
   formatInstallResult,
   installAgentInstructions,
 } from "./install-agent-instructions";
+import {
+  applyReflectorCommand,
+  type ClaimAddInput,
+  type ClaimEditInput,
+  type EvidenceAddInput,
+  type EvidenceInput,
+  type EvidenceRemoveInput,
+  type FileAcknowledgeInput,
+  type ReflectorCommand,
+  type ReflectorIssue,
+  type ReviewFinalizeInput,
+} from "./reflector";
+import {
+  createReviewState,
+  deriveFileProgress,
+  type ClaimImportance as CanonicalClaimImportance,
+  type ClaimLifecycleStatus,
+  type ClaimWorkStatus,
+  type HumanStatus as CanonicalHumanStatus,
+  type ReviewContext,
+  type ReviewFileState,
+  type ReviewState,
+  type ReviewTarget,
+} from "./review-state";
 import { PAIRE_VERSION } from "./version";
 import {
   PAIRE_INSTALL_PIPELINE,
@@ -85,6 +109,31 @@ type RevisionRow = {
   totalDiffArtifactId: string | null;
   createdAt: number;
   appliedAt: number | null;
+};
+
+type ReviewStateRow = {
+  id: string;
+  sessionId: string;
+  repoRoot: string;
+  repoKey: string;
+  mode: "committed" | "uncommitted";
+  baseCommit: string | null;
+  currentCommit: string;
+  worktreeHash: string | null;
+  branchLabelsJson: string;
+  sourceReviewId: string | null;
+  status: "open" | "finalized";
+  stateJson: string;
+  contextJson: string | null;
+  createdAt: number;
+  updatedAt: number;
+  finalizedAt: number | null;
+};
+
+type ReviewSelectionRow = {
+  sessionId: string;
+  reviewId: string;
+  updatedAt: number;
 };
 
 export type ClaimRevisionRow = {
@@ -262,6 +311,10 @@ export async function runCli(argv: string[], options: CliOptions = {}) {
         return 0;
       case "review":
         return await reviewCommand(rest, ctx);
+      case "claim":
+        return await claimCommand(rest, ctx);
+      case "file":
+        return await fileCommand(rest, ctx);
       case "worktree":
         return await worktreeCommand(rest, ctx);
       case "it":
@@ -412,52 +465,42 @@ async function startCommand(args: string[], ctx: Context) {
 
 async function reviewCommand(args: string[], ctx: Context): Promise<number> {
   const parsed = parseFlags(args);
+  const [subcommand] = parsed.positionals;
   const applyPath = stringFlag(parsed, "apply");
   const checkPath = stringFlag(parsed, "check");
   const open = parsed.flags.has("open");
   if (applyPath || parsed.flags.has("stdin")) {
-    return await applyReviewCommand(
-      applyPath,
-      parsed.flags.has("stdin"),
-      open,
-      ctx,
+    ctx.stderr(
+      "PAIRE_COMMAND_REJECTED\nManual review JSON apply is no longer supported. Use `paire claim add`, `paire claim edit`, and `paire review finalize`.",
     );
+    return 1;
   }
   if (checkPath) {
-    return await checkReviewCommand(checkPath, ctx);
+    ctx.stderr(
+      "PAIRE_COMMAND_REJECTED\nDraft checking is no longer supported. Use `paire review context` and claim commands.",
+    );
+    return 1;
   }
 
-  const git = getGitState(ctx.cwd);
-  const session = getSession(ctx.db, git.repoRoot, git.branch);
-  if (!session) {
-    const base = detectBaseRef(git.repoRoot);
-    ctx.stdout(`No Paire session found.\nRun:\npaire start --base ${base}`);
-    return 0;
+  if (subcommand === "context") {
+    return await reviewContextCommand(args.slice(1), ctx);
   }
-  if (!git.clean) {
-    const draft = await createWorktreeReviewDraft(ctx, session, git);
-    ctx.stdout(worktreeActionRequiredMessage({ git, draft }));
-    await openReviewUi(ctx, session, git, open);
-    return 0;
+  if (subcommand === "list") {
+    return await reviewListCommand(args.slice(1), ctx);
   }
-  const lastApplied = getLastAppliedRevision(ctx.db, session.id);
-  if (lastApplied?.gitFingerprint === git.fingerprint) {
-    await printStatusAndOpen(session, git, ctx, open);
-    return 0;
+  if (subcommand === "open") {
+    return await reviewOpenCommand(args.slice(1), ctx);
+  }
+  if (subcommand === "finalize") {
+    return await reviewFinalizeCommand(args.slice(1), ctx);
   }
 
-  const packet = await createPendingPacket(ctx, session, git, lastApplied);
-  const diffFrom = lastApplied?.gitFingerprint ?? session.baseCommit;
-  const diffFromLabel = lastApplied
-    ? `last applied commit ${diffFrom}`
-    : `base commit ${diffFrom}`;
-  ctx.stdout(
-    reviewActionRequiredMessage({
-      diffFromLabel,
-      lastAppliedId: lastApplied?.id ?? null,
-      packet,
-    }),
-  );
+  const resolved = await resolveReviewForCli(ctx, selectorFromParsed(parsed), {
+    create: true,
+    select: true,
+  });
+  ctx.stdout(reviewContextReadyMessage(resolved));
+  if (open) await openReviewUi(ctx, resolved.session, resolved.git, true);
   return 0;
 }
 
@@ -474,6 +517,1127 @@ async function itCommand(args: string[], ctx: Context) {
   const open = parseFlags(args).flags.has("open");
   await reviewCommand(open ? ["--open"] : [], ctx);
   await maybePrintUpgradeNotice(ctx);
+}
+
+type ReviewSelector = {
+  reviewId?: string;
+  diff?: string;
+  base?: string;
+  head?: string;
+};
+
+type ResolvedReview = {
+  state: ReviewState;
+  context: ReviewContext;
+  session: SessionRow;
+  git: GitState;
+  row: ReviewStateRow;
+};
+
+function selectorFromParsed(parsed: ReturnType<typeof parseFlags>): ReviewSelector {
+  return {
+    reviewId: stringFlag(parsed, "review"),
+    diff: stringFlag(parsed, "diff"),
+    base: stringFlag(parsed, "base"),
+    head: stringFlag(parsed, "head"),
+  };
+}
+
+async function claimCommand(args: string[], ctx: Context): Promise<number> {
+  const parsed = parseFlags(args);
+  const [subcommand, nested] = parsed.positionals;
+  try {
+    if (subcommand === "add") {
+      const threadId = requiredFlag(parsed, "thread-id");
+      const input: ClaimAddInput = {
+        claimId: stringFlag(parsed, "claim-id"),
+        threadId,
+        threadTitle: stringFlag(parsed, "thread-title") ?? threadId,
+        threadSummary: stringFlag(parsed, "thread-summary"),
+        title: requiredFlag(parsed, "title"),
+        importance: requiredImportanceFlag(parsed, "importance"),
+        before: requiredNullableFlag(parsed, "before"),
+        after: requiredNullableFlag(parsed, "after"),
+        description: stringFlag(parsed, "description"),
+        evidences: stringFlags(parsed, "evidence").map(parseEvidenceFlag),
+        workStatus: optionalWorkStatusFlag(parsed, "work-status"),
+        assignee: stringFlag(parsed, "assignee"),
+        actor: optionalActorFlag(parsed),
+      };
+      return await runReflectorCommand(
+        ctx,
+        parsed,
+        { type: "claim.add", input },
+        "CLAIM_ADDED",
+      );
+    }
+    if (subcommand === "edit") {
+      const claimId =
+        stringFlag(parsed, "claim") ??
+        stringFlag(parsed, "claim-id") ??
+        parsed.positionals[1];
+      if (!claimId) throw new Error("Missing --claim <claim-id>.");
+      const input: ClaimEditInput = { claimId };
+      assignIfDefined(input, "title", stringFlag(parsed, "title"));
+      assignIfDefined(input, "importance", optionalImportanceFlag(parsed, "importance"));
+      assignIfDefined(input, "threadId", stringFlag(parsed, "thread-id"));
+      assignIfDefined(input, "threadTitle", stringFlag(parsed, "thread-title"));
+      assignIfDefined(input, "threadSummary", stringFlag(parsed, "thread-summary"));
+      assignIfDefined(input, "before", optionalNullableFlag(parsed, "before"));
+      assignIfDefined(input, "after", optionalNullableFlag(parsed, "after"));
+      assignIfDefined(input, "description", optionalNullableFlag(parsed, "description"));
+      assignIfDefined(
+        input,
+        "lifecycleStatus",
+        optionalLifecycleStatusFlag(parsed, "lifecycle-status"),
+      );
+      assignIfDefined(input, "workStatus", optionalWorkStatusFlag(parsed, "work-status"));
+      assignIfDefined(input, "humanStatus", optionalHumanStatusFlag(parsed, "human-status"));
+      assignIfDefined(input, "assignee", optionalNullableFlag(parsed, "assignee"));
+      assignIfDefined(input, "blockedReason", optionalNullableFlag(parsed, "blocked-reason"));
+      assignIfDefined(input, "supersedesClaimId", optionalNullableFlag(parsed, "supersedes"));
+      assignIfDefined(input, "actor", optionalActorFlag(parsed));
+      return await runReflectorCommand(
+        ctx,
+        parsed,
+        { type: "claim.edit", input },
+        "CLAIM_EDITED",
+      );
+    }
+    if (subcommand === "list") {
+      return await claimListCommand(args.slice(1), ctx);
+    }
+    if (subcommand === "show") {
+      return await claimShowCommand(args.slice(1), ctx);
+    }
+    if (subcommand === "evidence" && nested === "add") {
+      const claimId =
+        stringFlag(parsed, "claim") ??
+        stringFlag(parsed, "claim-id") ??
+        parsed.positionals[2];
+      if (!claimId) throw new Error("Missing --claim <claim-id>.");
+      const input: EvidenceAddInput = {
+        claimId,
+        evidence: parseEvidenceFlag(requiredFlag(parsed, "evidence")),
+        actor: optionalActorFlag(parsed),
+      };
+      return await runReflectorCommand(
+        ctx,
+        parsed,
+        { type: "evidence.add", input },
+        "EVIDENCE_ADDED",
+      );
+    }
+    if (subcommand === "evidence" && nested === "remove") {
+      const claimId =
+        stringFlag(parsed, "claim") ??
+        stringFlag(parsed, "claim-id") ??
+        parsed.positionals[2];
+      const evidenceId =
+        stringFlag(parsed, "evidence") ??
+        stringFlag(parsed, "evidence-id") ??
+        parsed.positionals[3];
+      if (!claimId) throw new Error("Missing --claim <claim-id>.");
+      if (!evidenceId) throw new Error("Missing --evidence <evidence-id>.");
+      const input: EvidenceRemoveInput = {
+        claimId,
+        evidenceId,
+        actor: optionalActorFlag(parsed),
+      };
+      return await runReflectorCommand(
+        ctx,
+        parsed,
+        { type: "evidence.remove", input },
+        "EVIDENCE_REMOVED",
+      );
+    }
+    ctx.stderr(claimHelpText());
+    return 1;
+  } catch (error) {
+    ctx.stderr(formatCliError(error));
+    return 1;
+  }
+}
+
+async function fileCommand(args: string[], ctx: Context): Promise<number> {
+  const parsed = parseFlags(args);
+  const [subcommand] = parsed.positionals;
+  try {
+    if (subcommand !== "acknowledge") {
+      ctx.stderr("Usage: paire file acknowledge --path <path> --reason <text>");
+      return 1;
+    }
+    const input: FileAcknowledgeInput = {
+      path: requiredFlag(parsed, "path"),
+      reason: requiredFlag(parsed, "reason"),
+      actor: optionalActorFlag(parsed),
+    };
+    return await runReflectorCommand(
+      ctx,
+      parsed,
+      { type: "file.acknowledge", input },
+      "FILE_ACKNOWLEDGED",
+    );
+  } catch (error) {
+    ctx.stderr(formatCliError(error));
+    return 1;
+  }
+}
+
+async function reviewContextCommand(
+  args: string[],
+  ctx: Context,
+): Promise<number> {
+  const parsed = parseFlags(args);
+  try {
+    const resolved = await resolveReviewForCli(ctx, selectorFromParsed(parsed), {
+      create: true,
+      select: false,
+    });
+    if (parsed.flags.has("json")) {
+      ctx.stdout(JSON.stringify(resolved.context, null, 2));
+    } else {
+      ctx.stdout(reviewContextDetailsMessage(resolved));
+    }
+    return 0;
+  } catch (error) {
+    ctx.stderr(formatCliError(error));
+    return 1;
+  }
+}
+
+async function reviewListCommand(args: string[], ctx: Context): Promise<number> {
+  const parsed = parseFlags(args);
+  const limit = Number.parseInt(stringFlag(parsed, "limit") ?? "20", 10);
+  const git = getGitState(ctx.cwd);
+  const repo = resolve(stringFlag(parsed, "repo") ?? git.repoRoot);
+  const rows = ctx.db
+    .query<
+      ReviewStateRow,
+      [string, number]
+    >("select * from review_states where repoRoot = ? order by updatedAt desc limit ?")
+    .all(repo, Number.isFinite(limit) ? Math.max(1, limit) : 20);
+  if (parsed.flags.has("json")) {
+    ctx.stdout(
+      JSON.stringify(
+        rows.map((row) => reviewListEntry(row)),
+        null,
+        2,
+      ),
+    );
+    return 0;
+  }
+  if (rows.length === 0) {
+    ctx.stdout("No Paire reviews found for this repository.");
+    return 0;
+  }
+  ctx.stdout(
+    rows
+      .map((row) => {
+        const entry = reviewListEntry(row);
+        const target =
+          entry.mode === "committed"
+            ? `${entry.baseCommit}..${entry.currentCommit}`
+            : `${entry.currentCommit} + ${entry.worktreeHash}`;
+        return [
+          `${entry.reviewId}  ${entry.status}  ${entry.mode}`,
+          `  Target: ${target}`,
+          `  Files: ${entry.changedFileCount}  Claims: ${entry.claimCount}  Updated: ${new Date(entry.updatedAt).toISOString()}`,
+          entry.sourceReviewId ? `  Source: ${entry.sourceReviewId}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      })
+      .join("\n\n"),
+  );
+  return 0;
+}
+
+async function reviewOpenCommand(args: string[], ctx: Context): Promise<number> {
+  const parsed = parseFlags(args);
+  const positionalReviewId = parsed.positionals[0];
+  const selector = selectorFromParsed(parsed);
+  if (positionalReviewId && !selector.reviewId) selector.reviewId = positionalReviewId;
+  try {
+    const resolved = await resolveReviewForCli(ctx, selector, {
+      create: true,
+      select: true,
+    });
+    ctx.stdout(reviewOpenedMessage(resolved));
+    if (parsed.flags.has("open")) {
+      await openReviewUi(ctx, resolved.session, resolved.git, true);
+    }
+    return 0;
+  } catch (error) {
+    ctx.stderr(formatCliError(error));
+    return 1;
+  }
+}
+
+async function reviewFinalizeCommand(
+  args: string[],
+  ctx: Context,
+): Promise<number> {
+  const parsed = parseFlags(args);
+  const input: ReviewFinalizeInput = { actor: optionalActorFlag(parsed) };
+  return await runReflectorCommand(
+    ctx,
+    parsed,
+    { type: "review.finalize", input },
+    "REVIEW_FINALIZED",
+  );
+}
+
+async function claimListCommand(args: string[], ctx: Context): Promise<number> {
+  const parsed = parseFlags(args);
+  const resolved = await resolveReviewForCli(ctx, selectorFromParsed(parsed), {
+    create: true,
+    select: false,
+  });
+  const claims = sortedClaims(resolved.state);
+  if (parsed.flags.has("json")) {
+    ctx.stdout(JSON.stringify(claims, null, 2));
+  } else if (claims.length === 0) {
+    ctx.stdout("No claims in this review.");
+  } else {
+    ctx.stdout(
+      claims
+        .map(
+          (claim) =>
+            `${claim.id}  ${claim.importance}  ${claim.workStatus}  ${claim.lifecycleStatus}  ${claim.title}`,
+        )
+        .join("\n"),
+    );
+  }
+  return 0;
+}
+
+async function claimShowCommand(args: string[], ctx: Context): Promise<number> {
+  const parsed = parseFlags(args);
+  const claimId =
+    stringFlag(parsed, "claim") ?? stringFlag(parsed, "claim-id") ?? parsed.positionals[0];
+  if (!claimId) throw new Error("Missing --claim <claim-id>.");
+  const resolved = await resolveReviewForCli(ctx, selectorFromParsed(parsed), {
+    create: true,
+    select: false,
+  });
+  const claim = resolved.state.claims.find((entry) => entry.id === claimId);
+  if (!claim) throw new Error(`Claim not found: ${claimId}`);
+  const history = resolved.state.claimHistory.filter(
+    (revision) => revision.claimId === claimId,
+  );
+  if (parsed.flags.has("json")) {
+    ctx.stdout(JSON.stringify({ claim, history }, null, 2));
+  } else {
+    ctx.stdout(
+      [
+        `${claim.id}: ${claim.title}`,
+        `Thread: ${claim.threadId}`,
+        `Importance: ${claim.importance}`,
+        `Lifecycle: ${claim.lifecycleStatus}`,
+        `Work status: ${claim.workStatus}`,
+        `Human status: ${claim.humanStatus}`,
+        claim.assignee ? `Assignee: ${claim.assignee}` : "",
+        `Evidence: ${claim.evidences.length} span${claim.evidences.length === 1 ? "" : "s"}`,
+        `Versions: ${history.length}`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
+  return 0;
+}
+
+async function runReflectorCommand(
+  ctx: Context,
+  parsed: ReturnType<typeof parseFlags>,
+  command: ReflectorCommand,
+  label: string,
+): Promise<number> {
+  try {
+    const resolved = await resolveReviewForCli(ctx, selectorFromParsed(parsed), {
+      create: true,
+      select: true,
+    });
+    if (resolved.state.finalizedAt && command.type !== "review.finalize") {
+      throw new Error(
+        `Review ${resolved.state.reviewId} is finalized. Open or create a non-finalized review before mutating claims.`,
+      );
+    }
+    const effectiveCommand =
+      command.type === "review.finalize"
+        ? {
+            type: "review.finalize" as const,
+            input: { ...command.input, currentTarget: resolved.state.target },
+          }
+        : command;
+    const result = applyReflectorCommand(resolved.state, effectiveCommand, {
+      touchedRanges: resolved.context.touchedRanges,
+    });
+    if (!result.ok) {
+      ctx.stderr(formatReflectorIssues(result.issues));
+      return 1;
+    }
+    persistReviewState(ctx.db, result.state, resolved.context);
+    selectReview(ctx.db, result.state.sessionId, result.state.reviewId);
+    if (parsed.flags.has("json")) {
+      ctx.stdout(JSON.stringify(result, null, 2));
+      return 0;
+    }
+    ctx.stdout(formatReflectorSuccess(label, result.state, result.coverageDelta));
+    return 0;
+  } catch (error) {
+    ctx.stderr(formatCliError(error));
+    return 1;
+  }
+}
+
+async function resolveReviewForCli(
+  ctx: Context,
+  selector: ReviewSelector,
+  opts: { create: boolean; select: boolean },
+): Promise<ResolvedReview> {
+  if (selector.reviewId) {
+    const row = getReviewStateRow(ctx.db, selector.reviewId);
+    if (!row) throw new Error(`Review not found: ${selector.reviewId}`);
+    const session = getSessionById(ctx.db, row.sessionId);
+    if (!session) throw new Error(`Session not found for review ${selector.reviewId}.`);
+    const git = getGitState(session.repoRoot);
+    if (opts.select) selectReview(ctx.db, session.id, row.id);
+    return resolvedFromRow(row, session, git);
+  }
+
+  const git = getGitState(ctx.cwd);
+  const session = ensureSessionForGit(ctx, git, {});
+
+  if (selector.diff || selector.base || selector.head) {
+    const { base, head } = resolveDiffSelector(selector, git.repoRoot);
+    const target: ReviewTarget = {
+      mode: "committed",
+      repoKey: session.projectKey,
+      baseCommit: base,
+      currentCommit: head,
+    };
+    return await getOrCreateReviewForTarget(ctx, session, git, target, {
+      create: opts.create,
+      select: opts.select,
+      sourceReviewId: undefined,
+    });
+  }
+
+  if (!git.clean) {
+    const worktree = gitWorktreeDiff(git.repoRoot);
+    const worktreeHash = computeWorktreeHash(git, worktree);
+    const target: ReviewTarget = {
+      mode: "uncommitted",
+      repoKey: session.projectKey,
+      currentCommit: git.head,
+      worktreeHash,
+    };
+    const sourceReviewId = latestFinalizedReviewId(ctx.db, session.id);
+    return await getOrCreateReviewForTarget(ctx, session, git, target, {
+      create: opts.create,
+      select: opts.select,
+      sourceReviewId,
+      worktree,
+    });
+  }
+
+  const latestCommitted = latestFinalizedCommittedReview(ctx.db, session.id);
+  if (latestCommitted) {
+    const latestState = parseReviewState(latestCommitted);
+    if (
+      latestState.target.mode === "committed" &&
+      latestState.target.currentCommit === git.head
+    ) {
+      if (opts.select) selectReview(ctx.db, session.id, latestCommitted.id);
+      return resolvedFromRow(latestCommitted, session, git);
+    }
+  }
+
+  const sourceState = latestCommitted ? parseReviewState(latestCommitted) : null;
+  const baseCommit =
+    sourceState?.target.mode === "committed"
+      ? sourceState.target.currentCommit
+      : session.baseCommit;
+  const target: ReviewTarget = {
+    mode: "committed",
+    repoKey: session.projectKey,
+    baseCommit,
+    currentCommit: git.head,
+  };
+  return await getOrCreateReviewForTarget(ctx, session, git, target, {
+    create: opts.create,
+    select: opts.select,
+    sourceReviewId: latestCommitted?.id,
+    sourceState,
+  });
+}
+
+async function getOrCreateReviewForTarget(
+  ctx: Context,
+  session: SessionRow,
+  git: GitState,
+  target: ReviewTarget,
+  opts: {
+    create: boolean;
+    select: boolean;
+    sourceReviewId?: string;
+    sourceState?: ReviewState | null;
+    worktree?: { diff: string; skipped: string[] };
+  },
+): Promise<ResolvedReview> {
+  const existing = getReviewStateRowByTarget(ctx.db, session.repoRoot, target);
+  if (existing) {
+    if (opts.select) selectReview(ctx.db, session.id, existing.id);
+    return resolvedFromRow(existing, session, git);
+  }
+  if (!opts.create) {
+    throw new Error("No review exists for the requested target.");
+  }
+
+  const reviewId = reviewIdForTarget(session.repoRoot, target);
+  const diff =
+    target.mode === "committed"
+      ? gitCommand(["diff", "-w", `${target.baseCommit}..${target.currentCommit}`], session.repoRoot)
+      : (opts.worktree ?? gitWorktreeDiff(session.repoRoot)).diff;
+  const skipped =
+    target.mode === "uncommitted"
+      ? (opts.worktree ?? gitWorktreeDiff(session.repoRoot)).skipped
+      : [];
+  const changedFiles = summarizeChangedFiles(diff);
+  const now = new Date().toISOString();
+  const state = createReviewState({
+    reviewId,
+    sessionId: session.id,
+    target,
+    sourceReviewId: opts.sourceReviewId,
+    branchLabels: [git.branch],
+    goal: session.goal,
+    files: changedFiles.map((file) => ({
+      ...file,
+      acknowledgementReason: file.summarized
+        ? "Auto-acknowledged: lockfile/generated churn"
+        : undefined,
+    })),
+    now,
+  });
+  if (opts.sourceState) carryForwardClaims(state, opts.sourceState);
+  const context = await buildReviewContext(ctx, session, state, diff, skipped);
+  recomputeStateProgress(state);
+  persistNewReviewState(ctx.db, session, state, context, session.repoRoot);
+  if (opts.select) selectReview(ctx.db, session.id, state.reviewId);
+  const row = getReviewStateRow(ctx.db, state.reviewId);
+  if (!row) throw new Error(`Failed to persist review ${state.reviewId}.`);
+  return { state, context, session, git, row };
+}
+
+function ensureSessionForGit(
+  ctx: Context,
+  git: GitState,
+  input: { baseRef?: string; goal?: string | null },
+) {
+  const projectKey = detectProjectKey(git.repoRoot);
+  const existing = getSession(ctx.db, git.repoRoot, git.branch);
+  const baseRef = input.baseRef ?? existing?.baseRef ?? detectBaseRef(git.repoRoot);
+  const baseCommit =
+    gitCommand(["merge-base", "HEAD", baseRef], git.repoRoot, {
+      allowFail: true,
+    }).trim() || git.head;
+  const now = Date.now();
+  if (existing) {
+    ctx.db
+      .prepare(
+        "update sessions set projectKey = ?, baseRef = ?, branch = ?, upstream = ?, updatedAt = ? where id = ?",
+      )
+      .run(projectKey, baseRef, git.branch, git.upstream, now, existing.id);
+    return {
+      ...existing,
+      projectKey,
+      baseRef,
+      branch: git.branch,
+      upstream: git.upstream,
+      updatedAt: now,
+    };
+  }
+  const sessionId = `ses_${crypto.randomUUID()}`;
+  ctx.db
+    .prepare(
+      `insert into sessions (id, repoRoot, projectKey, goal, baseRef, baseCommit, branch, upstream, createdAt, updatedAt)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      sessionId,
+      git.repoRoot,
+      projectKey,
+      input.goal ?? null,
+      baseRef,
+      baseCommit,
+      git.branch,
+      git.upstream,
+      now,
+      now,
+    );
+  insertAppliedBaselineRevision(ctx.db, sessionId, baseCommit, now);
+  const session = getSessionById(ctx.db, sessionId);
+  if (!session) throw new Error("Failed to create Paire session.");
+  return session;
+}
+
+function resolveDiffSelector(selector: ReviewSelector, repoRoot: string) {
+  if (selector.diff) {
+    const match = /^(.+)\.\.(.+)$/.exec(selector.diff);
+    if (!match?.[1] || !match?.[2]) {
+      throw new Error("Expected --diff in <base>..<head> form.");
+    }
+    return {
+      base: gitCommand(["rev-parse", match[1]], repoRoot).trim(),
+      head: gitCommand(["rev-parse", match[2]], repoRoot).trim(),
+    };
+  }
+  if (!selector.base || !selector.head) {
+    throw new Error("Use --diff <base..head> or --base <hash> --head <hash>.");
+  }
+  return {
+    base: gitCommand(["rev-parse", selector.base], repoRoot).trim(),
+    head: gitCommand(["rev-parse", selector.head], repoRoot).trim(),
+  };
+}
+
+async function buildReviewContext(
+  ctx: Context,
+  session: SessionRow,
+  state: ReviewState,
+  diff: string,
+  skipped: string[],
+): Promise<ReviewContext> {
+  const annotatedDiffPath = await writeAnnotatedDiffExport(
+    ctx,
+    session,
+    buildAnnotatedDiff(diff),
+  );
+  const diffArtifactPath = await writeArtifact(
+    ctx,
+    "review-diff",
+    `${state.reviewId}.diff`,
+    diff,
+  );
+  const changedFiles = summarizeChangedFiles(diff);
+  const safeInspectionCommands = changedFiles
+    .filter((file) => file.summarized)
+    .flatMap((file) => [
+      `git diff --stat -- ${shellQuote(file.path)}`,
+      `git diff --unified=40 -- ${shellQuote(file.path)}`,
+    ]);
+  safeInspectionCommands.push(
+    ...changedFiles
+      .filter((file) => file.additions > 0)
+      .slice(0, 20)
+      .map((file) => `nl -ba -- ${shellQuote(file.path)}`),
+  );
+  const context: ReviewContext = {
+    reviewId: state.reviewId,
+    sessionId: state.sessionId,
+    target: state.target,
+    ...(state.sourceReviewId ? { sourceReviewId: state.sourceReviewId } : {}),
+    goal: state.goal,
+    changedFiles,
+    touchedSnippets: touchedSnippets(diff),
+    touchedRanges: touchedRanges(diff),
+    safeInspectionCommands,
+    annotatedDiffPath,
+    diffArtifactPath,
+    ...(skipped.length > 0 ? { skipped } : {}),
+  };
+  await writeCurrentContextExport(ctx, session, JSON.stringify(context, null, 2));
+  return context;
+}
+
+function carryForwardClaims(state: ReviewState, source: ReviewState) {
+  const activeClaims = source.claims.filter(
+    (claim) => claim.lifecycleStatus === "active",
+  );
+  const threadIds = new Set(activeClaims.map((claim) => claim.threadId));
+  state.threads = source.threads
+    .filter((thread) => threadIds.has(thread.id))
+    .map((thread) => ({ ...thread }));
+  state.claims = activeClaims.map((claim) => ({
+    ...claim,
+    evidences: claim.evidences.map((evidence) => ({ ...evidence })),
+  }));
+  state.claimHistory = source.claimHistory
+    .filter((revision) => activeClaims.some((claim) => claim.id === revision.claimId))
+    .map((revision) => ({
+      ...revision,
+      snapshot: {
+        ...revision.snapshot,
+        evidences: revision.snapshot.evidences.map((evidence) => ({ ...evidence })),
+      },
+    }));
+  state.events.push({
+    id: `evt_${crypto.randomUUID()}`,
+    type: "claim_edited",
+    actor: "system",
+    summary: `Carried forward ${activeClaims.length} active claim${activeClaims.length === 1 ? "" : "s"} from ${source.reviewId}.`,
+    createdAt: state.createdAt,
+  });
+}
+
+function recomputeStateProgress(state: ReviewState) {
+  const covered = new Set<string>();
+  const knownPaths = new Set(state.files.map((file) => file.path));
+  for (const claim of state.claims) {
+    if (claim.lifecycleStatus !== "active") continue;
+    for (const evidence of claim.evidences) {
+      if (knownPaths.has(evidence.filePath)) covered.add(evidence.filePath);
+    }
+  }
+  for (const file of state.files) {
+    if (covered.has(file.path)) {
+      file.coverageStatus = "covered";
+    } else if (file.acknowledgementReason) {
+      file.coverageStatus = "acknowledged";
+    } else {
+      file.coverageStatus = "pending";
+    }
+  }
+  state.fileProgress = deriveFileProgress(state.files);
+}
+
+function resolvedFromRow(
+  row: ReviewStateRow,
+  session: SessionRow,
+  git: GitState,
+): ResolvedReview {
+  return {
+    state: parseReviewState(row),
+    context: parseReviewContext(row),
+    session,
+    git,
+    row,
+  };
+}
+
+function persistNewReviewState(
+  db: Database,
+  session: SessionRow,
+  state: ReviewState,
+  context: ReviewContext,
+  repoRoot: string,
+) {
+  const timestamp = Date.now();
+  db.prepare(
+    `insert into review_states (
+      id, sessionId, repoRoot, repoKey, mode, baseCommit, currentCommit,
+      worktreeHash, branchLabelsJson, sourceReviewId, status, stateJson,
+      contextJson, createdAt, updatedAt, finalizedAt
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    state.reviewId,
+    state.sessionId,
+    repoRoot,
+    state.target.repoKey,
+    state.target.mode,
+    state.target.mode === "committed" ? state.target.baseCommit : null,
+    state.target.currentCommit,
+    state.target.mode === "uncommitted" ? state.target.worktreeHash : null,
+    JSON.stringify(state.branchLabels),
+    state.sourceReviewId ?? null,
+    state.finalizedAt ? "finalized" : "open",
+    JSON.stringify(state),
+    JSON.stringify(context),
+    timestamp,
+    timestamp,
+    state.finalizedAt ? timestamp : null,
+  );
+}
+
+function persistReviewState(
+  db: Database,
+  state: ReviewState,
+  context: ReviewContext,
+) {
+  const timestamp = Date.now();
+  const update = db.prepare(
+    `update review_states
+        set branchLabelsJson = ?, sourceReviewId = ?, status = ?, stateJson = ?,
+            contextJson = ?, updatedAt = ?, finalizedAt = ?
+      where id = ?`,
+  ).run(
+    JSON.stringify(state.branchLabels),
+    state.sourceReviewId ?? null,
+    state.finalizedAt ? "finalized" : "open",
+    JSON.stringify(state),
+    JSON.stringify(context),
+    timestamp,
+    state.finalizedAt ? timestamp : null,
+    state.reviewId,
+  );
+  if (update.changes === 0) throw new Error(`Review not found: ${state.reviewId}`);
+}
+
+function selectReview(db: Database, sessionId: string, reviewId: string) {
+  db.prepare(
+    `insert into review_selections (sessionId, reviewId, updatedAt)
+     values (?, ?, ?)
+     on conflict(sessionId) do update set reviewId = excluded.reviewId, updatedAt = excluded.updatedAt`,
+  ).run(sessionId, reviewId, Date.now());
+}
+
+function getSelectedReview(db: Database, sessionId: string) {
+  const selection = db
+    .query<ReviewSelectionRow, [string]>(
+      "select * from review_selections where sessionId = ?",
+    )
+    .get(sessionId);
+  return selection ? getReviewStateRow(db, selection.reviewId) : null;
+}
+
+function getReviewStateRow(db: Database, reviewId: string) {
+  return db
+    .query<ReviewStateRow, [string]>("select * from review_states where id = ?")
+    .get(reviewId);
+}
+
+function getReviewStateRowByTarget(
+  db: Database,
+  repoRoot: string,
+  target: ReviewTarget,
+) {
+  if (target.mode === "committed") {
+    return db
+      .query<
+        ReviewStateRow,
+        [string, string, string]
+      >("select * from review_states where repoRoot = ? and mode = 'committed' and baseCommit = ? and currentCommit = ?")
+      .get(repoRoot, target.baseCommit, target.currentCommit);
+  }
+  return db
+    .query<
+      ReviewStateRow,
+      [string, string, string]
+    >("select * from review_states where repoRoot = ? and mode = 'uncommitted' and currentCommit = ? and worktreeHash = ?")
+    .get(repoRoot, target.currentCommit, target.worktreeHash);
+}
+
+function latestFinalizedReviewId(db: Database, sessionId: string) {
+  return db
+    .query<
+      { id: string },
+      [string]
+    >("select id from review_states where sessionId = ? and status = 'finalized' order by updatedAt desc limit 1")
+    .get(sessionId)?.id;
+}
+
+function latestFinalizedCommittedReview(db: Database, sessionId: string) {
+  return db
+    .query<
+      ReviewStateRow,
+      [string]
+    >("select * from review_states where sessionId = ? and mode = 'committed' and status = 'finalized' order by updatedAt desc limit 1")
+    .get(sessionId);
+}
+
+function getSessionById(db: Database, sessionId: string) {
+  return db
+    .query<SessionRow, [string]>("select * from sessions where id = ?")
+    .get(sessionId);
+}
+
+function parseReviewState(row: ReviewStateRow) {
+  return JSON.parse(row.stateJson) as ReviewState;
+}
+
+function parseReviewContext(row: ReviewStateRow) {
+  if (row.contextJson) return JSON.parse(row.contextJson) as ReviewContext;
+  const state = parseReviewState(row);
+  return {
+    reviewId: state.reviewId,
+    sessionId: state.sessionId,
+    target: state.target,
+    ...(state.sourceReviewId ? { sourceReviewId: state.sourceReviewId } : {}),
+    goal: state.goal,
+    changedFiles: state.files.map((file) => ({
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+      summarized: file.summarized,
+    })),
+    touchedSnippets: [],
+    touchedRanges: [],
+    safeInspectionCommands: [],
+  };
+}
+
+function reviewIdForTarget(repoRoot: string, target: ReviewTarget) {
+  return `rev_${new Bun.CryptoHasher("sha256")
+    .update(JSON.stringify({ repoRoot, target }))
+    .digest("hex")
+    .slice(0, 24)}`;
+}
+
+function sortedClaims(state: ReviewState) {
+  return [...state.claims].sort((left, right) => {
+    const leftThread = state.threads.find((thread) => thread.id === left.threadId);
+    const rightThread = state.threads.find((thread) => thread.id === right.threadId);
+    const threadDelta = (leftThread?.order ?? 0) - (rightThread?.order ?? 0);
+    if (threadDelta !== 0) return threadDelta;
+    return left.order - right.order;
+  });
+}
+
+function reviewListEntry(row: ReviewStateRow) {
+  const state = parseReviewState(row);
+  return {
+    reviewId: row.id,
+    mode: row.mode,
+    baseCommit: row.baseCommit,
+    currentCommit: row.currentCommit,
+    worktreeHash: row.worktreeHash,
+    branchLabels: safeJsonArray(row.branchLabelsJson),
+    changedFileCount: state.files.length,
+    claimCount: state.claims.length,
+    updatedAt: row.updatedAt,
+    status: row.status,
+    sourceReviewId: row.sourceReviewId,
+  };
+}
+
+function safeJsonArray(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function reviewContextReadyMessage(resolved: ResolvedReview) {
+  const target =
+    resolved.state.target.mode === "committed"
+      ? `${shortHash(resolved.state.target.baseCommit)}..${shortHash(resolved.state.target.currentCommit)}`
+      : `HEAD ${shortHash(resolved.state.target.currentCommit)} + worktree ${shortHash(resolved.state.target.worktreeHash)}`;
+  return [
+    "Review context ready.",
+    `Review: ${resolved.state.reviewId}`,
+    `Target: ${target}`,
+    `Changed files: ${resolved.state.files.length}`,
+    `Claims: ${resolved.state.claims.length}`,
+    `Coverage: ${formatProgress(resolved.state.fileProgress)}`,
+    "",
+    "Inspect:",
+    "  paire review context",
+    "Add claims:",
+    "  paire claim add --title ... --importance important --thread-id thread_area --before ... --after ... --evidence path:start-end:change",
+    "Update progress:",
+    "  paire claim edit --claim <claim-id> --work-status complete",
+    "Finish:",
+    "  paire review finalize",
+  ].join("\n");
+}
+
+function reviewContextDetailsMessage(resolved: ResolvedReview) {
+  return [
+    reviewContextReadyMessage(resolved),
+    "",
+    resolved.context.annotatedDiffPath
+      ? `Annotated diff: ${resolved.context.annotatedDiffPath}`
+      : "",
+    resolved.context.diffArtifactPath ? `Raw diff: ${resolved.context.diffArtifactPath}` : "",
+    "",
+    "Changed files:",
+    ...resolved.state.files.map(
+      (file) =>
+        `- ${file.path} (+${file.additions}/-${file.deletions}) ${file.coverageStatus}`,
+    ),
+    resolved.context.safeInspectionCommands.length > 0
+      ? ["", "Safe inspection commands:", ...resolved.context.safeInspectionCommands.map((cmd) => `  ${cmd}`)].join("\n")
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function reviewOpenedMessage(resolved: ResolvedReview) {
+  return [
+    "Review opened.",
+    `Review: ${resolved.state.reviewId}`,
+    `Mode: ${resolved.state.target.mode}`,
+    `Status: ${resolved.state.finalizedAt ? "finalized" : "open"}`,
+    `Coverage: ${formatProgress(resolved.state.fileProgress)}`,
+  ].join("\n");
+}
+
+function formatReflectorSuccess(
+  label: string,
+  state: ReviewState,
+  coverageDelta: Array<{
+    path: string;
+    before: ReviewFileState["coverageStatus"];
+    after: ReviewFileState["coverageStatus"];
+  }>,
+) {
+  const latestEvent = state.events.at(-1);
+  return [
+    `${label} ${latestEvent?.claimId ?? state.reviewId}`,
+    `Review: ${state.reviewId}`,
+    `Coverage: ${formatProgress(state.fileProgress)}`,
+    ...coverageDelta.map(
+      (delta) => `Coverage: ${delta.path} ${delta.before} -> ${delta.after}`,
+    ),
+  ].join("\n");
+}
+
+function formatProgress(progress: ReviewState["fileProgress"]) {
+  return `${progress.covered + progress.acknowledged}/${progress.total} files reviewed (${progress.pending} pending)`;
+}
+
+function shortHash(value: string) {
+  return value.slice(0, 12);
+}
+
+function parseEvidenceFlag(value: string): EvidenceInput {
+  const match = /^(.+):(\d+)-(\d+):(.+)$/.exec(value);
+  if (!match?.[1] || !match?.[2] || !match?.[3] || !match?.[4]) {
+    throw new Error(
+      'Invalid --evidence. Use "path:start-end:change", for example "src/auth.ts:45-62:Add JWT validation".',
+    );
+  }
+  return {
+    filePath: match[1],
+    startLine: Number.parseInt(match[2], 10),
+    endLine: Number.parseInt(match[3], 10),
+    change: match[4],
+  };
+}
+
+function requiredFlag(parsed: ReturnType<typeof parseFlags>, name: string) {
+  const value = stringFlag(parsed, name);
+  if (!value) throw new Error(`Missing --${name} <value>.`);
+  return value;
+}
+
+function assignIfDefined<T extends object, K extends keyof T>(
+  target: T,
+  key: K,
+  value: T[K] | undefined,
+) {
+  if (value !== undefined) target[key] = value;
+}
+
+function optionalNullableFlag(
+  parsed: ReturnType<typeof parseFlags>,
+  name: string,
+) {
+  if (!parsed.values.has(name)) return undefined;
+  const value = parsed.values.get(name);
+  if (value == null || value === "null") return null;
+  return value;
+}
+
+function requiredNullableFlag(
+  parsed: ReturnType<typeof parseFlags>,
+  name: string,
+) {
+  if (!parsed.values.has(name)) throw new Error(`Missing --${name} <text|null>.`);
+  return optionalNullableFlag(parsed, name) ?? null;
+}
+
+function optionalImportanceFlag(
+  parsed: ReturnType<typeof parseFlags>,
+  name: string,
+) {
+  const value = stringFlag(parsed, name);
+  if (!value) return undefined;
+  if (!["critical", "important", "minor", "noise"].includes(value)) {
+    throw new Error(`--${name} must be critical, important, minor, or noise.`);
+  }
+  return value as CanonicalClaimImportance;
+}
+
+function requiredImportanceFlag(
+  parsed: ReturnType<typeof parseFlags>,
+  name: string,
+) {
+  const value = optionalImportanceFlag(parsed, name);
+  if (!value) throw new Error(`Missing --${name} <critical|important|minor|noise>.`);
+  return value;
+}
+
+function optionalLifecycleStatusFlag(
+  parsed: ReturnType<typeof parseFlags>,
+  name: string,
+) {
+  const value = stringFlag(parsed, name);
+  if (!value) return undefined;
+  if (!["active", "invalidated", "superseded"].includes(value)) {
+    throw new Error(`--${name} must be active, invalidated, or superseded.`);
+  }
+  return value as ClaimLifecycleStatus;
+}
+
+function optionalWorkStatusFlag(
+  parsed: ReturnType<typeof parseFlags>,
+  name: string,
+) {
+  const value = stringFlag(parsed, name);
+  if (!value) return undefined;
+  if (!["pending", "in_progress", "complete", "blocked"].includes(value)) {
+    throw new Error(`--${name} must be pending, in_progress, complete, or blocked.`);
+  }
+  return value as ClaimWorkStatus;
+}
+
+function optionalHumanStatusFlag(
+  parsed: ReturnType<typeof parseFlags>,
+  name: string,
+) {
+  const value = stringFlag(parsed, name);
+  if (!value) return undefined;
+  if (!["unreviewed", "accepted"].includes(value)) {
+    throw new Error(`--${name} must be unreviewed or accepted.`);
+  }
+  return value as CanonicalHumanStatus;
+}
+
+function optionalActorFlag(parsed: ReturnType<typeof parseFlags>) {
+  const value = stringFlag(parsed, "actor");
+  if (!value) return undefined;
+  if (!["agent", "subagent", "human", "system"].includes(value)) {
+    throw new Error("--actor must be agent, subagent, human, or system.");
+  }
+  return value as "agent" | "subagent" | "human" | "system";
+}
+
+function formatCliError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatReflectorIssues(issues: ReflectorIssue[]) {
+  return [
+    "PAIRE_COMMAND_REJECTED",
+    JSON.stringify(
+      {
+        error: "command_rejected",
+        issueCount: issues.length,
+        issues,
+      },
+      null,
+      2,
+    ),
+  ].join("\n");
+}
+
+function claimHelpText() {
+  return [
+    "Usage:",
+    "  paire claim add --title <text> --importance <critical|important|minor|noise> --thread-id <id> --before <text|null> --after <text|null> --evidence <path:start-end:change>",
+    "  paire claim edit --claim <id> [--work-status <pending|in_progress|complete|blocked>]",
+    "  paire claim list [--json]",
+    "  paire claim show --claim <id> [--json]",
+    "  paire claim evidence add --claim <id> --evidence <path:start-end:change>",
+    "  paire claim evidence remove --claim <id> --evidence <evidence-id>",
+  ].join("\n");
 }
 
 function upgradeCachePath(ctx: Context) {
@@ -720,26 +1884,26 @@ async function checkReviewCommand(checkPath: string, ctx: Context) {
   return 0;
 }
 
-const WORKTREE_APPLY_COMMAND = "paire worktree --apply";
+const WORKTREE_APPLY_COMMAND = "paire review finalize";
 
 async function worktreeCommand(args: string[], ctx: Context): Promise<number> {
   const parsed = parseFlags(args);
   const applyPath = stringFlag(parsed, "apply");
   const checkPath = stringFlag(parsed, "check");
-  const open = parsed.flags.has("open");
   if (applyPath || parsed.flags.has("stdin")) {
-    return await applyWorktreeReviewCommand(
-      applyPath,
-      parsed.flags.has("stdin"),
-      open,
-      ctx,
+    ctx.stderr(
+      "PAIRE_COMMAND_REJECTED\nManual worktree JSON apply is no longer supported. Use `paire claim add`, `paire file acknowledge`, and `paire review finalize`.",
     );
+    return 1;
   }
   if (checkPath) {
-    return await checkWorktreeReviewCommand(checkPath, ctx);
+    ctx.stderr(
+      "PAIRE_COMMAND_REJECTED\nWorktree draft checking is no longer supported. Use `paire review context` and claim commands.",
+    );
+    return 1;
   }
   ctx.stderr(
-    "Usage: paire worktree --apply <file> | --check <file> [--open]\nRun paire it on a dirty worktree to generate the worktree review draft first.",
+    "Usage: paire review context | paire claim add | paire file acknowledge | paire review finalize",
   );
   return 1;
 }
@@ -866,7 +2030,7 @@ async function validateWorktreeReviewDraft(
       code: "unknown_revision",
       field: "sessionId",
       value: payload.sessionId,
-      fix: "Run paire it again on the dirty worktree and edit the generated worktree-review-draft.json.",
+      fix: "Run paire review context again, then update state with claim commands.",
     });
     return { issues };
   }
@@ -900,7 +2064,7 @@ async function validateWorktreeReviewDraft(
       code: "unknown_worktree_review",
       field: "worktreeReviewId",
       value: payload.worktreeReviewId,
-      fix: "Run paire it again on the dirty worktree and edit the current worktree-review-draft.json.",
+      fix: "Run paire review context again, then update state with claim commands.",
     });
     return { issues };
   }
@@ -1209,7 +2373,7 @@ function worktreeActionRequiredMessage({
 }) {
   return [
     "PAIRE_WORKTREE_REVIEW",
-    "ACTION_REQUIRED — update the Paire worktree review",
+    "Review context ready.",
     "",
     "These are uncommitted working-tree changes. Paire reviews them separately from",
     "committed claims and keys the result to the current worktree diff.",
@@ -1226,7 +2390,7 @@ function worktreeActionRequiredMessage({
     "git diff -w HEAD",
     "(plus any untracked files Paire previewed)",
     "",
-    "Step 2 — Edit the worktree review draft IN PLACE (do not create a new file)",
+    "Step 2 — Update review state with Paire commands",
     draft.draftPath,
     "The draft is pre-filled: header IDs, every changed file under \"files\", and all prior",
     "worktree claims (agentStatus \"unchanged\") are already correct.",
@@ -1411,7 +2575,7 @@ async function validateReviewDraft(
       code: "unknown_revision",
       field: "sessionId",
       value: payload.sessionId,
-      fix: "Run paire review again and edit the generated review-draft.json for the current session.",
+      fix: "Run paire review context again, then update state with claim commands.",
     });
     return { issues };
   }
@@ -1440,7 +2604,7 @@ async function validateReviewDraft(
       code: "unknown_revision",
       field: "revisionId",
       value: payload.revisionId,
-      fix: "Run paire review again and edit the current pending review-draft.json.",
+      fix: "Run paire review context again, then update state with claim commands.",
     });
     return { issues };
   }
@@ -1850,6 +3014,7 @@ function clearProjectReviewExports(ctx: Context, session: SessionRow) {
   for (const filename of [
     "agent-result.json",
     "current-packet.json",
+    "current-context.json",
     "review-draft.json",
     "worktree-packet.json",
     "worktree-review-draft.json",
@@ -1858,6 +3023,19 @@ function clearProjectReviewExports(ctx: Context, session: SessionRow) {
     const path = join(directory, filename);
     if (existsSync(path)) unlinkSync(path);
   }
+}
+
+async function writeCurrentContextExport(
+  ctx: Context,
+  session: SessionRow,
+  contextJson: string,
+) {
+  const directory = projectExportDirectory(ctx, session);
+  ensurePrivateDirectory(directory);
+  const path = join(directory, "current-context.json");
+  await Bun.write(path, contextJson);
+  ensurePrivateFile(path);
+  return path;
 }
 
 async function writeCurrentPacketExport(
@@ -1966,7 +3144,7 @@ function reviewActionRequiredMessage({
   };
 }) {
   return [
-    "ACTION_REQUIRED — update the Paire review",
+    "Review context ready.",
     "",
     "Three steps. Done when step 3 exits 0.",
     "",
@@ -1979,7 +3157,7 @@ function reviewActionRequiredMessage({
     "never copy a -N.",
     lastAppliedId ? `Last applied Paire revision: ${lastAppliedId}` : "Last applied Paire revision: none",
     "",
-    "Step 2 — Edit the review draft IN PLACE (do not create a new file)",
+    "Step 2 — Update review state with Paire commands",
     packet.draftPath,
     "The draft is pre-filled: header IDs, every changed file under \"files\", and all prior",
     "claims (agentStatus \"unchanged\") are already correct.",
@@ -1991,7 +3169,7 @@ function reviewActionRequiredMessage({
     "  (removed line) number. Follow the \"instructions\" in the draft.",
     "",
     "Step 3 — Apply",
-    `paire review --apply ${packet.draftPath}`,
+    "paire review finalize",
     "On failure it prints PAIRE_APPLY_REJECTED with a JSON list of exact fixes — edit the",
     "draft and re-run. On success the Review UI opens automatically.",
     packet.preview,
@@ -2680,9 +3858,12 @@ async function handleReviewRequest(
   if (!freshSession) {
     return Response.json({ error: "Session not found." }, { status: 404 });
   }
-  return Response.json(
-    buildReviewData(ctx.db, freshSession, getGitState(freshSession.repoRoot)),
+  const resolved = await resolveReviewForCli(
+    { ...ctx, cwd: freshSession.repoRoot },
+    selectedReviewSelector(ctx.db, freshSession.id),
+    { create: true, select: true },
   );
+  return Response.json(buildCanonicalReviewData(resolved));
 }
 
 async function handleHumanStatusRequest(
@@ -2695,7 +3876,6 @@ async function handleHumanStatusRequest(
   }
   const claimId = (request as Request & { params: { claimId: string } }).params
     .claimId;
-  const claimDbId = scopedDbId(session.id, claimId);
   const payload = (await request.json()) as { humanStatus?: unknown };
   if (
     typeof payload.humanStatus !== "string" ||
@@ -2703,24 +3883,33 @@ async function handleHumanStatusRequest(
   ) {
     return Response.json({ error: "Invalid humanStatus." }, { status: 400 });
   }
-  const update = ctx.db
-    .prepare(
-      "update claims set humanStatus = ?, updatedAt = ? where id = ? and sessionId = ?",
-    )
-    .run(payload.humanStatus, Date.now(), claimDbId, session.id);
-  if (update.changes === 0) {
+  const resolved = await resolveReviewForCli(
+    { ...ctx, cwd: session.repoRoot },
+    selectedReviewSelector(ctx.db, session.id),
+    { create: true, select: true },
+  );
+  if (!resolved.state.claims.some((claim) => claim.id === claimId)) {
     return Response.json({ error: "Claim not found." }, { status: 404 });
   }
-  ctx.db
-    .prepare(
-      "insert into human_review_marks (id, claimId, humanStatus, note, updatedAt) values (?, ?, ?, null, ?)",
-    )
-    .run(
-      `mark_${crypto.randomUUID()}`,
-      claimDbId,
-      payload.humanStatus,
-      Date.now(),
+  const result = applyReflectorCommand(
+    resolved.state,
+    {
+      type: "claim.edit",
+      input: {
+        claimId,
+        humanStatus: payload.humanStatus as CanonicalHumanStatus,
+        actor: "human",
+      },
+    },
+    { touchedRanges: resolved.context.touchedRanges },
+  );
+  if (!result.ok) {
+    return Response.json(
+      { error: "Command rejected.", issues: result.issues },
+      { status: 400 },
     );
+  }
+  persistReviewState(ctx.db, result.state, resolved.context);
   return Response.json({ ok: true });
 }
 
@@ -2739,40 +3928,37 @@ async function handleEvidenceDiffRequest(
     return Response.json({ error: "Missing filePath." }, { status: 400 });
   }
 
-  const claimDbId = scopedDbId(session.id, claimId);
-  const evidence = ctx.db
-    .query<{ filePath: string }, [string, string, string]>(
-      `select claim_evidences.filePath
-         from claim_evidences
-         join claims on claims.id = claim_evidences.claimId
-        where claims.id = ?
-          and claims.sessionId = ?
-          and claim_evidences.filePath = ?
-        limit 1`,
-    )
-    .get(claimDbId, session.id, filePath);
+  const resolved = await resolveReviewForCli(
+    { ...ctx, cwd: session.repoRoot },
+    selectedReviewSelector(ctx.db, session.id),
+    { create: true, select: true },
+  );
+  const evidence = resolved.state.claims
+    .find((claim) => claim.id === claimId)
+    ?.evidences.find((entry) => entry.filePath === filePath);
   if (!evidence) {
     return Response.json({ error: "Evidence not found." }, { status: 404 });
   }
 
-  const totalDiff = gitDiffForCurrentState(
-    session.baseCommit,
-    session.repoRoot,
-    true,
-  );
+  const totalDiff = diffForReviewTarget(resolved.state.target, session.repoRoot);
   return Response.json({ diff: fileToRawDiff(totalDiff, evidence.filePath) });
 }
 
 async function handleReviewDiffRequest(
   request: Request,
   session: SessionRow,
-  _ctx: Context,
+  ctx: Context,
 ) {
   if (request.method !== "GET") {
     return Response.json({ error: "Method not allowed." }, { status: 405 });
   }
+  const resolved = await resolveReviewForCli(
+    { ...ctx, cwd: session.repoRoot },
+    selectedReviewSelector(ctx.db, session.id),
+    { create: true, select: true },
+  );
   return Response.json({
-    diff: gitDiffForCurrentState(session.baseCommit, session.repoRoot, true),
+    diff: diffForReviewTarget(resolved.state.target, session.repoRoot),
   });
 }
 
@@ -2928,6 +4114,59 @@ function buildWorktreeReviewThreads(payload: AgentWorktreeApplyPayload) {
     }))
     .filter((thread) => thread.claims.length > 0)
     .sort(compareThreadsByImportance);
+}
+
+function selectedReviewSelector(db: Database, sessionId: string): ReviewSelector {
+  const selected = getSelectedReview(db, sessionId);
+  return selected ? { reviewId: selected.id } : {};
+}
+
+function buildCanonicalReviewData(resolved: ResolvedReview) {
+  return {
+    ...resolved.state,
+    session: {
+      id: resolved.session.id,
+      goal: resolved.session.goal,
+      projectKey: resolved.session.projectKey,
+    },
+    git: {
+      branch: resolved.git.branch,
+      head: resolved.git.head,
+      clean: resolved.git.clean,
+      status: resolved.git.status,
+    },
+    burden: canonicalReviewBurden(resolved.state),
+    context: {
+      annotatedDiffPath: resolved.context.annotatedDiffPath,
+      diffArtifactPath: resolved.context.diffArtifactPath,
+      safeInspectionCommands: resolved.context.safeInspectionCommands,
+      skipped: resolved.context.skipped ?? [],
+    },
+    generatedAt: Date.now(),
+  };
+}
+
+function canonicalReviewBurden(state: ReviewState) {
+  if (state.claims.length === 0) return "0 claims";
+  const counts = new Map<string, number>();
+  for (const claim of state.claims) {
+    counts.set(claim.workStatus, (counts.get(claim.workStatus) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([status, count]) => `${count} ${status}`)
+    .join(", ");
+}
+
+function diffForReviewTarget(target: ReviewTarget, repoRoot: string) {
+  if (target.mode === "committed") {
+    return gitCommand(
+      ["diff", "-w", `${target.baseCommit}..${target.currentCommit}`],
+      repoRoot,
+      { allowFail: true },
+    );
+  }
+  return gitWorktreeDiff(repoRoot).diff;
 }
 
 async function handleCommentRequest(
@@ -3194,6 +4433,37 @@ function migrate(db: Database) {
       updatedAt integer not null,
       appliedAt integer,
       unique(sessionId, worktreeHash)
+    );
+    create table if not exists review_states (
+      id text primary key,
+      sessionId text not null,
+      repoRoot text not null,
+      repoKey text not null,
+      mode text not null,
+      baseCommit text,
+      currentCommit text not null,
+      worktreeHash text,
+      branchLabelsJson text not null,
+      sourceReviewId text,
+      status text not null,
+      stateJson text not null,
+      contextJson text,
+      createdAt integer not null,
+      updatedAt integer not null,
+      finalizedAt integer
+    );
+    create index if not exists review_states_session_status_idx
+      on review_states(sessionId, status, updatedAt);
+    create unique index if not exists review_states_committed_target_idx
+      on review_states(repoRoot, mode, baseCommit, currentCommit)
+      where mode = 'committed';
+    create unique index if not exists review_states_uncommitted_target_idx
+      on review_states(repoRoot, mode, currentCommit, worktreeHash)
+      where mode = 'uncommitted';
+    create table if not exists review_selections (
+      sessionId text primary key,
+      reviewId text not null,
+      updatedAt integer not null
     );
   `);
 }
@@ -3795,13 +5065,24 @@ function parseChangedFilesFallback(diff: string): ChangedFile[] {
 
 function parseFlags(args: string[]) {
   const values = new Map<string, string>();
+  const multiValues = new Map<string, string[]>();
   const flags = new Set<string>();
+  const positionals: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
-    if (!arg.startsWith("--")) continue;
+    if (!arg.startsWith("--")) {
+      positionals.push(arg);
+      continue;
+    }
     const name = arg.slice(2);
-    if (name === "stdin" || name === "open" || name === "no-open" || name === "all") {
+    if (
+      name === "stdin" ||
+      name === "open" ||
+      name === "no-open" ||
+      name === "all" ||
+      name === "json"
+    ) {
       flags.add(name);
       continue;
     }
@@ -3810,14 +5091,19 @@ function parseFlags(args: string[]) {
       flags.add(name);
     } else {
       values.set(name, value);
+      multiValues.set(name, [...(multiValues.get(name) ?? []), value]);
       index += 1;
     }
   }
-  return { values, flags };
+  return { values, multiValues, flags, positionals };
 }
 
 function stringFlag(parsed: ReturnType<typeof parseFlags>, name: string) {
   return parsed.values.get(name);
+}
+
+function stringFlags(parsed: ReturnType<typeof parseFlags>, name: string) {
+  return parsed.multiValues.get(name) ?? [];
 }
 
 function resolveRequiredPath(path: string | undefined, message: string) {
@@ -3835,8 +5121,18 @@ function helpText() {
     "",
     "Commands:",
     "  start --base <ref> --goal <text>",
-    "  review [--apply <file> | --check <file> | --stdin] [--open]",
-    "  worktree [--apply <file> | --check <file> | --stdin] [--open]",
+    "  review [--open]",
+    "  review context [--review <id>|--diff <base..head>] [--json]",
+    "  review list [--limit 20] [--json]",
+    "  review open <review-id> [--open]",
+    "  review finalize [--json]",
+    "  claim add --title <text> --importance <level> --thread-id <id> --before <text|null> --after <text|null> --evidence <path:start-end:change>",
+    "  claim edit --claim <id> [--work-status <pending|in_progress|complete|blocked>]",
+    "  claim list [--json]",
+    "  claim show --claim <id> [--json]",
+    "  claim evidence add --claim <id> --evidence <path:start-end:change>",
+    "  claim evidence remove --claim <id> --evidence <evidence-id>",
+    "  file acknowledge --path <path> --reason <text>",
     "  it [--open]",
     "  status",
     "  sync",
