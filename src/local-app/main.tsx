@@ -2939,29 +2939,40 @@ function ClaimActions({
     },
   });
 
+  const accepted = claim.humanStatus === "accepted";
   return (
     <div className={cn("inline-flex w-full sm:w-auto", className)}>
       <Button
         type="button"
-        variant={claim.humanStatus === "accepted" ? "default" : "outline"}
-        // className="min-w-20 flex-1 rounded-none sm:flex-none"
+        variant={accepted ? "default" : "outline"}
         onClick={() =>
-          statusMutation.mutate(
-            claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
-          )
+          statusMutation.mutate(accepted ? "unreviewed" : "accepted")
         }
       >
-        {claim.humanStatus === "accepted" ? (
-          <>
-            Accepted
-            <Check data-icon="inline-start" />
-          </>
-        ) : (
-          <>
-            Accept
-            <Square data-icon="inline-end" />
-          </>
-        )}
+        {accepted ? "Accepted" : "Accept"}
+        <svg
+          data-icon="inline-end"
+          viewBox="0 0 16 16"
+          className="size-4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <rect x="2" y="2" width="12" height="12" rx="2" />
+          <path
+            d="M4.5 8.5 7 11l4.5-5.5"
+            style={{
+              strokeDasharray: 14,
+              strokeDashoffset: accepted ? 0 : 14,
+              transition: accepted
+                ? "stroke-dashoffset 0.2s ease-out 0.05s"
+                : "none",
+            }}
+          />
+        </svg>
       </Button>
     </div>
   );
