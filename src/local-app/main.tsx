@@ -407,11 +407,8 @@ function App() {
           stroke-dasharray: 14;
           stroke-dashoffset: 14;
         }
-        .accept-btn:not([data-accepted]):active svg path.check-path {
-          animation: accept-check-draw 0.25s ease-out forwards;
-        }
         .accept-btn[data-accepted] svg path.check-path {
-          stroke-dashoffset: 0;
+          animation: accept-check-draw 0.25s ease-out forwards;
         }
         @keyframes accept-check-draw {
           from { stroke-dashoffset: 14; }
@@ -2951,6 +2948,7 @@ function ClaimActions({
 }) {
   const queryClient = useQueryClient();
   const claimApi = useClaimApi();
+  const [isAccepting, setIsAccepting] = React.useState(false);
   const statusMutation = useMutation({
     mutationFn: (humanStatus: HumanStatus) =>
       claimApi.post(claim.id, humanStatus),
@@ -2958,21 +2956,24 @@ function ClaimActions({
       onStatusChange?.(humanStatus);
       return queryClient.invalidateQueries({ queryKey: claimApi.queryKey });
     },
+    onSettled: () => setIsAccepting(false),
   });
 
   const accepted = claim.humanStatus === "accepted";
+  const showAccepted = accepted || isAccepting;
   return (
     <div className={cn("inline-flex w-full sm:w-auto", className)}>
       <Button
         type="button"
-        variant={accepted ? "default" : "outline"}
+        variant={showAccepted ? "default" : "outline"}
         className="accept-btn"
-        data-accepted={accepted ? "" : undefined}
+        data-accepted={showAccepted ? "" : undefined}
+        onMouseDown={() => { if (!accepted) setIsAccepting(true); }}
         onClick={() =>
           statusMutation.mutate(accepted ? "unreviewed" : "accepted")
         }
       >
-        {accepted ? "Accepted" : "Accept"}
+        {showAccepted ? "Accepted" : "Accept"}
         <svg
           data-icon="inline-end"
           viewBox="0 0 16 16"
