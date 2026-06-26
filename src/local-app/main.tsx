@@ -1990,7 +1990,7 @@ function ThreadGroup({
           <div className="min-w-0">
             <div className="flex items-start justify-between gap-3">
               <h2 className="min-w-0 text-base font-semibold leading-snug w-full">
-                <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted w-full">
+                <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:ring-offset-1 focus-visible:ring-offset-muted w-full">
                   <ChevronRight
                     className={cn(
                       "size-4 shrink-0 text-muted-foreground transition-transform",
