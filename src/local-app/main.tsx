@@ -2188,17 +2188,10 @@ function ClaimCard({
               </Badge>
             )}
             {!open && claim.humanStatus === "accepted" && (
-              <span
-                className={cn(
-                  "inline-flex h-7 items-center gap-1 rounded-md text-sm font-medium shrink-0",
-                )}
+              <Check
+                className="size-3.5 shrink-0 text-primary-darker"
                 aria-label="Approved"
-              >
-                <Check
-                  className="size-3.5 shrink-0 text-primary-darker"
-                  aria-hidden
-                />
-              </span>
+              />
             )}
           </CardAction>
         </CardHeader>
