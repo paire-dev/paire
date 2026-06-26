@@ -2002,7 +2002,7 @@ function ThreadGroup({
                     <AiText source={thread.title || "Behavior"} inline />
                     {allClaimsAccepted ? (
                       <CheckCheck
-                        className="size-6 shrink-0 text-primary-darker"
+                        className="size-3.5 shrink-0 text-primary-darker"
                         aria-label="All claims approved"
                       />
                     ) : null}
@@ -2195,7 +2195,7 @@ function ClaimCard({
                 aria-label="Approved"
               >
                 <Check
-                  className="size-6 shrink-0 text-primary-darker"
+                  className="size-3.5 shrink-0 text-primary-darker"
                   aria-hidden
                 />
               </span>
