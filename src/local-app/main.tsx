@@ -402,6 +402,22 @@ function isTypingTarget(target: EventTarget | null) {
 function App() {
   return (
     <ThemeProvider>
+      <style>{`
+        .accept-btn svg path.check-path {
+          stroke-dasharray: 14;
+          stroke-dashoffset: 14;
+        }
+        .accept-btn:not([data-accepted]):active svg path.check-path {
+          animation: accept-check-draw 0.25s ease-out forwards;
+        }
+        .accept-btn[data-accepted] svg path.check-path {
+          stroke-dashoffset: 0;
+        }
+        @keyframes accept-check-draw {
+          from { stroke-dashoffset: 14; }
+          to   { stroke-dashoffset: 0;  }
+        }
+      `}</style>
       <TooltipProvider>
         <QueryClientProvider client={queryClient}>
           <ReviewScreen />
@@ -2945,6 +2961,8 @@ function ClaimActions({
       <Button
         type="button"
         variant={accepted ? "default" : "outline"}
+        className="accept-btn"
+        data-accepted={accepted ? "" : undefined}
         onClick={() =>
           statusMutation.mutate(accepted ? "unreviewed" : "accepted")
         }
@@ -2962,16 +2980,7 @@ function ClaimActions({
           aria-hidden
         >
           <rect x="2" y="2" width="12" height="12" rx="2" />
-          <path
-            d="M4.5 8.5 7 11l4.5-5.5"
-            style={{
-              strokeDasharray: 14,
-              strokeDashoffset: accepted ? 0 : 14,
-              transition: accepted
-                ? "stroke-dashoffset 0.2s ease-out 0.05s"
-                : "none",
-            }}
-          />
+          <path className="check-path" d="M4.5 8.5 7 11l4.5-5.5" />
         </svg>
       </Button>
     </div>
