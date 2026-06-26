@@ -1092,7 +1092,7 @@ function HumanFilterNav({
     : ListChevronsUpDown;
 
   return (
-    <div className="flex justify-start gap-2 sm:justify-center">
+    <div className="flex justify-start sm:justify-center">
       <div
         className="inline-flex overflow-hidden rounded-md border bg-background"
         role="group"
@@ -1122,25 +1122,25 @@ function HumanFilterNav({
         >
           Accepted ({counts.accepted})
         </HumanFilterButton>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-8 rounded-none border-0 border-l shadow-none"
+                aria-label={toggleLabel}
+                aria-pressed={allReviewItemsOpen}
+                onClick={onToggleAll}
+              >
+                <ToggleIcon aria-hidden />
+              </Button>
+            }
+          />
+          <TooltipContent>{toggleLabel}</TooltipContent>
+        </Tooltip>
       </div>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              type="button"
-              size="icon"
-              variant="outline"
-              className="size-7"
-              aria-label={toggleLabel}
-              aria-pressed={allReviewItemsOpen}
-              onClick={onToggleAll}
-            >
-              <ToggleIcon aria-hidden />
-            </Button>
-          }
-        />
-        <TooltipContent>{toggleLabel}</TooltipContent>
-      </Tooltip>
     </div>
   );
 }
