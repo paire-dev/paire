@@ -1360,7 +1360,7 @@ function ReviewClaims({
     }) => claimApi.post(claimId, humanStatus),
     onSuccess: (humanStatus, { claimId }) => {
       if (humanStatus === "accepted") {
-        onClaimOpenChange(claimId, false);
+        setTimeout(() => onClaimOpenChange(claimId, false), 300);
         focusNextUnapprovedAfter(claimId);
       }
       return queryClient.invalidateQueries({ queryKey: claimApi.queryKey });
@@ -2037,7 +2037,7 @@ function ThreadGroup({
                 }
                 onStatusChange={(humanStatus) => {
                   if (humanStatus === "accepted") {
-                    onClaimOpenChange(claim.id, false);
+                    setTimeout(() => onClaimOpenChange(claim.id, false), 300);
                     onClaimApproved(claim.id);
                   }
                 }}
