@@ -563,6 +563,18 @@ function ReviewScreen() {
     [codeItems, selectedEvidence],
   );
   const showLoadingState = useDelayedValue(isLoading, LOADING_STATE_DELAY_MS);
+  const filterCounts = React.useMemo(
+    () => ({
+      all: allClaims.length,
+      new_this_revision: allClaims.filter((c) =>
+        ["new", "amended", "superseded"].includes(c.agentStatus),
+      ).length,
+      unreviewed: allClaims.filter((c) => c.humanStatus !== "accepted").length,
+      accepted: allClaims.filter((c) => c.humanStatus === "accepted").length,
+    }),
+    [allClaims],
+  );
+
   const filteredThreads = React.useMemo(
     () => filterThreads(reviewThreads, humanStatusFilter),
     [reviewThreads, humanStatusFilter],
@@ -762,6 +774,7 @@ function ReviewScreen() {
         </div>
         <HumanFilterNav
           value={humanStatusFilter}
+          counts={filterCounts}
           allReviewItemsOpen={allReviewItemsOpen}
           onChange={setHumanStatusFilter}
           onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
@@ -1063,11 +1076,13 @@ function ProjectAvatar({ project }: { project: ProjectKeyInfo }) {
 function HumanFilterNav({
   allReviewItemsOpen,
   value,
+  counts,
   onChange,
   onToggleAll,
 }: {
   allReviewItemsOpen: boolean;
   value: FilterValue;
+  counts: Record<FilterValue, number>;
   onChange: (value: FilterValue) => void;
   onToggleAll: () => void;
 }) {
@@ -1087,25 +1102,25 @@ function HumanFilterNav({
           active={value === "all"}
           onClick={() => onChange("all")}
         >
-          All claims
+          All claims ({counts.all})
         </HumanFilterButton>
         <HumanFilterButton
           active={value === "new_this_revision"}
           onClick={() => onChange("new_this_revision")}
         >
-          New this revision
+          New this revision ({counts.new_this_revision})
         </HumanFilterButton>
         <HumanFilterButton
           active={value === "unreviewed"}
           onClick={() => onChange("unreviewed")}
         >
-          Unreviewed
+          Unreviewed ({counts.unreviewed})
         </HumanFilterButton>
         <HumanFilterButton
           active={value === "accepted"}
           onClick={() => onChange("accepted")}
         >
-          Accepted
+          Accepted ({counts.accepted})
         </HumanFilterButton>
       </div>
       <Tooltip>
