@@ -751,7 +751,10 @@ function ReviewScreen() {
     />
   );
   const reviewPanel = (
-    <ReviewScrollPanel contained={isDesktopLayout}>
+    <ReviewScrollPanel
+      contained={isDesktopLayout}
+      progress={{ accepted: filterCounts.accepted, total: filterCounts.all }}
+    >
       {reviewContent}
     </ReviewScrollPanel>
   );
@@ -1173,22 +1176,64 @@ function HumanFilterButton({
   );
 }
 
+function ReviewProgressBar({
+  accepted,
+  total,
+}: {
+  accepted: number;
+  total: number;
+}) {
+  const pct = total === 0 ? 0 : Math.round((accepted / total) * 100);
+  const done = accepted === total && total > 0;
+  return (
+    <div className="pointer-events-none absolute bottom-4 left-0 right-0 flex justify-center px-4">
+      <div className="pointer-events-auto flex w-full max-w-xs flex-col gap-1.5 rounded-xl border bg-background/90 px-4 py-2.5 shadow-lg backdrop-blur-sm">
+        <div className="flex items-center justify-between text-xs">
+          <span className="font-medium">
+            {done ? "All claims reviewed" : "Review progress"}
+          </span>
+          <span className="tabular-nums text-muted-foreground">
+            {accepted} / {total} accepted
+          </span>
+        </div>
+        <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+          <div
+            className={cn(
+              "h-full rounded-full transition-all duration-500",
+              done ? "bg-green-500" : "bg-primary",
+            )}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReviewScrollPanel({
   children,
   contained = false,
+  progress,
 }: {
   children: React.ReactNode;
   contained?: boolean;
+  progress?: { accepted: number; total: number };
 }) {
   const content = <div className="mx-auto w-full max-w-3xl">{children}</div>;
 
   if (!contained) return content;
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-8">
+    <div className="relative flex h-full min-h-0 min-w-0 flex-col">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-20">
         {content}
       </div>
+      {progress && (
+        <ReviewProgressBar
+          accepted={progress.accepted}
+          total={progress.total}
+        />
+      )}
     </div>
   );
 }
