@@ -1350,6 +1350,9 @@ function ReviewClaims({
     [filteredClaims, focusClaimAt],
   );
 
+  const collapseTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => () => { if (collapseTimerRef.current !== null) clearTimeout(collapseTimerRef.current); }, []);
+
   const toggleApprovalMutation = useMutation({
     mutationFn: ({
       claimId,
@@ -1360,7 +1363,8 @@ function ReviewClaims({
     }) => claimApi.post(claimId, humanStatus),
     onSuccess: (humanStatus, { claimId }) => {
       if (humanStatus === "accepted") {
-        setTimeout(() => onClaimOpenChange(claimId, false), 300);
+        if (collapseTimerRef.current !== null) clearTimeout(collapseTimerRef.current);
+        collapseTimerRef.current = setTimeout(() => onClaimOpenChange(claimId, false), 300);
         focusNextUnapprovedAfter(claimId);
       }
       return queryClient.invalidateQueries({ queryKey: claimApi.queryKey });
@@ -1975,6 +1979,9 @@ function ThreadGroup({
   ) => void;
   onThreadOpenChange: (threadId: string, open: boolean) => void;
 }) {
+  const claimCollapseTimers = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  React.useEffect(() => () => { claimCollapseTimers.current.forEach(clearTimeout); }, []);
+
   const allClaimsAccepted =
     thread.claims.length > 0 &&
     thread.claims.every((claim) => claim.humanStatus === "accepted");
@@ -2037,7 +2044,12 @@ function ThreadGroup({
                 }
                 onStatusChange={(humanStatus) => {
                   if (humanStatus === "accepted") {
-                    setTimeout(() => onClaimOpenChange(claim.id, false), 300);
+                    const prev = claimCollapseTimers.current.get(claim.id);
+                    if (prev !== undefined) clearTimeout(prev);
+                    claimCollapseTimers.current.set(
+                      claim.id,
+                      setTimeout(() => onClaimOpenChange(claim.id, false), 300),
+                    );
                     onClaimApproved(claim.id);
                   }
                 }}
