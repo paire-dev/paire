@@ -2310,37 +2310,41 @@ function EvidenceBlock({
   selected: boolean;
   onSelect: (evidence: Evidence) => void;
 }) {
-  return evidence.change ? (
-    <Tooltip>
-      <TooltipTrigger
-        delay={700}
-        render={
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            aria-pressed={selected}
-            className={cn(
-              "w-full justify-start text-sm font-normal hover:bg-primary/10 h-auto py-2 text-left",
-              selected ? "bg-primary/20 ring-1 ring-primary/40" : "bg-muted/30 text-muted-foreground",
-            )}
-            onClick={() => onSelect(evidence)}
-            id={getEvidenceId(evidence)}
-          />
-        }
-      >
-        <AiText
-          className="w-full flex justify-start"
-          source={evidence.change}
-          inline
-        />
-        <ChevronRight className="size-4 ml-auto text-muted-foreground" />
-      </TooltipTrigger>
-      <TooltipContent side="top" align="end">
-        {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
-      </TooltipContent>
-    </Tooltip>
-  ) : null;
+  if (!evidence.change) return null;
+
+  const fileName = evidence.filePath.split("/").pop() ?? evidence.filePath;
+  const dir = evidence.filePath.includes("/")
+    ? evidence.filePath.substring(0, evidence.filePath.lastIndexOf("/"))
+    : null;
+  const lineRange =
+    evidence.startLine === evidence.endLine
+      ? `L${evidence.startLine}`
+      : `L${evidence.startLine}–${evidence.endLine}`;
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      aria-pressed={selected}
+      className={cn(
+        "w-full justify-start text-sm font-normal hover:bg-primary/10 h-auto py-2 text-left flex-col items-start gap-1.5",
+        selected ? "bg-primary/20 ring-1 ring-primary/40" : "bg-muted/30 text-muted-foreground",
+      )}
+      onClick={() => onSelect(evidence)}
+      id={getEvidenceId(evidence)}
+    >
+      <div className="flex w-full items-start justify-between gap-2">
+        <AiText className="flex-1" source={evidence.change} inline />
+        <ChevronRight className="size-4 shrink-0 mt-0.5 text-muted-foreground" />
+      </div>
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground/70">
+        <span className="font-medium text-muted-foreground">{fileName}</span>
+        {dir && <span>{dir}</span>}
+        <span className="ml-auto tabular-nums">{lineRange}</span>
+      </div>
+    </Button>
+  );
 }
 
 function InfoPanel({
