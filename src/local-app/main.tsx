@@ -1162,8 +1162,8 @@ function HumanFilterButton({
       className={cn(
         "h-8 rounded-none border-0 px-3 text-xs shadow-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none",
         active
-          ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
-          : "hover:bg-muted",
+          ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground dark:hover:bg-primary dark:hover:text-primary-foreground"
+          : "hover:bg-muted dark:hover:bg-muted",
       )}
       aria-pressed={active}
       onClick={onClick}
