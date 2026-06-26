@@ -2174,7 +2174,7 @@ function ClaimCard({
               </span>
             </CollapsibleTrigger>
           </CardTitle>
-          <CardAction className="flex flex-wrap items-center justify-end gap-1.5 ml-auto shrink opacity-70 cursor-pointer" onClick={() => onOpenChange(!open)}>
+          <CardAction className="flex flex-wrap items-center justify-end gap-1.5 ml-auto shrink opacity-70" onClick={() => onOpenChange(!open)}>
             <span
               className={cn(
                 "inline-flex items-center rounded-full border px-1.5 py-0.5 text-xs",
