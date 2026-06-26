@@ -777,64 +777,86 @@ function ReviewScreen() {
 
   return (
     <ClaimApiContext.Provider value={claimApi}>
-    <main className={isDesktopLayout ? desktopPageClassName : pageClassName}>
-      <header
-        className={cn(
-          "mb-5 grid shrink-0 gap-4 p-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center",
-          isDesktopLayout && "mb-4",
-        )}
-      >
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <ProjectIdentity projectKey={data.session.projectKey} />
-            <Badge variant="outline">{data.git.branch}</Badge>
-            {isDirty ? <Badge variant="outline">Working tree</Badge> : null}
-          </div>
-        </div>
-        <HumanFilterNav
-          value={humanStatusFilter}
-          counts={filterCounts}
-          allReviewItemsOpen={allReviewItemsOpen}
-          onChange={setHumanStatusFilter}
-          onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
-        />
-        <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
-          {!isDesktopLayout ? (
-            <MobileCodePanelButton
-              open={codePanelOpen}
-              onOpenChange={setCodePanelOpen}
-            />
-          ) : null}
-          <ModeToggle />
-        </div>
-      </header>
-
-      {isDirty && worktreeReview.stale ? (
-        <Alert className="mb-4 shrink-0 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
-          <AlertTriangle />
-          <AlertTitle>Not the latest changes</AlertTitle>
-          <AlertDescription className="text-amber-900 dark:text-amber-200">
-            <div className="flex flex-wrap items-start gap-2">
-              <p className="min-w-0 flex-1">
-                These worktree claims were applied to an earlier version of your
-                working tree. The diff has changed since. Regenerate the draft
-                and amend the claims to match the current changes.
-              </p>
-              <CopyAgentPromptButton
-                label="Copy amend prompt"
-                text={staleWorktreePrompt(worktreeReview.draftPath)}
-              />
+      <main className={isDesktopLayout ? desktopPageClassName : pageClassName}>
+        <header
+          className={cn(
+            "mb-5 grid shrink-0 gap-4 p-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center",
+            isDesktopLayout && "mb-4",
+          )}
+        >
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <ProjectIdentity projectKey={data.session.projectKey} />
+              <Badge variant="outline">{data.git.branch}</Badge>
+              {isDirty ? <Badge variant="outline">Working tree</Badge> : null}
             </div>
-          </AlertDescription>
-        </Alert>
-      ) : null}
+          </div>
+          <HumanFilterNav
+            value={humanStatusFilter}
+            counts={filterCounts}
+            allReviewItemsOpen={allReviewItemsOpen}
+            onChange={setHumanStatusFilter}
+            onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
+          />
+          <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
+            {!isDesktopLayout ? (
+              <MobileCodePanelButton
+                open={codePanelOpen}
+                onOpenChange={setCodePanelOpen}
+              />
+            ) : null}
+            <ModeToggle />
+          </div>
+        </header>
 
-      {isDesktopLayout ? (
-        <ResizableReviewLayout
-          codePanel={
-            <ReviewCodePanel
+        {isDirty && worktreeReview.stale ? (
+          <Alert className="mb-4 shrink-0 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+            <AlertTriangle />
+            <AlertTitle>Not the latest changes</AlertTitle>
+            <AlertDescription className="text-amber-900 dark:text-amber-200">
+              <div className="flex flex-wrap items-start gap-2">
+                <p className="min-w-0 flex-1">
+                  These worktree claims were applied to an earlier version of your
+                  working tree. The diff has changed since. Regenerate the draft
+                  and amend the claims to match the current changes.
+                </p>
+                <CopyAgentPromptButton
+                  label="Copy amend prompt"
+                  text={staleWorktreePrompt(worktreeReview.draftPath)}
+                />
+              </div>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {isDesktopLayout ? (
+          <ResizableReviewLayout
+            codePanel={
+              <ReviewCodePanel
+                codeViewRef={codeViewRef}
+                className="h-full min-h-0"
+                diffError={activeDiffError}
+                gitStatus={gitStatusEntries}
+                items={filteredCodeItems}
+                totalItems={codeItems.length}
+                onClearFilter={() => { setSelectedClaimId(null); setSelectedEvidence(null); }}
+                selectedClaim={selectedClaim}
+                selectedThread={selectedThread}
+                open={codePanelOpen}
+                selectedEvidence={selectedEvidence}
+                onOpenChange={setCodePanelOpen}
+                onSelectedEvidenceChange={setSelectedEvidence}
+              />
+            }
+            codePanelOpen={codePanelOpen}
+            reviewPanel={reviewPanel}
+            onCodePanelOpenChange={setCodePanelOpen}
+          />
+        ) : (
+          <>
+            {reviewPanel}
+            <ReviewCodeSheet
               codeViewRef={codeViewRef}
-              className="h-full min-h-0"
               diffError={activeDiffError}
               gitStatus={gitStatusEntries}
               items={filteredCodeItems}
@@ -847,31 +869,9 @@ function ReviewScreen() {
               onOpenChange={setCodePanelOpen}
               onSelectedEvidenceChange={setSelectedEvidence}
             />
-          }
-          codePanelOpen={codePanelOpen}
-          reviewPanel={reviewPanel}
-          onCodePanelOpenChange={setCodePanelOpen}
-        />
-      ) : (
-        <>
-          {reviewPanel}
-          <ReviewCodeSheet
-            codeViewRef={codeViewRef}
-            diffError={activeDiffError}
-            gitStatus={gitStatusEntries}
-            items={filteredCodeItems}
-            totalItems={codeItems.length}
-            onClearFilter={() => { setSelectedClaimId(null); setSelectedEvidence(null); }}
-            selectedClaim={selectedClaim}
-            selectedThread={selectedThread}
-            open={codePanelOpen}
-            selectedEvidence={selectedEvidence}
-            onOpenChange={setCodePanelOpen}
-            onSelectedEvidenceChange={setSelectedEvidence}
-          />
-        </>
-      )}
-    </main>
+          </>
+        )}
+      </main>
     </ClaimApiContext.Provider>
   );
 }
@@ -1415,9 +1415,9 @@ function ReviewClaims({
       const nextIndex =
         event.key.toLowerCase() === "j"
           ? Math.min(
-              filteredClaims.length - 1,
-              (activeIndex >= 0 ? activeIndex : fallbackIndex) + 1,
-            )
+            filteredClaims.length - 1,
+            (activeIndex >= 0 ? activeIndex : fallbackIndex) + 1,
+          )
           : Math.max(0, (activeIndex >= 0 ? activeIndex : fallbackIndex) - 1);
 
       focusClaimAt(nextIndex);
@@ -1823,7 +1823,7 @@ function CopyAgentPromptButton({
       className={cn(
         "shrink-0 h-6 px-2",
         tone === "amber" &&
-          "border-amber-300/80 bg-amber-100/60 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60",
+        "border-amber-300/80 bg-amber-100/60 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60",
       )}
       title={label}
       aria-label={`${label} for coding agent`}
@@ -2121,9 +2121,9 @@ function ClaimCard({
     >
       <Card
         className={cn(
-          "relative gap-0 overflow-hidden py-0 shadow-none border-border/60 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
+          "relative gap-0 overflow-hidden py-0 shadow-none border-border/60 transition-[background-color,box-shadow] focus-within:outline-1 focus-within:-outline-offset-1",
           claim.humanStatus === "accepted" &&
-            "bg-background/50 text-muted-foreground",
+          "bg-background/50 text-muted-foreground",
         )}
       >
         <CardHeader className="flex flex-col gap-2 py-2.5 sm:flex-row sm:items-start sm:justify-between px-3 sm:px-4">
@@ -2143,7 +2143,7 @@ function ClaimCard({
                     "size-5 text-muted-foreground transition-[transform,opacity]",
                     open && "rotate-90",
                     showsImportanceIcon &&
-                      "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
+                    "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
                   )}
                   aria-hidden
                 />
