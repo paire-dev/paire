@@ -44,7 +44,6 @@ import {
   PanelRightOpen,
   Rows2,
   Sun,
-  Square,
   TriangleAlert,
   WrapText,
   X,
@@ -1124,7 +1123,7 @@ function HumanFilterNav({
           active={value === "new_this_revision"}
           onClick={() => onChange("new_this_revision")}
         >
-          New this revision ({counts.new_this_revision})
+          Changed this revision ({counts.new_this_revision})
         </HumanFilterButton>
         <HumanFilterButton
           active={value === "unreviewed"}
@@ -1939,19 +1938,6 @@ function claimImportancePillClass(importance: ClaimImportance) {
   }
 }
 
-function claimImportanceColor(importance: ClaimImportance) {
-  switch (importance) {
-    case "critical":
-      return "shadow-[inset_2px_0_0_var(--color-violet-500)]";
-    case "important":
-      return "shadow-[inset_2px_0_0_var(--color-amber-500)]";
-    case "noise":
-      return "shadow-[inset_2px_0_0_var(--color-muted)]";
-    case "minor":
-      return "shadow-[inset_2px_0_0_currentColor]";
-  }
-}
-
 function ThreadGroup({
   thread,
   open,
@@ -2024,7 +2010,7 @@ function ThreadGroup({
         </div>
         <CollapsibleContent className="flex flex-col gap-1 border-l border-border/50 sm:pl-7 pl-4">
           {thread.summary ? (
-            <div className="text-lg leading-relaxed pb-2 max-w-prose">
+            <div className="text-sm leading-relaxed pb-2 max-w-prose">
               <AiText source={thread.summary} />
             </div>
           ) : null}
