@@ -1,6 +1,7 @@
 import type { AgentRunInput, AgentRunResult } from "../harness/types";
 
 export async function runClaudeAgent(input: AgentRunInput): Promise<AgentRunResult> {
+  const { PAIRE_BROWSER_CAPTURE: _bc, PAIRE_BROWSER_HTML_CAPTURE: _bhc, ...agentEnv } = input.env;
   return runCliAgent({
     command: [
       "claude",
@@ -9,11 +10,12 @@ export async function runClaudeAgent(input: AgentRunInput): Promise<AgentRunResu
       "--dangerously-skip-permissions",
       "--output-format",
       "stream-json",
+      "--verbose",
       "--max-turns",
       "40",
     ],
     cwd: input.repoDir,
-    env: input.env,
+    env: agentEnv,
   });
 }
 
