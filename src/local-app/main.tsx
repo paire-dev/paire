@@ -44,7 +44,6 @@ import {
   PanelRightOpen,
   Rows2,
   Sun,
-  Square,
   TriangleAlert,
   WrapText,
   X,
@@ -108,7 +107,7 @@ const DIFF_SELECTED_LINE_UNSAFE_CSS = `
 
 type HumanStatus = "unreviewed" | "accepted";
 type ClaimImportance = "critical" | "important" | "minor" | "noise";
-type FilterValue = "all" | string;
+type FilterValue = "all" | "unreviewed" | "accepted" | "new_this_revision";
 
 type Evidence = {
   claimId: string;
@@ -402,6 +401,19 @@ function isTypingTarget(target: EventTarget | null) {
 function App() {
   return (
     <ThemeProvider>
+      <style>{`
+        .accept-btn svg path.check-path {
+          stroke-dasharray: 14;
+          stroke-dashoffset: 14;
+        }
+        .accept-btn[data-accepted] svg path.check-path {
+          animation: accept-check-draw 0.25s ease-out forwards;
+        }
+        @keyframes accept-check-draw {
+          from { stroke-dashoffset: 14; }
+          to   { stroke-dashoffset: 0;  }
+        }
+      `}</style>
       <TooltipProvider>
         <QueryClientProvider client={queryClient}>
           <ReviewScreen />
@@ -563,6 +575,18 @@ function ReviewScreen() {
     [codeItems, selectedEvidence],
   );
   const showLoadingState = useDelayedValue(isLoading, LOADING_STATE_DELAY_MS);
+  const filterCounts = React.useMemo(
+    () => ({
+      all: allClaims.length,
+      new_this_revision: allClaims.filter((c) =>
+        ["new", "amended", "superseded"].includes(c.agentStatus),
+      ).length,
+      unreviewed: allClaims.filter((c) => c.humanStatus !== "accepted").length,
+      accepted: allClaims.filter((c) => c.humanStatus === "accepted").length,
+    }),
+    [allClaims],
+  );
+
   const filteredThreads = React.useMemo(
     () => filterThreads(reviewThreads, humanStatusFilter),
     [reviewThreads, humanStatusFilter],
@@ -739,71 +763,96 @@ function ReviewScreen() {
     />
   );
   const reviewPanel = (
-    <ReviewScrollPanel contained={isDesktopLayout}>
+    <ReviewScrollPanel
+      contained={isDesktopLayout}
+      progress={{ accepted: filterCounts.accepted, total: filterCounts.all }}
+    >
       {reviewContent}
     </ReviewScrollPanel>
   );
 
   return (
     <ClaimApiContext.Provider value={claimApi}>
-    <main className={isDesktopLayout ? desktopPageClassName : pageClassName}>
-      <header
-        className={cn(
-          "mb-5 grid shrink-0 gap-4 p-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center",
-          isDesktopLayout && "mb-4",
-        )}
-      >
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <ProjectIdentity projectKey={data.session.projectKey} />
-            <Badge variant="outline">{data.git.branch}</Badge>
-            {isDirty ? <Badge variant="outline">Working tree</Badge> : null}
-          </div>
-        </div>
-        <HumanFilterNav
-          value={humanStatusFilter}
-          allReviewItemsOpen={allReviewItemsOpen}
-          onChange={setHumanStatusFilter}
-          onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
-        />
-        <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
-          <Badge variant="outline">{reviewBurden}</Badge>
-          {!isDesktopLayout ? (
-            <MobileCodePanelButton
-              open={codePanelOpen}
-              onOpenChange={setCodePanelOpen}
-            />
-          ) : null}
-          <ModeToggle />
-        </div>
-      </header>
-
-      {isDirty && worktreeReview.stale ? (
-        <Alert className="mb-4 shrink-0 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
-          <AlertTriangle />
-          <AlertTitle>Not the latest changes</AlertTitle>
-          <AlertDescription className="text-amber-900 dark:text-amber-200">
-            <div className="flex flex-wrap items-start gap-2">
-              <p className="min-w-0 flex-1">
-                These worktree claims were applied to an earlier version of your
-                working tree. The diff has changed since. Regenerate the draft
-                and amend the claims to match the current changes.
-              </p>
-              <CopyAgentPromptButton
-                label="Copy amend prompt"
-                text={staleWorktreePrompt(worktreeReview.draftPath)}
-              />
+      <main className={isDesktopLayout ? desktopPageClassName : pageClassName}>
+        <header
+          className={cn(
+            "mb-5 grid shrink-0 gap-4 p-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center",
+            isDesktopLayout && "mb-4",
+          )}
+        >
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <ProjectIdentity projectKey={data.session.projectKey} />
+              <Badge variant="outline">{data.git.branch}</Badge>
+              {isDirty ? <Badge variant="outline">Working tree</Badge> : null}
             </div>
-          </AlertDescription>
-        </Alert>
-      ) : null}
+          </div>
+          <HumanFilterNav
+            value={humanStatusFilter}
+            counts={filterCounts}
+            allReviewItemsOpen={allReviewItemsOpen}
+            onChange={setHumanStatusFilter}
+            onToggleAll={() => setAllReviewItemsOpen(!allReviewItemsOpen)}
+          />
+          <div className="flex flex-wrap justify-start gap-2 text-sm text-muted-foreground sm:justify-end">
+            {!isDesktopLayout ? (
+              <MobileCodePanelButton
+                open={codePanelOpen}
+                onOpenChange={setCodePanelOpen}
+              />
+            ) : null}
+            <ModeToggle />
+          </div>
+        </header>
 
-      {isDesktopLayout ? (
-        <ResizableReviewLayout
-          codePanel={
-            <ReviewCodePanel
+        {isDirty && worktreeReview.stale ? (
+          <Alert className="mb-4 shrink-0 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
+            <AlertTriangle />
+            <AlertTitle>Not the latest changes</AlertTitle>
+            <AlertDescription className="text-amber-900 dark:text-amber-200">
+              <div className="flex flex-wrap items-start gap-2">
+                <p className="min-w-0 flex-1">
+                  These worktree claims were applied to an earlier version of your
+                  working tree. The diff has changed since. Regenerate the draft
+                  and amend the claims to match the current changes.
+                </p>
+                <CopyAgentPromptButton
+                  label="Copy amend prompt"
+                  text={staleWorktreePrompt(worktreeReview.draftPath)}
+                />
+              </div>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {isDesktopLayout ? (
+          <ResizableReviewLayout
+            codePanel={
+              <ReviewCodePanel
+                codeViewRef={codeViewRef}
+                className="h-full min-h-0"
+                diffError={activeDiffError}
+                gitStatus={gitStatusEntries}
+                items={filteredCodeItems}
+                totalItems={codeItems.length}
+                onClearFilter={() => { setSelectedClaimId(null); setSelectedEvidence(null); }}
+                selectedClaim={selectedClaim}
+                selectedThread={selectedThread}
+                open={codePanelOpen}
+                selectedEvidence={selectedEvidence}
+                onOpenChange={setCodePanelOpen}
+                onSelectedEvidenceChange={setSelectedEvidence}
+              />
+            }
+            codePanelOpen={codePanelOpen}
+            reviewPanel={reviewPanel}
+            onCodePanelOpenChange={setCodePanelOpen}
+          />
+        ) : (
+          <>
+            {reviewPanel}
+            <ReviewCodeSheet
               codeViewRef={codeViewRef}
-              className="h-full min-h-0"
               diffError={activeDiffError}
               gitStatus={gitStatusEntries}
               items={filteredCodeItems}
@@ -816,31 +865,9 @@ function ReviewScreen() {
               onOpenChange={setCodePanelOpen}
               onSelectedEvidenceChange={setSelectedEvidence}
             />
-          }
-          codePanelOpen={codePanelOpen}
-          reviewPanel={reviewPanel}
-          onCodePanelOpenChange={setCodePanelOpen}
-        />
-      ) : (
-        <>
-          {reviewPanel}
-          <ReviewCodeSheet
-            codeViewRef={codeViewRef}
-            diffError={activeDiffError}
-            gitStatus={gitStatusEntries}
-            items={filteredCodeItems}
-            totalItems={codeItems.length}
-            onClearFilter={() => { setSelectedClaimId(null); setSelectedEvidence(null); }}
-            selectedClaim={selectedClaim}
-            selectedThread={selectedThread}
-            open={codePanelOpen}
-            selectedEvidence={selectedEvidence}
-            onOpenChange={setCodePanelOpen}
-            onSelectedEvidenceChange={setSelectedEvidence}
-          />
-        </>
-      )}
-    </main>
+          </>
+        )}
+      </main>
     </ClaimApiContext.Provider>
   );
 }
@@ -1064,11 +1091,13 @@ function ProjectAvatar({ project }: { project: ProjectKeyInfo }) {
 function HumanFilterNav({
   allReviewItemsOpen,
   value,
+  counts,
   onChange,
   onToggleAll,
 }: {
   allReviewItemsOpen: boolean;
   value: FilterValue;
+  counts: Record<FilterValue, number>;
   onChange: (value: FilterValue) => void;
   onToggleAll: () => void;
 }) {
@@ -1088,19 +1117,25 @@ function HumanFilterNav({
           active={value === "all"}
           onClick={() => onChange("all")}
         >
-          All
+          All claims ({counts.all})
+        </HumanFilterButton>
+        <HumanFilterButton
+          active={value === "new_this_revision"}
+          onClick={() => onChange("new_this_revision")}
+        >
+          Changed this revision ({counts.new_this_revision})
         </HumanFilterButton>
         <HumanFilterButton
           active={value === "unreviewed"}
           onClick={() => onChange("unreviewed")}
         >
-          Unreviewed
+          Unreviewed ({counts.unreviewed})
         </HumanFilterButton>
         <HumanFilterButton
           active={value === "accepted"}
           onClick={() => onChange("accepted")}
         >
-          Accepted
+          Accepted ({counts.accepted})
         </HumanFilterButton>
       </div>
       <Tooltip>
@@ -1110,7 +1145,7 @@ function HumanFilterNav({
               type="button"
               size="icon"
               variant="outline"
-              className="size-7"
+              className="size-8 hover:bg-muted focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
               aria-label={toggleLabel}
               aria-pressed={allReviewItemsOpen}
               onClick={onToggleAll}
@@ -1138,8 +1173,13 @@ function HumanFilterButton({
     <Button
       type="button"
       size="sm"
-      variant={active ? "default" : "ghost"}
-      className="h-7 rounded-none border-0 px-2.5 text-xs shadow-none"
+      variant="ghost"
+      className={cn(
+        "h-8 rounded-none border-0 px-3 text-xs shadow-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none",
+        active
+          ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground dark:hover:bg-primary dark:hover:text-primary-foreground"
+          : "hover:bg-muted dark:hover:bg-input/50",
+      )}
       aria-pressed={active}
       onClick={onClick}
     >
@@ -1148,22 +1188,64 @@ function HumanFilterButton({
   );
 }
 
+function ReviewProgressBar({
+  accepted,
+  total,
+}: {
+  accepted: number;
+  total: number;
+}) {
+  const pct = total === 0 ? 0 : Math.round((accepted / total) * 100);
+  const done = accepted === total && total > 0;
+  return (
+    <div className="pointer-events-none absolute bottom-4 left-0 right-0 flex justify-center px-4">
+      <div className="pointer-events-auto flex w-full max-w-xs flex-col gap-1.5 rounded-xl border bg-background/90 px-4 py-2.5 shadow-lg backdrop-blur-sm">
+        <div className="flex items-center justify-between text-xs">
+          <span className="font-medium">
+            {done ? "All claims reviewed" : "Review progress"}
+          </span>
+          <span className="tabular-nums text-muted-foreground">
+            {accepted} / {total} accepted
+          </span>
+        </div>
+        <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+          <div
+            className={cn(
+              "h-full rounded-full transition-all duration-500",
+              done ? "bg-green-500" : "bg-primary",
+            )}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReviewScrollPanel({
   children,
   contained = false,
+  progress,
 }: {
   children: React.ReactNode;
   contained?: boolean;
+  progress?: { accepted: number; total: number };
 }) {
   const content = <div className="mx-auto w-full max-w-3xl">{children}</div>;
 
   if (!contained) return content;
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-8">
+    <div className="relative flex h-full min-h-0 min-w-0 flex-col">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pb-20">
         {content}
       </div>
+      {progress && (
+        <ReviewProgressBar
+          accepted={progress.accepted}
+          total={progress.total}
+        />
+      )}
     </div>
   );
 }
@@ -1264,6 +1346,9 @@ function ReviewClaims({
     [filteredClaims, focusClaimAt],
   );
 
+  const collapseTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => () => { if (collapseTimerRef.current !== null) clearTimeout(collapseTimerRef.current); }, []);
+
   const toggleApprovalMutation = useMutation({
     mutationFn: ({
       claimId,
@@ -1274,7 +1359,8 @@ function ReviewClaims({
     }) => claimApi.post(claimId, humanStatus),
     onSuccess: (humanStatus, { claimId }) => {
       if (humanStatus === "accepted") {
-        onClaimOpenChange(claimId, false);
+        if (collapseTimerRef.current !== null) clearTimeout(collapseTimerRef.current);
+        collapseTimerRef.current = setTimeout(() => onClaimOpenChange(claimId, false), 300);
         focusNextUnapprovedAfter(claimId);
       }
       return queryClient.invalidateQueries({ queryKey: claimApi.queryKey });
@@ -1329,9 +1415,9 @@ function ReviewClaims({
       const nextIndex =
         event.key.toLowerCase() === "j"
           ? Math.min(
-              filteredClaims.length - 1,
-              (activeIndex >= 0 ? activeIndex : fallbackIndex) + 1,
-            )
+            filteredClaims.length - 1,
+            (activeIndex >= 0 ? activeIndex : fallbackIndex) + 1,
+          )
           : Math.max(0, (activeIndex >= 0 ? activeIndex : fallbackIndex) - 1);
 
       focusClaimAt(nextIndex);
@@ -1359,20 +1445,25 @@ function ReviewClaims({
       ) : filteredThreads.length === 0 ? (
         <EmptyState>No claims match the current filters.</EmptyState>
       ) : (
-        filteredThreads.map((thread) => (
-          <ThreadGroup
-            key={thread.id}
-            thread={thread}
-            open={openThreads[thread.id] !== false}
-            openClaims={openClaims}
-            isEvidenceSelected={isEvidenceSelected}
-            onEvidenceSelect={onEvidenceSelect}
-            onClaimApproved={focusNextUnapprovedAfter}
-            onClaimOpenChange={onClaimOpenChange}
-            onClaimTriggerRef={setClaimButtonRef}
-            onThreadOpenChange={onThreadOpenChange}
-          />
-        ))
+        <>
+          <p className="px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Groups of changes
+          </p>
+          {filteredThreads.map((thread) => (
+            <ThreadGroup
+              key={thread.id}
+              thread={thread}
+              open={openThreads[thread.id] !== false}
+              openClaims={openClaims}
+              isEvidenceSelected={isEvidenceSelected}
+              onEvidenceSelect={onEvidenceSelect}
+              onClaimApproved={focusNextUnapprovedAfter}
+              onClaimOpenChange={onClaimOpenChange}
+              onClaimTriggerRef={setClaimButtonRef}
+              onThreadOpenChange={onThreadOpenChange}
+            />
+          ))}
+        </>
       )}
     </section>
   );
@@ -1732,7 +1823,7 @@ function CopyAgentPromptButton({
       className={cn(
         "shrink-0 h-6 px-2",
         tone === "amber" &&
-          "border-amber-300/80 bg-amber-100/60 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60",
+        "border-amber-300/80 bg-amber-100/60 text-amber-950 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-100 dark:hover:bg-amber-900/60",
       )}
       title={label}
       aria-label={`${label} for coding agent`}
@@ -1816,12 +1907,15 @@ function ThemeButton({
   );
 }
 
-function filterThreads(threads: Thread[], humanStatus: FilterValue) {
+function filterThreads(threads: Thread[], filter: FilterValue) {
   return threads
     .map((thread) => ({
       ...thread,
       claims: thread.claims.filter((claim) => {
-        return humanStatus === "all" || claim.humanStatus === humanStatus;
+        if (filter === "all") return true;
+        if (filter === "new_this_revision")
+          return ["new", "amended", "superseded"].includes(claim.agentStatus);
+        return claim.humanStatus === filter;
       }),
     }))
     .filter((thread) => thread.claims.length > 0);
@@ -1831,16 +1925,16 @@ function statusLabel(status: string) {
   return status.replaceAll("_", " ");
 }
 
-function claimImportanceColor(importance: ClaimImportance) {
+function claimImportancePillClass(importance: ClaimImportance) {
   switch (importance) {
     case "critical":
-      return "shadow-[inset_2px_0_0_var(--color-violet-500)]";
+      return "bg-violet-500/15 text-violet-400 border-violet-500/30";
     case "important":
-      return "shadow-[inset_2px_0_0_var(--color-orange-500)]";
-    case "noise":
-      return "shadow-[inset_2px_0_0_var(--color-muted)]";
+      return "bg-amber-500/15 text-amber-400 border-amber-500/30";
     case "minor":
-      return "shadow-[inset_2px_0_0_currentColor]";
+      return "bg-muted text-muted-foreground border-border";
+    case "noise":
+      return "bg-muted/50 text-muted-foreground/50 border-border/50";
   }
 }
 
@@ -1868,6 +1962,9 @@ function ThreadGroup({
   ) => void;
   onThreadOpenChange: (threadId: string, open: boolean) => void;
 }) {
+  const claimCollapseTimers = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  React.useEffect(() => () => { claimCollapseTimers.current.forEach(clearTimeout); }, []);
+
   const allClaimsAccepted =
     thread.claims.length > 0 &&
     thread.claims.every((claim) => claim.humanStatus === "accepted");
@@ -1879,14 +1976,14 @@ function ThreadGroup({
       className="flex flex-col gap-1"
     >
       <section className="contents">
-        <div className="flex flex-col gap-2 py-3 sticky top-0 z-10 bg-linear-to-b from-muted to-transparent backdrop-blur-xs supports-backdrop-filter:bg-muted/80">
+        <div className={cn("flex flex-col gap-1 py-2 sticky top-0 z-10 bg-linear-to-b from-muted to-transparent backdrop-blur-xs supports-backdrop-filter:bg-muted/80 border-l-2 pl-1.5 transition-colors", open ? "border-primary/50" : "border-transparent")}>
           <div className="min-w-0">
             <div className="flex items-start justify-between gap-3">
-              <h2 className="min-w-0 text-3xl font-light leading-snug w-full">
-                <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-[3px] focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-muted w-full">
+              <h2 className="min-w-0 text-base font-semibold leading-snug w-full">
+                <CollapsibleTrigger className="group -ml-2 flex min-w-0 items-center gap-1 rounded-md px-1 text-left focus-visible:ring-1 focus-visible:ring-ring/60 focus-visible:ring-offset-1 focus-visible:ring-offset-muted w-full">
                   <ChevronRight
                     className={cn(
-                      "size-7 shrink-0 text-muted-foreground transition-transform",
+                      "size-4 shrink-0 text-muted-foreground transition-transform",
                       open && "rotate-90",
                     )}
                     aria-hidden
@@ -1895,7 +1992,7 @@ function ThreadGroup({
                     <AiText source={thread.title || "Behavior"} inline />
                     {allClaimsAccepted ? (
                       <CheckCheck
-                        className="size-6 shrink-0 text-primary-darker"
+                        className="size-3.5 shrink-0 text-primary-darker"
                         aria-label="All claims approved"
                       />
                     ) : null}
@@ -1911,13 +2008,13 @@ function ThreadGroup({
             </div>
           </div>
         </div>
-        <CollapsibleContent className="flex flex-col gap-1 sm:pl-8">
+        <CollapsibleContent className="flex flex-col gap-1 border-l border-border/50 sm:pl-7 pl-4">
           {thread.summary ? (
-            <div className="text-lg leading-relaxed pb-2 max-w-prose">
+            <div className="text-sm leading-relaxed pb-2 max-w-prose">
               <AiText source={thread.summary} />
             </div>
           ) : null}
-          <div className="grid gap-3">
+          <div className="grid gap-1.5">
             {thread.claims.map((claim) => (
               <ClaimCard
                 key={claim.id}
@@ -1930,7 +2027,12 @@ function ThreadGroup({
                 }
                 onStatusChange={(humanStatus) => {
                   if (humanStatus === "accepted") {
-                    onClaimOpenChange(claim.id, false);
+                    const prev = claimCollapseTimers.current.get(claim.id);
+                    if (prev !== undefined) clearTimeout(prev);
+                    claimCollapseTimers.current.set(
+                      claim.id,
+                      setTimeout(() => onClaimOpenChange(claim.id, false), 300),
+                    );
                     onClaimApproved(claim.id);
                   }
                 }}
@@ -2014,18 +2116,16 @@ function ClaimCard({
     >
       <Card
         className={cn(
-          "relative gap-0 overflow-hidden py-0 transition-[background-color,box-shadow] focus-within:outline-2 focus-within:-outline-offset-1",
-          // claimImportanceColor(claim.importance),
+          "relative gap-0 overflow-hidden py-0 shadow-none border-border/60 transition-[background-color,box-shadow] focus-within:outline-1 focus-within:-outline-offset-1",
           claim.humanStatus === "accepted" &&
-            "bg-background/50 text-muted-foreground",
+          "bg-background/50 text-muted-foreground",
         )}
-        title={claim.importance}
       >
-        <CardHeader className="flex flex-col gap-3 py-4 sm:flex-row sm:items-start sm:justify-between px-4 sm:px-6">
-          <CardTitle className="flex min-w-0 flex-1 text-xl font-medium leading-snug w-full">
+        <CardHeader className="flex flex-col gap-2 py-2.5 sm:flex-row sm:items-start sm:justify-between px-3 sm:px-4">
+          <CardTitle className="flex min-w-0 flex-1 text-sm font-medium leading-snug w-full">
             <CollapsibleTrigger
               ref={onTriggerRef}
-              className="group -ml-3 flex min-w-0 items-center gap-1 rounded-md px-1 text-left w-full"
+              className="group -ml-3 flex min-w-0 items-start gap-1 rounded-md px-1 text-left w-full"
               onKeyDown={(event) => {
                 if (event.key !== "Enter" && event.key !== " ") return;
                 event.preventDefault();
@@ -2038,7 +2138,7 @@ function ClaimCard({
                     "size-5 text-muted-foreground transition-[transform,opacity]",
                     open && "rotate-90",
                     showsImportanceIcon &&
-                      "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
+                    "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
                   )}
                   aria-hidden
                 />
@@ -2060,34 +2160,33 @@ function ClaimCard({
               </span>
             </CollapsibleTrigger>
           </CardTitle>
-          <CardAction className="flex flex-wrap items-center justify-end gap-2 ml-auto shrink">
+          <CardAction className="flex flex-wrap items-center justify-end gap-1.5 ml-auto shrink opacity-70" onClick={() => onOpenChange(!open)}>
+            <span
+              className={cn(
+                "inline-flex items-center rounded-full border px-1.5 py-0.5 text-xs",
+                claimImportancePillClass(claim.importance),
+              )}
+            >
+              {claim.importance}
+            </span>
             {claim.updatedAt ? (
               <ClaimTimeAgo updatedAt={claim.updatedAt} />
             ) : null}
-            <Badge
-              variant={
-                claim.agentStatus !== "unchanged" ? "default" : "secondary"
-              }
-              className={
-                claim.agentStatus !== "unchanged"
-                  ? "border-yellow-200 bg-yellow-100/80 text-yellow-950"
-                  : undefined
-              }
-            >
-              {statusLabel(claim.agentStatus)}
-            </Badge>
-            {!open && claim.humanStatus === "accepted" && (
-              <span
-                className={cn(
-                  "inline-flex h-7 items-center gap-1 rounded-md text-sm font-medium shrink-0",
-                )}
-                aria-label="Approved"
-              >
-                <Check
-                  className="size-6 shrink-0 text-primary-darker"
-                  aria-hidden
-                />
+            {claim.agentStatus === "unchanged" ? null : claim.agentStatus === "new" ? (
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <span className="size-1.5 rounded-full bg-amber-400 shrink-0" aria-hidden />
+                new
               </span>
+            ) : (
+              <Badge variant="secondary" className="text-xs">
+                {statusLabel(claim.agentStatus)}
+              </Badge>
+            )}
+            {!open && claim.humanStatus === "accepted" && (
+              <Check
+                className="size-3.5 shrink-0 text-primary-darker"
+                aria-label="Approved"
+              />
             )}
           </CardAction>
         </CardHeader>
@@ -2215,7 +2314,18 @@ function EvidenceBlock({
   selected: boolean;
   onSelect: (evidence: Evidence) => void;
 }) {
-  return evidence.change ? (
+  if (!evidence.change) return null;
+
+  const fileName = evidence.filePath.split("/").pop() ?? evidence.filePath;
+  const dir = evidence.filePath.includes("/")
+    ? evidence.filePath.substring(0, evidence.filePath.lastIndexOf("/"))
+    : null;
+  const lineRange =
+    evidence.startLine === evidence.endLine
+      ? `L${evidence.startLine}`
+      : `L${evidence.startLine}–${evidence.endLine}`;
+
+  return (
     <Tooltip>
       <TooltipTrigger
         delay={700}
@@ -2226,26 +2336,29 @@ function EvidenceBlock({
             size="sm"
             aria-pressed={selected}
             className={cn(
-              "w-full justify-start text-sm font-normal hover:bg-primary/10 h-auto py-2 text-left",
-              selected ? "bg-primary/30" : "bg-muted/30 text-muted-foreground",
+              "w-full justify-start text-sm font-normal hover:bg-primary/10 h-auto py-2 text-left flex-col items-start gap-1.5",
+              selected ? "bg-primary/20 ring-1 ring-primary/40" : "bg-muted/30 text-muted-foreground",
             )}
             onClick={() => onSelect(evidence)}
             id={getEvidenceId(evidence)}
           />
         }
       >
-        <AiText
-          className="w-full flex justify-start"
-          source={evidence.change}
-          inline
-        />
-        <ChevronRight className="size-4 ml-auto text-muted-foreground" />
+        <div className="flex w-full items-start justify-between gap-2">
+          <AiText className="w-full flex justify-start" source={evidence.change} inline />
+          <ChevronRight className="size-4 shrink-0 mt-0.5 text-muted-foreground" />
+        </div>
+        <div className="flex w-full items-center gap-1.5 text-xs text-muted-foreground/70">
+          <span className="font-medium text-muted-foreground">{fileName}</span>
+          {dir && <span>{dir}</span>}
+          <span className="ml-auto tabular-nums">{lineRange}</span>
+        </div>
       </TooltipTrigger>
       <TooltipContent side="top" align="end">
         {evidence.filePath}:{evidence.startLine}-{evidence.endLine}
       </TooltipContent>
     </Tooltip>
-  ) : null;
+  );
 }
 
 function InfoPanel({
@@ -2821,6 +2934,8 @@ function ClaimActions({
 }) {
   const queryClient = useQueryClient();
   const claimApi = useClaimApi();
+  const [isAccepting, setIsAccepting] = React.useState(false);
+  const [isUnaccepting, setIsUnaccepting] = React.useState(false);
   const statusMutation = useMutation({
     mutationFn: (humanStatus: HumanStatus) =>
       claimApi.post(claim.id, humanStatus),
@@ -2828,31 +2943,41 @@ function ClaimActions({
       onStatusChange?.(humanStatus);
       return queryClient.invalidateQueries({ queryKey: claimApi.queryKey });
     },
+    onSettled: () => { setIsAccepting(false); setIsUnaccepting(false); },
   });
 
+  const accepted = claim.humanStatus === "accepted";
+  const showAccepted = (accepted && !isUnaccepting) || isAccepting;
   return (
     <div className={cn("inline-flex w-full sm:w-auto", className)}>
       <Button
         type="button"
-        variant={claim.humanStatus === "accepted" ? "default" : "outline"}
-        // className="min-w-20 flex-1 rounded-none sm:flex-none"
+        variant={showAccepted ? "default" : "outline"}
+        className="accept-btn"
+        data-accepted={showAccepted ? "" : undefined}
+        onMouseDown={() => {
+          if (!accepted) setIsAccepting(true);
+          else setIsUnaccepting(true);
+        }}
         onClick={() =>
-          statusMutation.mutate(
-            claim.humanStatus === "accepted" ? "unreviewed" : "accepted",
-          )
+          statusMutation.mutate(accepted ? "unreviewed" : "accepted")
         }
       >
-        {claim.humanStatus === "accepted" ? (
-          <>
-            Accepted
-            <Check data-icon="inline-start" />
-          </>
-        ) : (
-          <>
-            Accept
-            <Square data-icon="inline-end" />
-          </>
-        )}
+        {showAccepted ? "Accepted" : "Accept"}
+        <svg
+          data-icon="inline-end"
+          viewBox="0 0 16 16"
+          className="size-4"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <rect x="2" y="2" width="12" height="12" rx="2" />
+          <path className="check-path" d="M4.5 8.5 7 11l4.5-5.5" />
+        </svg>
       </Button>
     </div>
   );
