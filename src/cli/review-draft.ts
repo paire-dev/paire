@@ -33,6 +33,7 @@ export type ReviewDraft = {
   gitFingerprint: string;
   _readonlyHeader: string;
   instructions: string[];
+  summary: string;
   files: DraftFileEntry[];
   threads: DraftThread[];
   context: {
@@ -82,6 +83,7 @@ type DraftClaim = {
 
 export const REVIEW_DRAFT_INSTRUCTIONS = [
   "Edit this file in place, then run: paire review --apply <this file's path>.",
+  "Write the top-level summary field: a concise plain-English description of what this changeset does overall — as short as possible, but long enough to cover everything meaningful. Omit file names, claim IDs, and line numbers.",
   "Group claims into threads by review area; put the area a reviewer must understand first as the first thread.",
   "importance: critical = correctness/security/data-loss; important = meaningful behavior change; minor = polish/tests/config; noise = mechanical churn (group noise in its own thread).",
   "Leave prior claims that are still accurate exactly as listed (agentStatus \"unchanged\"); never delete a prior claim — mark it invalidated or superseded instead.",
@@ -101,6 +103,7 @@ export function buildReviewDraft(packet: DraftPacket, activeClaims: AgentClaim[]
     _readonlyHeader:
       "Do not edit packetId, sessionId, revisionId, gitFingerprint, or formatVersion. Apply will fail if they change.",
     instructions: REVIEW_DRAFT_INSTRUCTIONS,
+    summary: "<concise plain-English summary of what this changeset does overall>",
     files: packet.changedFiles.map((file) => ({
       path: file.path,
       additions: file.additions,
@@ -169,6 +172,7 @@ export type WorktreeReviewDraft = {
   gitHead: string;
   _readonlyHeader: string;
   instructions: string[];
+  summary: string;
   files: DraftFileEntry[];
   threads: DraftThread[];
   context: {
@@ -185,6 +189,7 @@ export type WorktreeReviewDraft = {
 export const WORKTREE_REVIEW_DRAFT_INSTRUCTIONS = [
   "This is a WORKTREE review of uncommitted changes. Edit this file in place, then run: paire worktree --apply <this file's path>.",
   "Worktree claims are stored separately from committed review claims and are keyed to the current worktree diff (worktreeHash). If you change the working tree, regenerate this draft.",
+  "Write the top-level summary field: a concise plain-English description of what this changeset does overall — as short as possible, but long enough to cover everything meaningful. Omit file names, claim IDs, and line numbers.",
   "Group claims into threads by review area; put the area a reviewer must understand first as the first thread.",
   "importance: critical = correctness/security/data-loss; important = meaningful behavior change; minor = polish/tests/config; noise = mechanical churn (group noise in its own thread).",
   "Leave prior claims that are still accurate exactly as listed (agentStatus \"unchanged\"); never delete a prior claim — mark it invalidated or superseded instead.",
@@ -208,6 +213,7 @@ export function buildWorktreeReviewDraft(
     _readonlyHeader:
       "Do not edit packetId, sessionId, worktreeReviewId, worktreeHash, gitHead, or formatVersion. Apply will fail if they change.",
     instructions: WORKTREE_REVIEW_DRAFT_INSTRUCTIONS,
+    summary: "<concise plain-English summary of what this changeset does overall>",
     files: packet.changedFiles.map((file) => ({
       path: file.path,
       additions: file.additions,

@@ -64,6 +64,7 @@ type SessionRow = {
   repoRoot: string;
   projectKey: string;
   goal: string | null;
+  agentSummary: string | null;
   baseRef: string;
   baseCommit: string;
   branch: string;
@@ -197,7 +198,7 @@ type StoredAgentClaim = AgentClaim & {
 
 type ReviewSummary = {
   text: string;
-  source: "goal" | "threads" | "branch";
+  source: "goal" | "agent" | "threads" | "branch";
 };
 
 type ReviewStats = {
@@ -716,6 +717,11 @@ async function applyReviewCommand(
         "update revisions set state = 'superseded' where sessionId = ? and state = 'pending_agent' and id != ?",
       )
       .run(session.id, revision.id);
+    if (value.summary?.trim()) {
+      ctx.db
+        .prepare("update sessions set agentSummary = ? where id = ?")
+        .run(value.summary.trim(), session.id);
+    }
   });
   apply(payload);
 
@@ -790,6 +796,11 @@ async function applyWorktreeReviewCommand(
       "update worktree_reviews set state = 'applied', payloadJson = ?, gitHead = ?, updatedAt = ?, appliedAt = ? where id = ?",
     )
     .run(JSON.stringify(merged), payload.gitHead, now, now, review.id);
+  if (payload.summary?.trim()) {
+    ctx.db
+      .prepare("update sessions set agentSummary = ? where id = ?")
+      .run(payload.summary.trim(), session.id);
+  }
   ctx.stdout(formatWorktreeStatus(session, git, merged));
   await openReviewUi(ctx, session, git, open);
   return 0;
@@ -3019,12 +3030,15 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
 }
 
 function buildReviewSummary(
-  session: Pick<SessionRow, "goal">,
+  session: Pick<SessionRow, "goal" | "agentSummary">,
   git: Pick<GitState, "branch">,
   threads: Array<{ title: string }>,
 ): ReviewSummary {
   const goal = session.goal?.trim();
   if (goal) return { text: goal, source: "goal" };
+
+  const agentSummary = session.agentSummary?.trim();
+  if (agentSummary) return { text: agentSummary, source: "agent" };
 
   const threadSummary = truncateSummary(
     threads
@@ -3223,6 +3237,7 @@ function migrate(db: Database) {
       repoRoot text not null,
       projectKey text not null,
       goal text,
+      agentSummary text,
       baseRef text not null,
       baseCommit text not null,
       branch text not null,
@@ -3318,6 +3333,8 @@ function migrate(db: Database) {
       unique(sessionId, worktreeHash)
     );
   `);
+  // Incremental migrations for columns added after initial schema
+  try { db.exec("alter table sessions add column agentSummary text"); } catch { /* already exists */ }
 }
 
 function getSession(db: Database, repoRoot: string, branch: string) {

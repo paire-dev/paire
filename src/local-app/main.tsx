@@ -142,7 +142,7 @@ type Thread = {
 
 type ReviewSummaryData = {
   text: string;
-  source: "goal" | "threads" | "branch";
+  source: "goal" | "agent" | "threads" | "branch";
 };
 
 type ReviewStatsData = {
@@ -1204,9 +1204,14 @@ function ReviewScrollPanel({
 function ReviewSummary({ summary }: { summary: ReviewSummaryData }) {
   if (!summary.text) return null;
   return (
-    <p className="max-w-prose pb-4 text-lg leading-relaxed text-muted-foreground">
-      {summary.text}
-    </p>
+    <div className="pb-4">
+      <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-muted-foreground/60">
+        Changes summary
+      </p>
+      <p className="max-w-prose text-lg leading-relaxed text-muted-foreground">
+        {summary.text}
+      </p>
+    </div>
   );
 }
 

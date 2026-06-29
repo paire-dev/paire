@@ -58,6 +58,7 @@ export type AgentApplyPayload = {
   gitFingerprint: string;
   files: DraftFileEntry[];
   threads: AgentThread[];
+  summary?: string;
 };
 
 export type AgentWorktreeApplyPayload = {
@@ -68,6 +69,7 @@ export type AgentWorktreeApplyPayload = {
   gitHead: string;
   files: DraftFileEntry[];
   threads: AgentThread[];
+  summary?: string;
 };
 
 export type ValidationPacket = {
@@ -166,6 +168,7 @@ export function validateApplyPayload(
     opts.knownClaimIds,
     submittedClaimIds,
   );
+  const summary = typeof value.summary === "string" ? value.summary : undefined;
 
   if (
     packetId === undefined ||
@@ -186,6 +189,7 @@ export function validateApplyPayload(
       gitFingerprint,
       files,
       threads,
+      summary,
     },
     issues,
     submittedClaimIds,
@@ -224,6 +228,7 @@ export function validateWorktreeApplyPayload(
     opts.knownClaimIds,
     submittedClaimIds,
   );
+  const summary = typeof value.summary === "string" ? value.summary : undefined;
 
   if (
     packetId === undefined ||
@@ -246,6 +251,7 @@ export function validateWorktreeApplyPayload(
       gitHead,
       files,
       threads,
+      summary,
     },
     issues,
     submittedClaimIds,

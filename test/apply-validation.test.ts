@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 
 import {
   checkEvidenceSpans,
+  validateApplyPayload,
+  validateWorktreeApplyPayload,
   type AgentApplyPayload,
   type ClaimStatus,
   type ValidationPacket,
@@ -143,4 +145,55 @@ test("packets without touchedRanges skip the check (backward compat)", () => {
     payload({ filePath: "src/foo.ts", startLine: 900, endLine: 905 }),
   );
   expect(issues).toEqual([]);
+});
+
+const baseApplyInput = {
+  packetId: "p1",
+  sessionId: "s1",
+  revisionId: "r1",
+  gitFingerprint: "g1",
+  files: [],
+  threads: [],
+};
+
+const baseWorktreeInput = {
+  packetId: "p1",
+  sessionId: "s1",
+  worktreeReviewId: "wtr1",
+  worktreeHash: "h1",
+  gitHead: "c1",
+  files: [],
+  threads: [],
+};
+
+const noKnownClaims = { knownClaimIds: new Set<string>() };
+
+test("validateApplyPayload passes summary through to returned payload", () => {
+  const result = validateApplyPayload(
+    { ...baseApplyInput, summary: "Agent-written description." },
+    noKnownClaims,
+  );
+  expect(result.issues).toEqual([]);
+  expect(result.payload?.summary).toBe("Agent-written description.");
+});
+
+test("validateApplyPayload omits summary when absent", () => {
+  const result = validateApplyPayload(baseApplyInput, noKnownClaims);
+  expect(result.issues).toEqual([]);
+  expect(result.payload?.summary).toBeUndefined();
+});
+
+test("validateWorktreeApplyPayload passes summary through to returned payload", () => {
+  const result = validateWorktreeApplyPayload(
+    { ...baseWorktreeInput, summary: "Worktree agent summary." },
+    noKnownClaims,
+  );
+  expect(result.issues).toEqual([]);
+  expect(result.payload?.summary).toBe("Worktree agent summary.");
+});
+
+test("validateWorktreeApplyPayload omits summary when absent", () => {
+  const result = validateWorktreeApplyPayload(baseWorktreeInput, noKnownClaims);
+  expect(result.issues).toEqual([]);
+  expect(result.payload?.summary).toBeUndefined();
 });
