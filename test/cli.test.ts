@@ -2402,17 +2402,20 @@ test("review API returns agentSummary with source agent when no goal is set", as
     resultPath,
     JSON.stringify({ ...hardcodedAgentResult(packet), summary: "AI-written changeset summary." }, null, 2),
   );
-  expect(runPaire(fixture, ["review", "--apply", resultPath]).exitCode).toBe(0);
+  expect(runPaire(fixture, ["review", "--apply", resultPath, "--no-open"]).exitCode).toBe(0);
 
   const sessionId = getOnlySessionId(fixture.home, fixture.repo);
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
   const state = await waitForServerState(fixture.home, sessionId);
-  const response = await reviewApiFetch(state, "/api/review");
-  expect(response.ok).toBe(true);
-  const body = await response.json() as { summary: { text: string; source: string } };
-  expect(body.summary.source).toBe("agent");
-  expect(body.summary.text).toBe("AI-written changeset summary.");
-
-  if (state.pid) { try { process.kill(state.pid); } catch { /* already exited */ } }
+  try {
+    const response = await reviewApiFetch(state, "/api/review");
+    expect(response.ok).toBe(true);
+    const body = await response.json() as { summary: { text: string; source: string } };
+    expect(body.summary.source).toBe("agent");
+    expect(body.summary.text).toBe("AI-written changeset summary.");
+  } finally {
+    if (state.pid) { try { process.kill(state.pid); } catch { /* already exited */ } }
+  }
 });
 
 function createUncommittedFixtureRepo(options: { home?: string } = {}): Fixture {
