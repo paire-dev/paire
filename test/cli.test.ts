@@ -2343,6 +2343,81 @@ test("compiled binary embeds the build version", () => {
   expect(text(result.stdout).trim()).toBe("v9.8.7");
 });
 
+test("review apply stores summary to session agentSummary", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "update value");
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.exitCode).toBe(0);
+  const packet = JSON.parse(readFileSync(extractPacketPath(review.stdout), "utf8"));
+  const resultPath = join(fixture.root, "result-with-summary.json");
+  writeFileSync(
+    resultPath,
+    JSON.stringify({ ...hardcodedAgentResult(packet), summary: "Adds workspace validation logic." }, null, 2),
+  );
+
+  expect(runPaire(fixture, ["review", "--apply", resultPath]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ agentSummary: string | null }, []>("select agentSummary from sessions").get();
+  db.close();
+  expect(session?.agentSummary).toBe("Adds workspace validation logic.");
+});
+
+test("worktree apply stores summary to session agentSummary", () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+
+  const it = runPaire(fixture, ["it"]);
+  expect(it.exitCode).toBe(0);
+  const packet = JSON.parse(readFileSync(extractWorktreePacketPath(it.stdout), "utf8"));
+  const resultPath = join(fixture.root, "worktree-result-with-summary.json");
+  writeFileSync(
+    resultPath,
+    JSON.stringify({ ...worktreeAgentResult(packet), summary: "Worktree changes under review." }, null, 2),
+  );
+
+  expect(runPaire(fixture, ["worktree", "--apply", resultPath]).exitCode).toBe(0);
+
+  const db = new Database(join(fixture.home, "paire.db"));
+  const session = db.query<{ agentSummary: string | null }, []>("select agentSummary from sessions").get();
+  db.close();
+  expect(session?.agentSummary).toBe("Worktree changes under review.");
+});
+
+test("review API returns agentSummary with source agent when no goal is set", async () => {
+  const fixture = createFixtureRepo();
+  expect(runPaire(fixture, ["start", "--base", "main"]).exitCode).toBe(0);
+  writeFileSync(join(fixture.repo, "src/app.ts"), "export const value = 2;\n");
+  commitAll(fixture.repo, "update value");
+
+  const review = runPaire(fixture, ["review"]);
+  expect(review.exitCode).toBe(0);
+  const packet = JSON.parse(readFileSync(extractPacketPath(review.stdout), "utf8"));
+  const resultPath = join(fixture.root, "result-for-api.json");
+  writeFileSync(
+    resultPath,
+    JSON.stringify({ ...hardcodedAgentResult(packet), summary: "AI-written changeset summary." }, null, 2),
+  );
+  expect(runPaire(fixture, ["review", "--apply", resultPath, "--no-open"]).exitCode).toBe(0);
+
+  const sessionId = getOnlySessionId(fixture.home, fixture.repo);
+  expect(runPaire(fixture, ["server", "start", "--no-open"]).exitCode).toBe(0);
+  const state = await waitForServerState(fixture.home, sessionId);
+  try {
+    const response = await reviewApiFetch(state, "/api/review");
+    expect(response.ok).toBe(true);
+    const body = await response.json() as { summary: { text: string; source: string } };
+    expect(body.summary.source).toBe("agent");
+    expect(body.summary.text).toBe("AI-written changeset summary.");
+  } finally {
+    if (state.pid) { try { process.kill(state.pid); } catch { /* already exited */ } }
+  }
+});
+
 function createUncommittedFixtureRepo(options: { home?: string } = {}): Fixture {
   const root = mkdtempSync(join(tmpdir(), "paire-cli-"));
   const repo = join(root, "repo");

@@ -64,6 +64,7 @@ type SessionRow = {
   repoRoot: string;
   projectKey: string;
   goal: string | null;
+  agentSummary: string | null;
   baseRef: string;
   baseCommit: string;
   branch: string;
@@ -193,6 +194,21 @@ type StoredAgentClaim = AgentClaim & {
   title: string;
   importance: ClaimImportance;
   evidences: AgentEvidence[];
+};
+
+type ReviewSummary = {
+  text: string;
+  source: "goal" | "agent" | "threads" | "branch";
+};
+
+type ReviewStats = {
+  breakdown: {
+    critical: number;
+    important: number;
+    minor: number;
+    noise: { lines: number; files: number };
+    uncategorized: { lines: number; files: number };
+  };
 };
 
 const LARGE_DIFF_BYTES = 30_000;
@@ -701,6 +717,11 @@ async function applyReviewCommand(
         "update revisions set state = 'superseded' where sessionId = ? and state = 'pending_agent' and id != ?",
       )
       .run(session.id, revision.id);
+    if (value.summary?.trim()) {
+      ctx.db
+        .prepare("update sessions set agentSummary = ? where id = ?")
+        .run(value.summary.trim(), session.id);
+    }
   });
   apply(payload);
 
@@ -775,6 +796,11 @@ async function applyWorktreeReviewCommand(
       "update worktree_reviews set state = 'applied', payloadJson = ?, gitHead = ?, updatedAt = ?, appliedAt = ? where id = ?",
     )
     .run(JSON.stringify(merged), payload.gitHead, now, now, review.id);
+  if (payload.summary?.trim()) {
+    ctx.db
+      .prepare("update sessions set agentSummary = ? where id = ?")
+      .run(payload.summary.trim(), session.id);
+  }
   ctx.stdout(formatWorktreeStatus(session, git, merged));
   await openReviewUi(ctx, session, git, open);
   return 0;
@@ -2825,6 +2851,7 @@ async function handleWorktreeReviewRequest(
     : null;
   const payload = current ?? fallbackPayload;
   const stale = !current && !!payload;
+  const threads = payload ? buildWorktreeReviewThreads(payload) : [];
   return Response.json({
     worktreeHash,
     state: review?.state ?? "none",
@@ -2832,8 +2859,10 @@ async function handleWorktreeReviewRequest(
     appliedHash: current ? worktreeHash : (fallback?.worktreeHash ?? null),
     draftPath: review?.draftPath ?? null,
     burden: payload ? worktreeBurden(payload) : "0 claims",
+    summary: buildReviewSummary(session, git, threads),
+    stats: buildReviewStats(summarizeChangedFiles(worktree.diff), threads),
     generatedAt: Date.now(),
-    threads: payload ? buildWorktreeReviewThreads(payload) : [],
+    threads,
   });
 }
 
@@ -2985,13 +3014,120 @@ function buildReviewData(db: Database, session: SessionRow, git: GitState) {
       claims: getClaimsForThread(db, session.id, thread.id),
     }))
     .sort(compareThreadsByImportance);
+  const latestRevision = getLastAppliedRevision(db, session.id);
+  const latestPacket = latestRevision?.packetJson
+    ? parseStoredPacket(latestRevision)
+    : null;
   return {
     session,
     git,
     burden: reviewBurden(db, session.id),
+    summary: buildReviewSummary(session, git, threads),
+    stats: buildReviewStats(latestPacket?.changedFiles ?? [], threads),
     generatedAt: Date.now(),
     threads,
   };
+}
+
+function buildReviewSummary(
+  session: Pick<SessionRow, "goal" | "agentSummary">,
+  git: Pick<GitState, "branch">,
+  threads: Array<{ title: string }>,
+): ReviewSummary {
+  const goal = session.goal?.trim();
+  if (goal) return { text: goal, source: "goal" };
+
+  const agentSummary = session.agentSummary?.trim();
+  if (agentSummary) return { text: agentSummary, source: "agent" };
+
+  const threadSummary = truncateSummary(
+    threads
+      .map((thread) => thread.title.trim())
+      .filter(Boolean)
+      .join("; "),
+  );
+  if (threadSummary) return { text: threadSummary, source: "threads" };
+
+  return { text: git.branch, source: "branch" };
+}
+
+function truncateSummary(text: string) {
+  if (text.length <= 240) return text;
+  return `${text.slice(0, 237)}...`;
+}
+
+function buildReviewStats(
+  changedFiles: Array<Pick<ChangedFile, "path" | "additions" | "deletions">>,
+  threads: Array<{
+    claims: Array<{
+      agentStatus?: string;
+      importance: ClaimImportance;
+      evidences?: Array<Pick<AgentEvidence, "filePath">>;
+    }>;
+  }>,
+): ReviewStats {
+  const importanceByPath = new Map<string, ClaimImportance>();
+
+  for (const thread of threads) {
+    for (const claim of thread.claims) {
+      if (
+        claim.agentStatus === "invalidated" ||
+        claim.agentStatus === "superseded"
+      ) {
+        continue;
+      }
+      for (const evidence of claim.evidences ?? []) {
+        const path = normalizeReviewPath(evidence.filePath);
+        if (!path) continue;
+        const previous = importanceByPath.get(path);
+        if (
+          !previous ||
+          CLAIM_IMPORTANCE_RANK[claim.importance] <
+            CLAIM_IMPORTANCE_RANK[previous]
+        ) {
+          importanceByPath.set(path, claim.importance);
+        }
+      }
+    }
+  }
+
+  const breakdown: ReviewStats["breakdown"] = {
+    critical: 0,
+    important: 0,
+    minor: 0,
+    noise: { lines: 0, files: 0 },
+    uncategorized: { lines: 0, files: 0 },
+  };
+
+  for (const file of changedFiles) {
+    const lines = file.additions + file.deletions;
+    const importance = importanceByPath.get(normalizeReviewPath(file.path));
+    switch (importance) {
+      case "critical":
+        breakdown.critical += lines;
+        break;
+      case "important":
+        breakdown.important += lines;
+        break;
+      case "minor":
+        breakdown.minor += lines;
+        break;
+      case "noise":
+        breakdown.noise.lines += lines;
+        breakdown.noise.files += 1;
+        break;
+      default:
+        breakdown.uncategorized.lines += lines;
+        breakdown.uncategorized.files += 1;
+        break;
+    }
+  }
+
+  return { breakdown };
+}
+
+function normalizeReviewPath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
 function getClaimsForThread(
@@ -3101,6 +3237,7 @@ function migrate(db: Database) {
       repoRoot text not null,
       projectKey text not null,
       goal text,
+      agentSummary text,
       baseRef text not null,
       baseCommit text not null,
       branch text not null,
@@ -3196,6 +3333,8 @@ function migrate(db: Database) {
       unique(sessionId, worktreeHash)
     );
   `);
+  // Incremental migrations for columns added after initial schema
+  try { db.exec("alter table sessions add column agentSummary text"); } catch { /* already exists */ }
 }
 
 function getSession(db: Database, repoRoot: string, branch: string) {
