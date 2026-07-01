@@ -335,6 +335,41 @@ test("blocked and superseded requirements reject edits atomically", () => {
   );
 });
 
+test("human status edits do not append claim versions", () => {
+  const withClaim = addClaim(emptyState());
+  const accepted = reduceClaimEdit(
+    withClaim,
+    { actor: "human", claimId: "claim_a", humanStatus: "accepted" },
+    context(LATER),
+  );
+
+  expect(accepted.ok).toBe(true);
+  if (!accepted.ok) return;
+  expect(accepted.events[0]?.type).toBe("claim_status_changed");
+  expect(accepted.claimRevisions).toEqual([]);
+  expect(accepted.state.claimHistory.map((revision) => revision.version)).toEqual([
+    1,
+  ]);
+  expect(accepted.state.claims[0]).toMatchObject({
+    humanStatus: "accepted",
+    updatedAt: LATER,
+  });
+
+  const unaccepted = reduceClaimEdit(
+    accepted.state,
+    { actor: "human", claimId: "claim_a", humanStatus: "unreviewed" },
+    context(LATER),
+  );
+
+  expect(unaccepted.ok).toBe(true);
+  if (!unaccepted.ok) return;
+  expect(unaccepted.claimRevisions).toEqual([]);
+  expect(unaccepted.state.claimHistory.map((revision) => revision.version)).toEqual([
+    1,
+  ]);
+  expect(unaccepted.state.claims[0]?.humanStatus).toBe("unreviewed");
+});
+
 test("review.finalize requires coverage and fresh target", () => {
   const withClaim = addClaim(emptyState());
   const pending = reduceReviewFinalize(

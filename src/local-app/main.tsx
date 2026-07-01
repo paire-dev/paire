@@ -809,12 +809,6 @@ function ReviewScreen() {
         </div>
       </header>
 
-      <ReviewProgressSummary
-        events={data.events}
-        files={data.files}
-        progress={data.fileProgress}
-      />
-
       {isDesktopLayout ? (
         <ResizableReviewLayout
           codePanel={
@@ -1182,69 +1176,6 @@ function ReviewScrollPanel({
         {content}
       </div>
     </div>
-  );
-}
-
-function ReviewProgressSummary({
-  events,
-  files,
-  progress,
-}: {
-  events: ReviewEvent[];
-  files: ReviewFileState[];
-  progress: ReviewFileProgress;
-}) {
-  const recentEvents = events.slice(-4).reverse();
-  return (
-    <section className="mb-4 grid shrink-0 gap-3 px-2 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.8fr)]">
-      <div className="min-w-0 rounded-md border bg-background px-3 py-2">
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <Badge variant="secondary">
-            {progress.covered + progress.acknowledged}/{progress.total} files
-          </Badge>
-          <Badge variant={progress.pending === 0 ? "default" : "outline"}>
-            {progress.pending} pending
-          </Badge>
-          <span className="text-muted-foreground">
-            {progress.covered} covered, {progress.acknowledged} acknowledged
-          </span>
-        </div>
-        {progress.pendingFiles.length > 0 ? (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {progress.pendingFiles.slice(0, 8).map((path) => (
-              <Badge key={path} variant="outline" className="font-mono">
-                {path}
-              </Badge>
-            ))}
-            {progress.pendingFiles.length > 8 ? (
-              <Badge variant="outline">
-                +{progress.pendingFiles.length - 8} more
-              </Badge>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-      <div className="min-w-0 rounded-md border bg-background px-3 py-2">
-        {recentEvents.length > 0 ? (
-          <div className="grid gap-1.5 text-sm">
-            {recentEvents.map((event) => (
-              <div key={event.id} className="flex min-w-0 items-center gap-2">
-                <Badge variant="outline" className="shrink-0">
-                  {statusLabel(event.actor)}
-                </Badge>
-                <span className="min-w-0 truncate text-muted-foreground">
-                  {event.summary}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <span className="text-sm text-muted-foreground">
-            {files.length === 0 ? "No changed files." : "No reflected activity yet."}
-          </span>
-        )}
-      </div>
-    </section>
   );
 }
 

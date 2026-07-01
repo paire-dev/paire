@@ -596,6 +596,10 @@ export function reduceClaimEdit(
   if (issues.length > 0) return failure(state, issues);
 
   const snapshotChanged = !claimsEqual(existing, candidate);
+  const revisionWorthySnapshotChanged = !claimsEqualIgnoringHumanStatus(
+    existing,
+    candidate,
+  );
   const statusChanged = oldStatusFields !== claimStatusSignature(candidate);
   if (snapshotChanged) candidate.updatedAt = now;
 
@@ -618,7 +622,7 @@ export function reduceClaimEdit(
       : `Edited claim "${claimId}".`,
     createdAt: now,
   }, options);
-  const revisions = snapshotChanged
+  const revisions = revisionWorthySnapshotChanged
     ? [appendClaimRevision(next, candidate, event.id, actor, now, options)]
     : [];
   next.updatedAt = now;
@@ -1864,6 +1868,15 @@ function claimStatusSignature(claim: ReviewClaimState) {
 
 function claimsEqual(left: ReviewClaimState, right: ReviewClaimState) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function claimsEqualIgnoringHumanStatus(
+  left: ReviewClaimState,
+  right: ReviewClaimState,
+) {
+  const { humanStatus: _leftHumanStatus, ...leftComparable } = left;
+  const { humanStatus: _rightHumanStatus, ...rightComparable } = right;
+  return JSON.stringify(leftComparable) === JSON.stringify(rightComparable);
 }
 
 function isSafeRepositoryPath(path: string) {
