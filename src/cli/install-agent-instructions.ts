@@ -19,7 +19,7 @@ export const PAIRE_AGENT_INSTRUCTIONS = [
   "- Update progress with `paire claim edit --claim <id> --work-status <pending|in_progress|complete|blocked>`.",
   "- Acknowledge generated/mechanical files with `paire file acknowledge --path <path> --reason <text>`.",
   "- Finish with `paire review finalize`; fix any `PAIRE_COMMAND_REJECTED` issues and rerun the same command.",
-  "- During Paire review, skip tests, typecheck, builds, and extra diffs unless Paire prints them.",
+  "- Paire commands only update review state; run tests, typecheck, or builds when useful for validating the code change.",
   PAIRE_AGENT_MARKER_END,
 ].join("\n");
 

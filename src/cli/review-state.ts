@@ -99,6 +99,7 @@ export type ReviewEvent = {
   id: string;
   type:
     | "claim_added"
+    | "claims_carried_forward"
     | "claim_edited"
     | "claim_status_changed"
     | "evidence_added"

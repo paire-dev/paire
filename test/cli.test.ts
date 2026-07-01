@@ -148,6 +148,27 @@ test("committed review uses claim commands and finalizes canonical state", () =>
     reviewId: state.reviewId,
     target: { mode: "committed" },
   });
+
+  writeFileSync(
+    join(fixture.repo, "src/app.ts"),
+    [
+      "export function createProject(user: { id: string } | null, name: string) {",
+      "  if (!user) {",
+      "    throw new Error('Unauthorized');",
+      "  }",
+      "  return { ownerId: user.id, name: name.trim() };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  commitAll(fixture.repo, "trim project names");
+  expect(runPaire(fixture, ["review"]).exitCode).toBe(0);
+  const nextState = latestReviewState(fixture);
+  expect(nextState.sourceReviewId).toBe(state.reviewId);
+  expect(nextState.claims.map((claim: { id: string }) => claim.id)).toEqual([
+    "claim_auth",
+  ]);
+  expect(nextState.events[0]?.type).toBe("claims_carried_forward");
 });
 
 test("coverage can be completed with file acknowledgement and invalid commands are atomic", () => {
@@ -335,8 +356,10 @@ test("old apply commands are rejected and install instructions are command-based
   const agents = readFileSync(join(fixture.repo, "AGENTS.md"), "utf8");
   expect(agents).toContain("paire claim add");
   expect(agents).toContain("paire review finalize");
+  expect(agents).toContain("Paire commands only update review state");
   expect(agents).not.toContain("ACTION_REQUIRED");
   expect(agents).not.toContain("--apply");
+  expect(agents).not.toContain("skip tests");
 });
 
 function createFixtureRepo() {

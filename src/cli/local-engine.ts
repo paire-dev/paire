@@ -1025,7 +1025,19 @@ async function getOrCreateReviewForTarget(
   if (opts.sourceState) carryForwardClaims(state, opts.sourceState);
   const context = await buildReviewContext(ctx, session, state, diff, skipped);
   recomputeStateProgress(state);
-  persistNewReviewState(ctx.db, session, state, context, session.repoRoot);
+  const inserted = persistNewReviewState(
+    ctx.db,
+    session,
+    state,
+    context,
+    session.repoRoot,
+  );
+  if (!inserted) {
+    const row = getReviewStateRowByTarget(ctx.db, session.repoRoot, target);
+    if (!row) throw new Error(`Failed to load existing review ${reviewId}.`);
+    if (opts.select) selectReview(ctx.db, session.id, row.id);
+    return resolvedFromRow(row, session, git);
+  }
   if (opts.select) selectReview(ctx.db, session.id, state.reviewId);
   const row = getReviewStateRow(ctx.db, state.reviewId);
   if (!row) throw new Error(`Failed to persist review ${state.reviewId}.`);
@@ -1176,7 +1188,7 @@ function carryForwardClaims(state: ReviewState, source: ReviewState) {
     }));
   state.events.push({
     id: `evt_${crypto.randomUUID()}`,
-    type: "claim_edited",
+    type: "claims_carried_forward",
     actor: "system",
     summary: `Carried forward ${activeClaims.length} active claim${activeClaims.length === 1 ? "" : "s"} from ${source.reviewId}.`,
     createdAt: state.createdAt,
@@ -1224,14 +1236,15 @@ function persistNewReviewState(
   state: ReviewState,
   context: ReviewContext,
   repoRoot: string,
-) {
+): boolean {
   const timestamp = Date.now();
-  db.prepare(
+  const result = db.prepare(
     `insert into review_states (
       id, sessionId, repoRoot, repoKey, mode, baseCommit, currentCommit,
       worktreeHash, branchLabelsJson, sourceReviewId, status, stateJson,
       contextJson, createdAt, updatedAt, finalizedAt
-    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     on conflict(id) do nothing`,
   ).run(
     state.reviewId,
     state.sessionId,
@@ -1250,6 +1263,7 @@ function persistNewReviewState(
     timestamp,
     state.finalizedAt ? timestamp : null,
   );
+  return result.changes > 0;
 }
 
 function persistReviewState(

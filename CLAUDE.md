@@ -120,5 +120,5 @@ Run `paire it`, then update review state only with Paire commands.
 - Update progress with `paire claim edit --claim <id> --work-status <pending|in_progress|complete|blocked>`.
 - Acknowledge generated/mechanical files with `paire file acknowledge --path <path> --reason <text>`.
 - Finish with `paire review finalize`; fix any `PAIRE_COMMAND_REJECTED` issues and rerun the same command.
-- During Paire review, skip tests, typecheck, builds, and extra diffs unless Paire prints them.
+- Paire commands only update review state; run tests, typecheck, or builds when useful for validating the code change.
 <!-- /paire -->
