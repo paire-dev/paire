@@ -12,13 +12,7 @@ const cliPath = resolve(import.meta.dirname, "../src/cli.ts");
 run(["git", "init", "-b", "main", repo], root);
 run(["git", "config", "user.email", "smoke@example.com"], repo);
 run(["git", "config", "user.name", "Paire Smoke"], repo);
-await write(join(repo, "src/app.ts"), [
-  "export function createProject(name: string) {",
-  "  return { name };",
-  "}",
-  "",
-]);
-await Bun.write(join(repo, "package-lock.json"), '{"lockfileVersion":3}\n');
+await write(join(repo, "src/app.ts"), ["export const value = 1;", ""]);
 run(["git", "add", "."], repo);
 run(["git", "commit", "-m", "initial"], repo);
 
@@ -44,76 +38,85 @@ await write(join(repo, "src/workspace.ts"), [
 commitAll("add auth and workspace validation");
 
 const firstReview = runPaire(["review"]);
-assert(firstReview.includes("ACTION_REQUIRED"));
+assert(firstReview.includes("Review context ready."));
+assert(!firstReview.includes("ACTION_REQUIRED"));
 assert(!existsSync(browserCapture));
-const firstPacketPath = extractPacketPath(firstReview);
-const firstPacket = await Bun.file(firstPacketPath).json();
-assert(
-  firstPacket.changedFiles.some(
-    (file: { path: string }) => file.path === "src/workspace.ts",
-  ),
-);
-const firstResultPath = join(root, "review-draft-mutated.json");
-const badFirstResult = agentResult(firstPacket, "new");
-const firstBadThread = badFirstResult.threads[0];
-const firstBadClaim = firstBadThread?.claims[0];
-if (!firstBadThread || !firstBadClaim) {
-  throw new Error("Smoke fixture did not produce a claim to mutate.");
-}
-firstBadThread.claims = [firstBadClaim];
-await Bun.write(
-  firstResultPath,
-  JSON.stringify(badFirstResult, null, 2),
-);
-const rejectedApply = runPaireResult(["review", "--apply", firstResultPath]);
-assert(rejectedApply.exitCode !== 0);
-assert(rejectedApply.stderr.includes("PAIRE_APPLY_REJECTED"));
-assert(rejectedApply.stderr.includes("file_not_covered"));
 
-await Bun.write(
-  firstResultPath,
-  JSON.stringify(agentResult(firstPacket, "new"), null, 2),
-);
-runPaire(["review", "--apply", firstResultPath]);
-
-await Bun.write(browserCapture, "");
-const reopen = runPaire(["review"]);
-assert(!reopen.includes("ACTION_REQUIRED"));
-assert((await Bun.file(browserCapture).text()).includes("http://127.0.0.1:"));
-
-await write(join(repo, "src/workspace.ts"), [
-  "export function validateWorkspace(input: { name?: string }) {",
-  "  if (!input.name) {",
-  "    throw new Error('Missing workspace name');",
-  "  }",
-  "  return input.name.trim();",
-  "}",
-  "",
-  "export const workspaceValidationVersion = 2;",
-  "",
+const badClaim = runPaireResult([
+  "claim",
+  "add",
+  "--claim-id",
+  "claim_bad",
+  "--thread-id",
+  "thread_smoke",
+  "--title",
+  "Bad evidence",
+  "--importance",
+  "minor",
+  "--before",
+  "Before.",
+  "--after",
+  "After.",
+  "--evidence",
+  "src/missing.ts:1-1:Reference missing file",
 ]);
-commitAll("add workspace validation version");
-await Bun.write(browserCapture, "");
-const secondReview = runPaire(["review"]);
-assert(secondReview.includes("ACTION_REQUIRED"));
-assert((await Bun.file(browserCapture).text()) === "");
-const secondPacketPath = extractPacketPath(secondReview);
-const secondPacket = await Bun.file(secondPacketPath).json();
-assert(
-  secondPacket.changedFiles.some(
-    (file: { path: string }) => file.path === "src/workspace.ts",
-  ),
-);
-const secondResultPath = join(root, "review-draft-mutated-2.json");
-await Bun.write(
-  secondResultPath,
-  JSON.stringify(agentResult(secondPacket, "amended"), null, 2),
-);
-runPaire(["review", "--apply", secondResultPath]);
+assert(badClaim.exitCode !== 0);
+assert(badClaim.stderr.includes("PAIRE_COMMAND_REJECTED"));
+assert(badClaim.stderr.includes("UNKNOWN_FILE"));
+
+runPaire([
+  "claim",
+  "add",
+  "--claim-id",
+  "claim_smoke_auth_required",
+  "--thread-id",
+  "thread_smoke_auth_workspace",
+  "--thread-title",
+  "Smoke auth and workspace validation",
+  "--title",
+  "Reject missing users before create",
+  "--importance",
+  "important",
+  "--before",
+  "Project creation accepted any user input.",
+  "--after",
+  "Project creation rejects missing users before returning data.",
+  "--evidence",
+  "src/app.ts:1-6:Throw when createProject receives a null user",
+]);
+const rejectedFinalize = runPaireResult(["review", "finalize"]);
+assert(rejectedFinalize.exitCode !== 0);
+assert(rejectedFinalize.stderr.includes("FILE_NOT_COVERED"));
+
+runPaire([
+  "claim",
+  "add",
+  "--claim-id",
+  "claim_smoke_workspace_required",
+  "--thread-id",
+  "thread_smoke_auth_workspace",
+  "--title",
+  "Reject workspace inputs without a name",
+  "--importance",
+  "minor",
+  "--before",
+  "Workspace validation accepted missing names.",
+  "--after",
+  "Workspace validation rejects inputs without a workspace name.",
+  "--evidence",
+  "src/workspace.ts:1-6:Reject workspace inputs without a name",
+]);
+runPaire(["claim", "edit", "--claim", "claim_smoke_auth_required", "--work-status", "complete"]);
+runPaire(["review", "finalize"]);
 
 await Bun.write(browserCapture, "");
-runPaire(["review"]);
+runPaire(["server", "start", "--no-open"]);
+runPaire(["review", "--open"]);
 assert((await Bun.file(browserCapture).text()).includes("http://127.0.0.1:"));
+
+const list = runPaire(["review", "list", "--json"]);
+assert(JSON.parse(list).length >= 1);
+runPaire(["server", "stop", "--all"]);
 
 console.log(`Sandbox: ${root}`);
 console.log(`Repo: ${repo}`);
@@ -122,7 +125,7 @@ console.log(`Latest HTML capture: ${htmlCapture}`);
 console.log("");
 console.log("Open the synced review manually with:");
 console.log(
-  `cd ${shellQuote(repo)} && PAIRE_HOME=${shellQuote(home)} bun ${shellQuote(cliPath)} review`,
+  `cd ${shellQuote(repo)} && PAIRE_HOME=${shellQuote(home)} bun ${shellQuote(cliPath)} review --open`,
 );
 
 function runPaire(args: string[]) {
@@ -143,12 +146,13 @@ function runPaireResult(args: string[]) {
       PAIRE_HOME: home,
       PAIRE_BROWSER_CAPTURE: browserCapture,
       PAIRE_BROWSER_HTML_CAPTURE: htmlCapture,
+      PAIRE_NO_UPGRADE_CHECK: "1",
     },
     stdout: "pipe",
     stderr: "pipe",
   });
   return {
-    exitCode: result.exitCode,
+    exitCode: result.exitCode ?? 1,
     stdout: text(result.stdout),
     stderr: text(result.stderr),
   };
@@ -171,124 +175,12 @@ async function write(path: string, lines: string[]) {
   await Bun.write(path, lines.join("\n"));
 }
 
+function assert(value: unknown): asserts value {
+  if (!value) throw new Error("Smoke assertion failed.");
+}
+
 function text(value: Uint8Array) {
   return new TextDecoder().decode(value);
-}
-
-function extractPacketPath(stdout: string) {
-  const draftPath = extractDraftPath(stdout);
-  return join(dirname(draftPath), "current-packet.json");
-}
-
-function extractDraftPath(stdout: string) {
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (
-      trimmed.startsWith("/") &&
-      trimmed.endsWith("review-draft.json") &&
-      !trimmed.includes("--apply")
-    ) {
-      return trimmed;
-    }
-  }
-  throw new Error(`Draft path missing from output:\n${stdout}`);
-}
-
-function agentResult(
-  packet: {
-    packetId: string;
-    sessionId: string;
-    revisionId: string;
-    currentFingerprint: string;
-    changedFiles: Array<{ path: string; additions: number; deletions: number }>;
-  },
-  workspaceStatus: "new" | "amended",
-) {
-  return {
-    packetId: packet.packetId,
-    sessionId: packet.sessionId,
-    revisionId: packet.revisionId,
-    gitFingerprint: packet.currentFingerprint,
-    files: packet.changedFiles.map((file) => ({
-      path: file.path,
-      additions: file.additions,
-      deletions: file.deletions,
-      disposition: "pending",
-    })),
-    threads: [
-      {
-        id: "thread_smoke_auth_workspace",
-        title: "Smoke auth and workspace validation",
-        summary:
-          workspaceStatus === "new"
-            ? "The smoke change adds auth and workspace validation behavior."
-            : "The smoke change updates the workspace validation claim.",
-        claims: [
-          {
-            id: "claim_smoke_auth_required",
-            threadId: "thread_smoke_auth_workspace",
-            title: "Reject missing users before create",
-            description:
-              "Project creation rejects missing users before returning project data.",
-            before: "Project creation accepted any user input.",
-            after:
-              "Project creation rejects missing users before returning data.",
-            agentStatus: workspaceStatus === "new" ? "new" : "unchanged",
-            importance: "minor",
-            humanStatus: "unreviewed",
-            evidences: [
-              {
-                filePath: "src/app.ts",
-                startLine: 1,
-                endLine: 6,
-                symbol: "createProject",
-                change: "Throw when `createProject` receives a null user.",
-              },
-            ],
-          },
-          {
-            id: "claim_smoke_workspace_required",
-            threadId: "thread_smoke_auth_workspace",
-            title:
-              workspaceStatus === "new"
-                ? "Reject workspace inputs without a name"
-                : "Expose workspace validation version marker",
-            description:
-              workspaceStatus === "new"
-                ? "Workspace validation rejects inputs without a workspace name."
-                : "Workspace validation rejects missing names and exposes a version marker.",
-            before:
-              workspaceStatus === "new"
-                ? "Workspace inputs were accepted without a name check."
-                : "Workspace validation rejected missing names only.",
-            after:
-              workspaceStatus === "new"
-                ? "Workspace validation rejects inputs without a workspace name."
-                : "Workspace validation rejects missing names and exposes a version marker.",
-            agentStatus: workspaceStatus,
-            importance: "minor",
-            humanStatus: "unreviewed",
-            evidences: [
-              {
-                filePath: "src/workspace.ts",
-                startLine: 1,
-                endLine: workspaceStatus === "new" ? 6 : 8,
-                symbol: "validateWorkspace",
-                change:
-                  workspaceStatus === "new"
-                    ? "Reject workspace inputs when the workspace name is missing."
-                    : "Expose `workspaceValidationVersion` after validating the workspace name.",
-              },
-            ],
-          },
-        ],
-      },
-    ],
-  };
-}
-
-function assert(value: unknown) {
-  if (!value) throw new Error("Smoke assertion failed.");
 }
 
 function shellQuote(value: string) {

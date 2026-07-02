@@ -81,14 +81,12 @@ type DraftClaim = {
 };
 
 export const REVIEW_DRAFT_INSTRUCTIONS = [
-  "Edit this file in place, then run: paire review --apply <this file's path>.",
-  "Group claims into threads by review area; put the area a reviewer must understand first as the first thread.",
-  "importance: critical = correctness/security/data-loss; important = meaningful behavior change; minor = polish/tests/config; noise = mechanical churn (group noise in its own thread).",
-  "Leave prior claims that are still accurate exactly as listed (agentStatus \"unchanged\"); never delete a prior claim — mark it invalidated or superseded instead.",
-  "Every file under \"files\" must end up referenced by at least one evidence filePath, or have disposition \"acknowledged\" with a reason. Only acknowledge mechanical/generated churn.",
-  "Evidence startLine/endLine are 1-based line numbers in the post-change file. Read context.annotatedDiffPath and copy them from the N| prefixes; -N| marks a removed line by its old number, so never copy a -N. Double-check with nl -ba on the file (in context.safeInspectionCommands). Prefer several narrow spans (context.touchedSnippets.addedRanges shows the contiguous groups).",
-  "claim.before/after: one-sentence behavior summaries (null for pure additions/removals); never mention file paths or line numbers. evidence.change: required verb-first imperative one-liner.",
-  "Titles short and verb-first; description only adds detail beyond the title; Markdown allowed.",
+  "This legacy draft shape is read-only in the command workflow.",
+  "Inspect current context with: paire review context.",
+  "Add claims with: paire claim add --title ... --importance ... --thread-id ... --before ... --after ... --evidence path:start-end:change.",
+  "Update claims with: paire claim edit --claim <claim-id>.",
+  "Acknowledge files with: paire file acknowledge --path <path> --reason <text>.",
+  "Finish with: paire review finalize.",
 ];
 
 export function buildReviewDraft(packet: DraftPacket, activeClaims: AgentClaim[]) {
@@ -183,15 +181,12 @@ export type WorktreeReviewDraft = {
 };
 
 export const WORKTREE_REVIEW_DRAFT_INSTRUCTIONS = [
-  "This is a WORKTREE review of uncommitted changes. Edit this file in place, then run: paire worktree --apply <this file's path>.",
-  "Worktree claims are stored separately from committed review claims and are keyed to the current worktree diff (worktreeHash). If you change the working tree, regenerate this draft.",
-  "Group claims into threads by review area; put the area a reviewer must understand first as the first thread.",
-  "importance: critical = correctness/security/data-loss; important = meaningful behavior change; minor = polish/tests/config; noise = mechanical churn (group noise in its own thread).",
-  "Leave prior claims that are still accurate exactly as listed (agentStatus \"unchanged\"); never delete a prior claim — mark it invalidated or superseded instead.",
-  "Every file under \"files\" must end up referenced by at least one evidence filePath, or have disposition \"acknowledged\" with a reason. Only acknowledge mechanical/generated churn.",
-  "Evidence startLine/endLine are 1-based line numbers in the working-tree file. Copy them from the N| prefixes in context.touchedSnippets.text; prefer several narrow spans (context.touchedSnippets.addedRanges shows the contiguous groups).",
-  "claim.before/after: one-sentence behavior summaries (null for pure additions/removals); never mention file paths or line numbers. evidence.change: required verb-first imperative one-liner.",
-  "Titles short and verb-first; description only adds detail beyond the title; Markdown allowed.",
+  "This legacy worktree draft shape is read-only in the command workflow.",
+  "Inspect current context with: paire review context.",
+  "Add claims with: paire claim add --title ... --importance ... --thread-id ... --before ... --after ... --evidence path:start-end:change.",
+  "Update claims with: paire claim edit --claim <claim-id>.",
+  "Acknowledge files with: paire file acknowledge --path <path> --reason <text>.",
+  "Finish with: paire review finalize.",
 ];
 
 export function buildWorktreeReviewDraft(

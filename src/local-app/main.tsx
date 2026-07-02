@@ -111,6 +111,7 @@ type ClaimImportance = "critical" | "important" | "minor" | "noise";
 type FilterValue = "all" | string;
 
 type Evidence = {
+  id: string;
   claimId: string;
   filePath: string;
   startLine: number;
@@ -122,15 +123,19 @@ type Evidence = {
 
 type Claim = {
   id: string;
+  threadId: string;
   title: string;
   description?: string;
   before?: string | null;
   after?: string | null;
-  agentStatus: string;
+  lifecycleStatus: "active" | "invalidated" | "superseded";
+  workStatus: "pending" | "in_progress" | "complete" | "blocked";
   importance: ClaimImportance;
   humanStatus: HumanStatus;
-  updatedAt?: number;
+  assignee?: string;
+  updatedAt?: string;
   evidences: Evidence[];
+  history?: ClaimRevision[];
 };
 
 type Thread = {
@@ -140,12 +145,62 @@ type Thread = {
   claims: Claim[];
 };
 
+type ThreadState = {
+  id: string;
+  title: string;
+  summary?: string;
+  order: number;
+};
+
+type ReviewFileState = {
+  path: string;
+  additions: number;
+  deletions: number;
+  summarized: boolean;
+  coverageStatus: "pending" | "covered" | "acknowledged";
+  acknowledgementReason?: string;
+};
+
+type ReviewFileProgress = {
+  total: number;
+  covered: number;
+  acknowledged: number;
+  pending: number;
+  pendingFiles: string[];
+};
+
+type ClaimRevision = {
+  id: string;
+  claimId: string;
+  version: number;
+  snapshot: Omit<Claim, "history">;
+  eventId: string;
+  actor: string;
+  createdAt: string;
+};
+
+type ReviewEvent = {
+  id: string;
+  type: string;
+  actor: string;
+  claimId?: string;
+  filePath?: string;
+  summary: string;
+  createdAt: string;
+};
+
 type ReviewData = {
   session: { goal: string | null; projectKey: string };
   git: { branch: string; head: string; clean: boolean; status: string };
   burden: string;
   generatedAt: number;
-  threads: Thread[];
+  target: { mode: "committed" | "uncommitted" };
+  files: ReviewFileState[];
+  fileProgress: ReviewFileProgress;
+  threads: ThreadState[];
+  claims: Claim[];
+  claimHistory: ClaimRevision[];
+  events: ReviewEvent[];
 };
 
 type WorktreeDiffData = {
@@ -153,17 +208,6 @@ type WorktreeDiffData = {
   files: Array<{ path: string; additions: number; deletions: number }>;
   skipped: string[];
   worktreeHash?: string;
-};
-
-type WorktreeReviewData = {
-  worktreeHash: string;
-  state: "none" | "pending_agent" | "applied";
-  stale: boolean;
-  appliedHash: string | null;
-  draftPath: string | null;
-  burden: string;
-  generatedAt: number;
-  threads: Thread[];
 };
 
 type ClaimApi = {
@@ -273,6 +317,7 @@ function shouldRetryReviewQuery(failureCount: number, error: unknown) {
 
 // Returns a HTML DOM node id-friendly string for an Evidence.
 const getEvidenceId = (evidence: Evidence) => {
+  if (evidence.id) return `evid-${evidence.id}`.replace(/[^a-zA-Z0-9_\-:.]/g, "");
   // Sanitize filePath for id: replace slashes and backslashes, remove weird chars
   // id: claim-<claimId>_<fileName>-<start>-<end>
   const claimPart = `claim-${evidence.claimId}`;
@@ -288,6 +333,40 @@ const getEvidenceId = (evidence: Evidence) => {
     "",
   );
 };
+
+function buildReviewThreads(data: ReviewData | undefined): Thread[] {
+  if (!data) return [];
+  const historyByClaim = new Map<string, ClaimRevision[]>();
+  for (const revision of data.claimHistory ?? []) {
+    historyByClaim.set(revision.claimId, [
+      ...(historyByClaim.get(revision.claimId) ?? []),
+      revision,
+    ]);
+  }
+  const claimsByThread = new Map<string, Claim[]>();
+  for (const claim of data.claims ?? []) {
+    if (claim.lifecycleStatus !== "active") continue;
+    const nextClaim = {
+      ...claim,
+      history: historyByClaim.get(claim.id) ?? [],
+    };
+    claimsByThread.set(claim.threadId, [
+      ...(claimsByThread.get(claim.threadId) ?? []),
+      nextClaim,
+    ]);
+  }
+  return [...data.threads]
+    .sort((left, right) => left.order - right.order)
+    .map((thread) => ({
+      id: thread.id,
+      title: thread.title,
+      summary: thread.summary ?? "",
+      claims: (claimsByThread.get(thread.id) ?? []).sort(
+        (left, right) => claimImportanceRank(left.importance) - claimImportanceRank(right.importance),
+      ),
+    }))
+    .filter((thread) => thread.claims.length > 0);
+}
 
 async function fetchReview() {
   const response = await fetch("/api/review", {
@@ -328,17 +407,6 @@ async function fetchWorktreeDiff() {
   };
 }
 
-async function fetchWorktreeReview() {
-  const response = await fetch("/api/worktree/review", {
-    cache: "no-store",
-    headers: reviewApiHeaders(),
-  });
-  if (!response.ok) {
-    throw new ReviewApiError("Failed to load worktree review.", response.status);
-  }
-  return (await response.json()) as WorktreeReviewData;
-}
-
 async function postClaimHumanStatus(claimId: string, humanStatus: HumanStatus) {
   const response = await fetch(
     `/api/claims/${encodeURIComponent(claimId)}/human-status`,
@@ -352,29 +420,9 @@ async function postClaimHumanStatus(claimId: string, humanStatus: HumanStatus) {
   return humanStatus;
 }
 
-async function postWorktreeClaimHumanStatus(
-  claimId: string,
-  humanStatus: HumanStatus,
-) {
-  const response = await fetch(
-    `/api/worktree/claims/${encodeURIComponent(claimId)}/human-status`,
-    {
-      method: "POST",
-      headers: reviewApiHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ humanStatus }),
-    },
-  );
-  if (!response.ok) throw new Error("Failed to update claim status.");
-  return humanStatus;
-}
-
 const committedClaimApi: ClaimApi = {
   post: postClaimHumanStatus,
   queryKey: ["review"],
-};
-const worktreeClaimApi: ClaimApi = {
-  post: postWorktreeClaimHumanStatus,
-  queryKey: ["worktree-review"],
 };
 const ClaimApiContext = React.createContext<ClaimApi>(committedClaimApi);
 function useClaimApi() {
@@ -473,7 +521,7 @@ function ReviewScreen() {
   const { data: rawDiff = "", isError: isDiffError } = useQuery({
     queryKey: ["review-diff"],
     queryFn: fetchReviewDiff,
-    enabled: data?.git.clean === true,
+    enabled: !!data,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
     retry: shouldRetryReviewQuery,
@@ -489,34 +537,18 @@ function ReviewScreen() {
     refetchOnWindowFocus: "always",
     retry: shouldRetryReviewQuery,
   });
-  const {
-    data: worktreeReview = {
-      worktreeHash: "",
-      state: "none" as const,
-      stale: false,
-      appliedHash: null,
-      draftPath: null,
-      burden: "0 claims",
-      generatedAt: 0,
-      threads: [] as Thread[],
-    },
-  } = useQuery({
-    queryKey: ["worktree-review"],
-    queryFn: fetchWorktreeReview,
-    enabled: data?.git.clean === false,
-    refetchOnMount: "always",
-    refetchOnWindowFocus: "always",
-    retry: shouldRetryReviewQuery,
-  });
 
   const isDirty = data?.git.clean === false;
-  const worktreeHasClaims = isDirty && worktreeReview.threads.length > 0;
+  const reviewThreads = React.useMemo(
+    () => buildReviewThreads(data),
+    [data],
+  );
+  const worktreeHasClaims = isDirty && (data?.claims.length ?? 0) > 0;
   const showClaimsLayout = !isDirty || worktreeHasClaims;
-  const claimApi = isDirty ? worktreeClaimApi : committedClaimApi;
-  const reviewThreads = isDirty ? worktreeReview.threads : (data?.threads ?? []);
-  const reviewBurden = isDirty ? worktreeReview.burden : (data?.burden ?? "");
+  const claimApi = committedClaimApi;
+  const reviewBurden = data?.burden ?? "";
 
-  const activeDiff = isDirty ? worktreeDiff.diff : rawDiff;
+  const activeDiff = rawDiff || (isDirty ? worktreeDiff.diff : "");
   const activeDiffError = isDirty ? isWorktreeDiffError : isDiffError;
   const codeItems = React.useMemo(
     () => parseCodeViewItems(activeDiff),
@@ -718,7 +750,6 @@ function ReviewScreen() {
           codeItems={codeItems}
           codeViewRef={codeViewRef}
           diffError={activeDiffError}
-          draftPath={worktreeReview.draftPath}
           gitStatus={gitStatusEntries}
           worktreeDiff={worktreeDiff}
         />
@@ -777,26 +808,6 @@ function ReviewScreen() {
           <ModeToggle />
         </div>
       </header>
-
-      {isDirty && worktreeReview.stale ? (
-        <Alert className="mb-4 shrink-0 border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100">
-          <AlertTriangle />
-          <AlertTitle>Not the latest changes</AlertTitle>
-          <AlertDescription className="text-amber-900 dark:text-amber-200">
-            <div className="flex flex-wrap items-start gap-2">
-              <p className="min-w-0 flex-1">
-                These worktree claims were applied to an earlier version of your
-                working tree. The diff has changed since. Regenerate the draft
-                and amend the claims to match the current changes.
-              </p>
-              <CopyAgentPromptButton
-                label="Copy amend prompt"
-                text={staleWorktreePrompt(worktreeReview.draftPath)}
-              />
-            </div>
-          </AlertDescription>
-        </Alert>
-      ) : null}
 
       {isDesktopLayout ? (
         <ResizableReviewLayout
@@ -1567,14 +1578,12 @@ function WorktreePreview({
   codeItems,
   codeViewRef,
   diffError,
-  draftPath,
   gitStatus,
   worktreeDiff,
 }: {
   codeItems: CodeViewItem[];
   codeViewRef: React.RefObject<CodeViewHandle<undefined> | null>;
   diffError: boolean;
-  draftPath: string | null;
   gitStatus: GitStatusEntry[];
   worktreeDiff: WorktreeDiffData;
 }) {
@@ -1605,10 +1614,10 @@ function WorktreePreview({
           </AlertTitle>
           <AlertDescription className="text-amber-900 dark:text-amber-200">
             <div className="flex flex-wrap items-start gap-2">
-              <p className="min-w-0 flex-1">
-                Previewing your working tree. Paire reviews these uncommitted
-                changes separately from committed claims. No worktree claims
-                have been applied for this diff yet.
+                <p className="min-w-0 flex-1">
+                  Previewing your working tree. Paire reviews these uncommitted
+                  changes separately from committed claims. No claims have been
+                  reflected for this diff yet.
               </p>
               <CopyAgentPromptButton
                 label="Copy review prompt"
@@ -1617,27 +1626,6 @@ function WorktreePreview({
             </div>
           </AlertDescription>
         </Alert>
-
-        {draftPath ? (
-          <Alert>
-            <Bot />
-            <AlertTitle>Worktree review in progress</AlertTitle>
-            <AlertDescription>
-              <div className="flex flex-wrap items-start gap-2">
-                <p className="min-w-0 flex-1">
-                  Paire generated a worktree review draft. Your coding agent may
-                  still be filling it in and applying it. If it has stopped, copy
-                  the apply command below and finish the review.
-                </p>
-                <CopyAgentPromptButton
-                  tone="neutral"
-                  label="Copy apply command"
-                  text={worktreeApplyPrompt(draftPath)}
-                />
-              </div>
-            </AlertDescription>
-          </Alert>
-        ) : null}
 
         <Alert>
           <Info />
@@ -1687,25 +1675,7 @@ function WorktreePreview({
 }
 
 const DIRTY_WORKTREE_AGENT_PROMPT =
-  "paire it; and follow all the instructions to review and apply the worktree review draft.";
-
-function worktreeApplyPrompt(draftPath: string) {
-  return [
-    `Fill the worktree review draft at ${draftPath} in place (group claims into threads, cover every changed file with evidence), then run:`,
-    `paire worktree --apply ${draftPath}`,
-    "Fix any PAIRE_APPLY_REJECTED issues it lists and re-run until it exits 0.",
-  ].join("\n");
-}
-
-function staleWorktreePrompt(draftPath: string | null) {
-  return [
-    "The working tree changed since the worktree review was applied. Regenerate the draft and amend the claims:",
-    "Run: paire it",
-    `Then edit the prefilled draft${draftPath ? ` at ${draftPath}` : ""} in place — it carries the prior claims as "unchanged"; update the ones the new diff changed, keep accurate ones as "unchanged", and cover every changed file.`,
-    `Finally run: paire worktree --apply ${draftPath ?? "<draft path>"}`,
-    "Fix any PAIRE_APPLY_REJECTED issues and re-run until it exits 0.",
-  ].join("\n");
-}
+  "Run `paire review context`, add claims with `paire claim add --evidence path:start-end:change`, acknowledge generated files with `paire file acknowledge`, then finish with `paire review finalize`.";
 
 function CopyAgentPromptButton({
   label = "Copy agent prompt",
@@ -1829,6 +1799,19 @@ function filterThreads(threads: Thread[], humanStatus: FilterValue) {
 
 function statusLabel(status: string) {
   return status.replaceAll("_", " ");
+}
+
+function claimImportanceRank(importance: ClaimImportance) {
+  switch (importance) {
+    case "critical":
+      return 0;
+    case "important":
+      return 1;
+    case "minor":
+      return 2;
+    case "noise":
+      return 3;
+  }
 }
 
 function claimImportanceColor(importance: ClaimImportance) {
@@ -1965,7 +1948,7 @@ function EmptyState({
   );
 }
 
-function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
+function ClaimTimeAgo({ updatedAt }: { updatedAt: number | string }) {
   const [, setTick] = React.useState(0);
 
   React.useEffect(() => {
@@ -1975,13 +1958,43 @@ function ClaimTimeAgo({ updatedAt }: { updatedAt: number }) {
     return () => window.clearInterval(interval);
   }, []);
 
+  const timestamp =
+    typeof updatedAt === "string" ? new Date(updatedAt).getTime() : updatedAt;
+
   return (
     <time
       className="whitespace-nowrap text-xs leading-none text-muted-foreground"
-      dateTime={new Date(updatedAt).toISOString()}
+      dateTime={new Date(timestamp).toISOString()}
     >
-      {formatDistanceToNow(updatedAt, { addSuffix: true })}
+      {formatDistanceToNow(timestamp, { addSuffix: true })}
     </time>
+  );
+}
+
+function ClaimVersionHistory({ history }: { history: ClaimRevision[] }) {
+  return (
+    <details className="rounded-md border bg-muted/20 px-3 py-2 text-sm">
+      <summary className="cursor-pointer text-muted-foreground">
+        {history.length} versions
+      </summary>
+      <div className="mt-2 grid gap-2">
+        {history
+          .slice()
+          .reverse()
+          .map((revision) => (
+            <div key={revision.id} className="grid gap-1 border-t pt-2 first:border-t-0 first:pt-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">v{revision.version}</Badge>
+                <Badge variant="outline">{statusLabel(revision.actor)}</Badge>
+                <ClaimTimeAgo updatedAt={revision.createdAt} />
+              </div>
+              <div className="min-w-0 text-muted-foreground">
+                <AiText source={revision.snapshot.title} inline />
+              </div>
+            </div>
+          ))}
+      </div>
+    </details>
   );
 }
 
@@ -2066,16 +2079,20 @@ function ClaimCard({
             ) : null}
             <Badge
               variant={
-                claim.agentStatus !== "unchanged" ? "default" : "secondary"
+                claim.workStatus === "complete" ? "secondary" : "default"
               }
               className={
-                claim.agentStatus !== "unchanged"
+                claim.workStatus !== "complete"
                   ? "border-yellow-200 bg-yellow-100/80 text-yellow-950"
                   : undefined
               }
             >
-              {statusLabel(claim.agentStatus)}
+              {statusLabel(claim.workStatus)}
             </Badge>
+            <Badge variant="outline">{statusLabel(claim.lifecycleStatus)}</Badge>
+            {claim.assignee ? (
+              <Badge variant="outline">{claim.assignee}</Badge>
+            ) : null}
             {!open && claim.humanStatus === "accepted" && (
               <span
                 className={cn(
@@ -2106,13 +2123,16 @@ function ClaimCard({
               <div className="flex flex-col gap-2">
                 {claim.evidences.map((evidence, index) => (
                   <EvidenceBlock
-                    key={`${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
+                    key={evidence.id || `${evidence.filePath}:${evidence.startLine}:${evidence.endLine}:${index}`}
                     evidence={evidence}
                     selected={isEvidenceSelected(evidence)}
                     onSelect={onEvidenceSelect}
                   />
                 ))}
               </div>
+            ) : null}
+            {claim.history && claim.history.length > 1 ? (
+              <ClaimVersionHistory history={claim.history} />
             ) : null}
           </CardContent>
           <CardFooter className="flex flex-col items-start justify-between gap-3 pb-4 sm:flex-row sm:items-center sm:pb-6 px-4 sm:px-6">
