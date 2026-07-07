@@ -1,0 +1,114 @@
+# Incremental Reviews — Brainstorm & Design Notes
+
+> Working notes on moving paire to incremental reviews — where each run reuses the prior
+> review state plus what changed, instead of recomputing from scratch. Captures the blindspots
+> found and the design decisions reached, with pointers into the current codebase.
+
+## Problems we're solving
+
+1. **Speed** — reviews are slow (~2–3 min small PRs, 10–15 min large ones); adding claims one-by-one (since PR #14) added latency.
+2. **Stale evidence** — a carried-over "unchanged" claim keeps its old evidence line numbers, which drift as the code moves. Tracked as [issue #17](https://github.com/paire-dev/paire/issues/17) ("Evidence line numbers go stale as branch evolves").
+3. **Multi-user consistency** — versions are used for navigation. A reviewer who saw a PR at v10 must, at v11, be able to see *what's new* while everything they already read stays **consistent** (claims not silently reworded when their meaning is unchanged).
+
+These are three *separate* goals. Incrementality alone does not guarantee speed (re-evaluating claims can add model round-trips); it clearly helps staleness and consistency. Speed only improves if the model is fed strictly less (the delta) and carried claims are re-validated **deterministically**.
+
+**Scope caveat — first reviews stay slow.** Everything below only helps the *second review onward*: carry-forward, remap, and provenance all need a prior state to reuse. The **first review of a large PR is a cold start** — every file/hunk is new, so every claim is model-generated from scratch, and none of the remap tiers apply. Speeding up the first pass is a *separate* problem with its own levers (parallelism across files, cheap-model triage then escalate, batching claim submission to recover some of PR #14's per-claim latency, prompt-caching the diff context across calls). Out of scope for these notes, but tracked in "Open threads" so it isn't mistaken for solved.
+
+## What paire already has (don't rebuild)
+
+- **Version chaining** via `sourceReviewId` + `carryForwardClaims()` — `src/cli/local-engine.ts:1168`. New reviews already inherit active claims from the prior finalized one.
+- **Append-only event log** `ReviewEvent` — `src/cli/review-state.ts:98`; **immutable per-edit snapshots** `ReviewClaimRevision` — `review-state.ts:77-85`.
+- **Full accumulated state stored per review row** as one JSON blob (`stateJson`, `persistReviewState` in `local-engine.ts:1233-1288`) → a single-row read already gives fast retrieval.
+- **Status taxonomy** the agent already declares: `new | unchanged | evidence_moved | amended | invalidated | superseded` — `apply-validation.ts:1`; plus `lifecycleStatus` (active/invalidated/superseded) and `humanStatus` (unreviewed/accepted).
+- **Evidence** = `{filePath, startLine, endLine, change, symbol?, fingerprint?}` on post-change HEAD lines — `review-state.ts:87-96`. `symbol`/`fingerprint` are currently unused.
+- **Diff line-mapping engine already exists**: `annotateHunkText` in `src/cli/diff-line-numbers.ts` produces per-line `oldLine`/`newLine` — the exact old→new map needed for evidence remap. Today only `addedLineRanges()` is harvested from it.
+
+---
+
+## A. Deterministic evidence remap (the linchpin)
+
+**Targets:** #2 (stale evidence) primarily; also #1 (fewer model calls) and #3 (no silent reword).
+
+Move evidence-shift from an **agent-declared** status (`evidence_moved`) to **CLI-computed** remap, consuming the `oldLine→newLine` map `annotateHunkText` already produces. Tiered — only the last tier costs a model call:
+
+1. **Line-shift** (deterministic) — span sits in an unchanged region; shift by hunk delta. Dominant case (unrelated churn, reformatting/prettier). Free, and wording never changes.
+2. **Fingerprint re-anchor** (deterministic) — relocated block; **unique** fingerprint match only, else fall through. (Guards against false-match misanchoring, which would be a *consistency violation* worse than staleness.)
+3. **Symbol re-anchor** (deterministic, coarse) — enclosing symbol survives; clamp evidence to it.
+4. **Model re-eval** — only when the anchored content itself changed semantically, or 1–3 fail (deleted file, vanished symbol). Also where amend/supersede is decided.
+
+**What the fingerprint is (tier 2):** a content hash of an evidence span's anchored lines (optionally plus a little surrounding context), recorded when the claim is written. It's a *stable identity* for the code the claim points at, independent of line numbers — so when a block is moved or restructured, tier 2 searches the new file(s) for the block whose content hashes to the same value and re-anchors to it. The `fingerprint` field **already exists** on `ReviewEvidenceState` (`review-state.ts:87-96`) but is currently **unpopulated and unread** — so this is "wire up + backfill," not "add a new field." Two choices to settle when populating it: (a) hash *exact bytes* (stricter; a reformat breaks the match — fine, since tier 1 already handles reformat-in-place) vs. *normalized* whitespace (survives reformatting but raises collision risk); (b) span the evidence lines only vs. evidence + a few context lines (more context → more unique → fewer ambiguous matches).
+
+**What symbol re-anchor is (tier 3):** the coarse fallback when the fingerprint no longer matches (the block's own content changed) but the *enclosing symbol* — the function/method/class/type the evidence lived inside — still exists in the new file. Instead of a precise line remap, you locate that symbol's current span and **clamp the evidence to it** (point it at the symbol, or its changed lines). Lower fidelity than tiers 1–2 — you're saying "the exact lines shifted in a way I can't track, but the claim's subject is still *this function*" — but far better than dropping straight to a model call or leaving the evidence dangling. Needs the enclosing symbol name captured on the evidence: the `symbol` field is also already present on `ReviewEvidenceState` and also unused today. Extracting it needs per-language awareness (e.g. tree-sitter), which is why tier 3 is the heaviest to build and the one to defer until instrumentation shows a real "fingerprint gone but symbol survived" residue.
+
+Payoff on speed (#1): a 100-claim PR where a new commit touches 2 files may resolve ~95 claims via tiers 1–3 for free and send only a handful to the model. The flow inverts — the CLI *computes* the remap at carry-forward time and surfaces only the unresolved residue; agent-declared `evidence_moved` becomes an **override**, not an input.
+
+**Two distinct diffs — don't conflate:** claim generation diffs vs the **target branch**; evidence remap diffs the branch's own **old-HEAD → new-HEAD** progression.
+
+**Relation to [issue #17](https://github.com/paire-dev/paire/issues/17):** the issue is problem #2, and proposes two fixes — Option A (resolve line numbers at *render* time through revision history) and Option B (re-anchor on *apply*, shifting line numbers for insertions/deletions above). This tiered remap is essentially **Option B as tier 1**, extended to cover the exact weakness the issue calls out for Option B — "loses fidelity if the referenced code itself was moved or restructured" — via fingerprint (tier 2) and symbol (tier 3) re-anchoring, with genuine semantic changes routed to the model (tier 4). We materialize on apply (line numbers as a derived cache) rather than resolving at render, but keep `fingerprint`/`symbol` as stable identity so re-derivation stays possible. Note: the issue references a `revisionId` field on evidence as the hook; the live `ReviewEvidenceState` (`review-state.ts:87-96`) exposes `symbol?`/`fingerprint?` but not `revisionId` — worth confirming where revision identity actually lives before building.
+
+### Rollout recommendation
+- **Tier 1 live.** Small, self-contained, no false-match hazard. On a **tier-1 miss**, the claim falls through to **tier 4 (the model)**, which re-emits fresh evidence and decides unchanged/amend/supersede/invalidate. Two kinds of miss: (a) the claim's code was genuinely edited → the model *should* judge it, this is correct routing; (b) code unchanged but relocated → a wasteful model call (it'll likely say "unchanged") — this is the residue tier 2 targets. Safe either way: verbatim-carry validation (§D, invariant 1) blocks silent rewording, and nothing is left pointing at stale lines.
+- **Populate `fingerprint` and `symbol` on evidence immediately** — both fields exist on `ReviewEvidenceState` but are unused today. Cheap now, and it avoids a cold start when tiers 2/3 land (they can only match claims that had a fingerprint recorded at creation).
+- **Tier 2 in shadow mode.** Build the matcher, compute what it *would* re-anchor on each carry-forward, **log it — don't apply it**. Tier 1 still does the real remap. This yields (i) the near-complete implementation, (ii) real data on how often tier 2 fires and its unique-vs-ambiguous-vs-no-match distribution, at (iii) zero misanchoring risk. Flip it live once the logs show the unique-match rule is trustworthy. (Shadow mode doubles as the residue instrumentation — "would tier 2 have helped here?" needs the tier-2 matcher to answer anyway.)
+- **Tier 3 deferred.** Needs per-language symbol parsing (tree-sitter/LSP) — a real build, not a toggle. Do it only if the shadow logs show a meaningful "fingerprint gone but symbol survived" residue.
+
+## B. Persistence & fast version retrieval
+
+**Targets:** #3 (what's-new navigation) primarily; also #2 (line numbers as a derived cache).
+
+Retrieval only needs to *feel fast in the UI*, and it already is: each review row stores the full accumulated `ReviewState`, so serving any version is a single-row read — no runtime accumulation to avoid.
+
+One tempting idea is to store, per version, a split of `{carried from previous}` vs `{new this version}` so the UI can tell what's new. Skip it: a binary bucket can't express the real taxonomy (carried / evidence-edited / amended / superseded / new), and "what's new" is per-*reviewer* anyway (see §D), not a fixed property of a version. Instead:
+
+- Add **per-claim provenance**: `introducedInVersion`, `lastModifiedInVersion`, `supersededInVersion`. "What's new" becomes a **filter**, not a stored bucket.
+- Make evidence **line numbers a derived cache**, recomputed each version via the remap; `fingerprint`/`symbol` are the stable identity. This is the clean structural fix for staleness (#2).
+
+## C. Rebase / force-push handling
+
+**Targets:** robustness of the incremental machinery — protects #1 (avoid needless full re-reviews) and #3 (avoid consistency loss) when history is rewritten.
+
+"Commits since last review" assumes linearly-appendable history; rebase/squash/amend/force-push break it. The discriminator that matters is **"did the base move?"** — because a moved base is what pollutes an old→new diff with the target's churn.
+
+**v1 rule (3-way):**
+1. `is-ancestor(prev.currentCommit, HEAD)` **true** → clean append → **incremental**.
+2. else **base unchanged** (`prev.baseCommit == currentBase`) → amend / reword / reorder / in-branch squash → **still incremental** (`diff(prev.currentCommit..HEAD)` is author-only). Guard: if `cat-file -e prev.currentCommit` fails (tip GC'd / fresh clone) → drop to (3).
+3. else **base moved** (true rebase onto advanced target) → **full re-review** vs the fresh target.
+
+Why this shape:
+- Catches the most common force-push (tip `--amend`) on the fast, consistency-preserving path.
+- Lets v1 **defer baseline-content storage** entirely — a full re-review needs no old baseline.
+- Version = **review-run ordinal**, never commit count (already true via `sourceReviewId`). Reviewer read-position keyed on **version + claim IDs**, never a commit SHA (rebase invalidates SHAs).
+
+**Conscious v1 tradeoffs:** full re-review **drops the consistency guarantee on rebase versions** (model rewords) — mark such versions "history changed here"; and if the team rebases heavily, the slow path fires often.
+
+**Later optimization:** reframe reviews around **author-delta-vs-target** (`diff(target_N, HEAD_N)`) — i.e. always compare against the base commit as the fixed reference point. This recovers speed + consistency on rebases and short-circuits **no-op rebases** (a naive old→new diff otherwise surfaces all of the target's advancement as if the author wrote it).
+
+## D. Multi-user consistency
+
+**Targets:** #3 (multi-user version navigation).
+
+The guarantee — *seen claims keep their wording unless meaning changes; every real change is an explicit transition* — reduces to two enforced invariants plus a per-reviewer cursor:
+
+- **Invariant 1 — verbatim carry.** Carried claims copy `title/before/after/description` byte-for-byte; only evidence line numbers change. **Enforce** in `apply-validation.ts`: an `unchanged` claim whose text differs from its prior `ClaimRevision` snapshot → `PAIRE_COMMAND_REJECTED`. (Turns "please don't reword" into a hard failure.)
+- **Invariant 2 — explicit transitions.** Rewording is legal only via `amend` / `supersede` (tier 4), each snapshotting prior text into `ClaimRevision` and recording an event.
+- **Model scoping + anchor dedup.** The model only produces claims for the delta. A new claim whose anchor (fingerprint / overlapping lines / enclosing symbol) matches a carried claim is **deduped → keep the carried verbatim**, not accepted as a reword. Keep dedup deterministic (don't ask the model "same issue?").
+- **`humanStatus` = the per-reviewer surfacing signal.** Carried-verbatim → `humanStatus` preserved (reviewer not re-bothered). Amended/superseded → reset to `unreviewed` (re-surfaces as "new to me"; reword now legitimate). **"What's new for reviewer X" = claims where X's `humanStatus` is `unreviewed`** — this is per-reviewer, which a fixed per-version bucket cannot express. (Consistent with commit `3565fc0`, which treats human-status changes as separate from claim revisions.)
+- **Supersession in a version range** (needs the provenance fields from §B). For range `[lo, hi]`: a claim is active-in-range if `introduced ≤ hi` and (still active or `terminated > lo`). Collapse `A → B` to show B with a "replaces A (from vN)" lineage note when both are new to the reviewer; else show B alone. A stays reconstructable from its `ClaimRevision` for anyone who saw it.
+
+---
+
+## Open threads (not yet worked through)
+
+- **Concurrency / multi-user writes** — two users or an auto-trigger racing on a branch can fork the `sourceReviewId` chain; stale-HEAD reviews; need a single-writer / optimistic-lock guarantee per branch.
+- **No-op / empty versions** — does every run create a version even when nothing meaningful changed? Interaction with the range UI and the `humanStatus` cursor.
+- **Renames** — path-based claim matching breaks on `git mv`; without rename detection, claims on renamed files get spuriously superseded + recreated (violates consistency). Use git similarity.
+- **Target-branch drift** — a file untouched by the branch but whose diff-vs-target changed (target moved) won't be in the "changed since last review" set, so its evidence/scope can go stale silently; the re-examination trigger must include "target moved," not just "branch got new commits."
+- **First-review (cold-start) speed** — the incremental work here does nothing for the first review of a PR. Needs its own investigation: parallelism across files, cheap-model triage → escalate on flagged regions, batching claim submission (recover PR #14's per-claim latency), prompt-caching shared diff context. Biggest single lever for big PRs is likely file-level parallelism.
+
+## Suggested build order (rough)
+
+1. Tier-1 deterministic remap + start populating `fingerprint`/`symbol` + residue instrumentation.
+2. Provenance fields (`introducedInVersion` / `lastModifiedInVersion` / `supersededInVersion`) + `unchanged`-text validation rule.
+3. Rebase v1 3-way rule (append / base-unchanged / base-moved → full re-review).
+4. `humanStatus`-reset-on-transition + per-reviewer "what's new" filter + version-range rendering.
+5. Revisit tier 2 (fingerprint), author-delta reframe, and the open threads based on instrumentation.
