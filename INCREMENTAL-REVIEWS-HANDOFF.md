@@ -26,7 +26,9 @@ Full detail (design, tiers, invariants, rationale) lives in `docs/incremental-re
 - **Persistence (§B)** — retrieval is already fast (full state per review row). Do **not** build a per-version `{carried}` vs `{new}` split. Add per-claim provenance (`introducedInVersion`, `lastModifiedInVersion`, `supersededInVersion`); "what's new" is a filter. Line numbers become a derived cache.
 - **Rebase/force-push (§C)** — v1 rule keyed on "**did the base move?**": clean append → incremental; base-unchanged rewrite (amend/reword/reorder/in-branch squash) → still incremental; base moved (true rebase) → full re-review. Lets v1 defer baseline-content storage. Version = review-run ordinal, never commit count; reviewer position keyed on version+claimID, never SHA.
 - **Consistency (§D)** — two enforced invariants: verbatim carry (reject text drift on `unchanged` claims in `apply-validation.ts`) + explicit transitions (amend/supersede snapshot prior text). `humanStatus` reset-on-change is the per-reviewer "what's new" signal.
-- **Scope limit (important):** none of this speeds up the **first review** of a PR (cold start — everything is new). First-pass speed is a separate problem (parallelism across files, cheap-model triage, batching claim submission, prompt caching).
+- **Concurrency (§E)** — v1: single-flight per branch + idempotency by `(chain, currentCommit)` (prevents forked chains); stale-HEAD handled by recording exact HEAD + enqueue-follow-up; keep version writes atomic. Multi-user `humanStatus`-overlay deferred (note only) until the review page lands.
+- **Secondary concerns (decided):** target-branch semantics → pin to recomputed merge-base per run (remote target advance doesn't affect review; rebase/merge does, via §C); no-op/empty versions → don't bother in v1 (harmless until range-nav UI exists); renames → accepted limitation in v1 (claims regenerate, not silently dropped).
+- **Scope limit (important):** none of this speeds up the **first review** of a PR (cold start — everything is new). First-pass speed is a separate track — and since **paire has no LLM** (the external agent does all model work), most levers (parallelism, triage, caching) aren't paire's; paire-owns = batch claim submission, leaner context, progressive surfacing, shard/merge seams.
 
 ## Codebase orientation (key files)
 
@@ -39,11 +41,9 @@ Full detail (design, tiers, invariants, rationale) lives in `docs/incremental-re
 
 - **`revisionId` discrepancy** — issue #17 says evidence stores a `revisionId` hook, but the live `ReviewEvidenceState` shows only `symbol?`/`fingerprint?`. Confirm where revision identity actually lives before building remap. **(resolve first)**
 - **Fingerprint design** — hash exact bytes vs. whitespace-normalized; evidence-only span vs. with-context. Affects tier-2 hit rate + collision rate.
-- **Concurrency / multi-user writes** — racing reviews can fork the `sourceReviewId` chain; need a single-writer / optimistic-lock guarantee per branch.
-- **No-op / empty versions** — does every run create a version even when nothing meaningful changed?
-- **Renames** — path-based claim matching breaks on `git mv`; need git rename detection or claims get spuriously superseded.
-- **Target-branch drift** — files untouched by the branch but whose diff-vs-target changed (target moved) fall out of the "changed since last review" set; re-examination trigger must include "target moved."
-- **First-review speed** — separate track; likely biggest lever is file-level parallelism.
+- **Diff/base semantics** — verify paire diffs against a **recomputed merge-base** (three-dot), not a frozen `baseCommit` SHA (underpins the target-branch decision + §C).
+
+(Concurrency, no-op versions, renames, and target-branch drift are now *decided* — see "Secondary concerns (decided)" above and the main doc. First-review speed is a separate track, also above.)
 
 ## Suggested next steps for the continuing agent
 
@@ -53,4 +53,4 @@ Full detail (design, tiers, invariants, rationale) lives in `docs/incremental-re
 4. Spec the **provenance fields** + the `unchanged`-text validation rule.
 5. Then: tier-2 shadow mode, rebase v1 rule, consistency surfacing via `humanStatus`.
 
-Refer back to `docs/incremental-reviews-brainstorm.md` §A–§D for the reasoning behind each.
+Refer back to `docs/incremental-reviews-brainstorm.md` §A–§E for the reasoning behind each.
