@@ -25,6 +25,8 @@ These are three *separate* goals. Incrementality alone does not guarantee speed 
 
 ---
 
+_The sections below are ordered highest-priority first; the §-letters are stable IDs, so they are **not** alphabetical here._
+
 ## A. Deterministic evidence remap (the linchpin)
 
 **Targets:** #2 (stale evidence) primarily; also #1 (fewer model calls) and #3 (no silent reword).
@@ -63,6 +65,18 @@ One tempting idea is to store, per version, a split of `{carried from previous}`
 - Add **per-claim provenance**: `introducedInVersion`, `lastModifiedInVersion`, `supersededInVersion`. "What's new" becomes a **filter**, not a stored bucket.
 - Make evidence **line numbers a derived cache**, recomputed each version via the remap; `fingerprint`/`symbol` are the stable identity. This is the clean structural fix for staleness (#2).
 
+## D. Multi-user consistency
+
+**Targets:** #3 (multi-user version navigation).
+
+The guarantee — *seen claims keep their wording unless meaning changes; every real change is an explicit transition* — reduces to two enforced invariants plus a per-reviewer cursor:
+
+- **Invariant 1 — verbatim carry.** Carried claims copy `title/before/after/description` byte-for-byte; only evidence line numbers change. **Enforce** in `apply-validation.ts`: an `unchanged` claim whose text differs from its prior `ClaimRevision` snapshot → `PAIRE_COMMAND_REJECTED`. (Turns "please don't reword" into a hard failure.)
+- **Invariant 2 — explicit transitions.** Rewording is legal only via `amend` / `supersede` (tier 4), each snapshotting prior text into `ClaimRevision` and recording an event.
+- **Model scoping + anchor dedup.** The model only produces claims for the delta. A new claim whose anchor (fingerprint / overlapping lines / enclosing symbol) matches a carried claim is **deduped → keep the carried verbatim**, not accepted as a reword. Keep dedup deterministic (don't ask the model "same issue?").
+- **`humanStatus` = the per-reviewer surfacing signal.** Carried-verbatim → `humanStatus` preserved (reviewer not re-bothered). Amended/superseded → reset to `unreviewed` (re-surfaces as "new to me"; reword now legitimate). **"What's new for reviewer X" = claims where X's `humanStatus` is `unreviewed`** — this is per-reviewer, which a fixed per-version bucket cannot express. (Consistent with commit `3565fc0`, which treats human-status changes as separate from claim revisions.)
+- **Supersession in a version range** (needs the provenance fields from §B). For range `[lo, hi]`: a claim is active-in-range if `introduced ≤ hi` and (still active or `terminated > lo`). Collapse `A → B` to show B with a "replaces A (from vN)" lineage note when both are new to the reviewer; else show B alone. A stays reconstructable from its `ClaimRevision` for anyone who saw it.
+
 ## C. Rebase / force-push handling
 
 **Targets:** robustness of the incremental machinery — protects #1 (avoid needless full re-reviews) and #3 (avoid consistency loss) when history is rewritten.
@@ -82,18 +96,6 @@ Why this shape:
 **Conscious v1 tradeoffs:** full re-review **drops the consistency guarantee on rebase versions** (model rewords) — mark such versions "history changed here"; and if the team rebases heavily, the slow path fires often.
 
 **Later optimization:** reframe reviews around **author-delta-vs-target** (`diff(target_N, HEAD_N)`) — i.e. always compare against the base commit as the fixed reference point. This recovers speed + consistency on rebases and short-circuits **no-op rebases** (a naive old→new diff otherwise surfaces all of the target's advancement as if the author wrote it).
-
-## D. Multi-user consistency
-
-**Targets:** #3 (multi-user version navigation).
-
-The guarantee — *seen claims keep their wording unless meaning changes; every real change is an explicit transition* — reduces to two enforced invariants plus a per-reviewer cursor:
-
-- **Invariant 1 — verbatim carry.** Carried claims copy `title/before/after/description` byte-for-byte; only evidence line numbers change. **Enforce** in `apply-validation.ts`: an `unchanged` claim whose text differs from its prior `ClaimRevision` snapshot → `PAIRE_COMMAND_REJECTED`. (Turns "please don't reword" into a hard failure.)
-- **Invariant 2 — explicit transitions.** Rewording is legal only via `amend` / `supersede` (tier 4), each snapshotting prior text into `ClaimRevision` and recording an event.
-- **Model scoping + anchor dedup.** The model only produces claims for the delta. A new claim whose anchor (fingerprint / overlapping lines / enclosing symbol) matches a carried claim is **deduped → keep the carried verbatim**, not accepted as a reword. Keep dedup deterministic (don't ask the model "same issue?").
-- **`humanStatus` = the per-reviewer surfacing signal.** Carried-verbatim → `humanStatus` preserved (reviewer not re-bothered). Amended/superseded → reset to `unreviewed` (re-surfaces as "new to me"; reword now legitimate). **"What's new for reviewer X" = claims where X's `humanStatus` is `unreviewed`** — this is per-reviewer, which a fixed per-version bucket cannot express. (Consistent with commit `3565fc0`, which treats human-status changes as separate from claim revisions.)
-- **Supersession in a version range** (needs the provenance fields from §B). For range `[lo, hi]`: a claim is active-in-range if `introduced ≤ hi` and (still active or `terminated > lo`). Collapse `A → B` to show B with a "replaces A (from vN)" lineage note when both are new to the reviewer; else show B alone. A stays reconstructable from its `ClaimRevision` for anyone who saw it.
 
 ## E. Concurrency
 
