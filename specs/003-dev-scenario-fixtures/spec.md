@@ -83,12 +83,24 @@ Two entry points, so unit tests don't pay for a git repo they don't need:
 
 ## CLI surface
 
-New `paire dev` command group (gated to dev builds — `PAIRE_VERSION === "dev"` — so it never ships to end users):
+New `paire dev` command group:
 
 - `paire dev seed --scenario <name> [--out <dir>] [--serve]` — materialize a scenario and print the fixture repo path + how to view; `--serve` launches the web UI pointed at that repo.
 - `paire dev seed --list` — list available scenarios.
 
-Generated repos live **outside the main working copy** (default under `PAIRE_HOME/fixtures/<scenario>/`, overridable via `--out`) to avoid nested-repo / `git status` pollution. They persist while being viewed and are regenerated on each seed.
+### Distribution: contributor-only, never shipped as a product command
+
+Two independent guarantees keep this out of end users' hands:
+
+1. **Dev-build gate.** The `paire dev` group is registered/executed only when `PAIRE_VERSION === "dev"` (i.e. running from source). It is absent from a published binary's `--help` and no-ops otherwise.
+2. **Machinery isn't packaged.** The scenario library + builders live under `test/support/**`, which is excluded from the published package (`files` allowlist / `.npmignore`). So even if the command were reachable in a release, there would be no scenarios to run — the exclusion does most of the work.
+
+Contributors invoke it from a checkout (`bun src/cli.ts dev seed …`, i.e. `paire dev seed …` in dev). It is intentionally *not* discoverable or usable by installed end users.
+
+### Isolation & repo generation
+
+- **Dedicated fixtures home.** `dev seed` targets a separate fixtures `PAIRE_HOME` (default `~/.paire-fixtures`, overridable) rather than the developer's real `~/.paire`, and `--serve` launches the web UI against that home — so seeding fake reviews can never pollute or overwrite real ones.
+- **Generated repos live outside the main working copy** (default under the fixtures home, e.g. `~/.paire-fixtures/repos/<scenario>/`, overridable via `--out`) to avoid nested-repo / `git status` pollution. They persist while being viewed and are regenerated on each seed.
 
 ## Test helpers
 
