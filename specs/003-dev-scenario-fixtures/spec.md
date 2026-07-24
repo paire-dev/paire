@@ -46,22 +46,31 @@ Authored in TS so it fails to **compile** when the schema changes.
 
 The type is **revision-oriented** from the start: a scenario is a branch fork point (`base`) plus an ordered list of `revisions` (v1, v2, …). A plain single-review scenario is just `revisions.length === 1`; multi-version scenarios (needed to test incremental behaviour — carry-forward, stale evidence, provenance — see "Multi-version scenarios" below) simply add more revisions. Designing the type this way now avoids a breaking reshape of every scenario later.
 
+The ops are **thin wrappers over the real reflector input types** (`claim.add` / `claim.edit` / `evidence.*` / `file.acknowledge` from `reflector.ts`), not a parallel vocabulary. Two consequences of matching the real reducers:
+
+- **There is no `supersede` command.** Supersession is a `claim.add` carrying `supersedesClaimId` - so the fixture models it as an `add` that references a prior claim, not a distinct op.
+- **There is no standalone thread command.** Threads are created inline by `claim.add` (`threadId` + optional `threadTitle`/`threadSummary`) - so a claim declares its thread; there is no separate `threads` list to reduce.
+
+Every `add` also carries a **fixture-local `ref`** (deterministic, author-supplied) so later `edit` ops in the same or a later revision can point at it stably, independent of the engine-assigned public id.
+
 ```ts
 // test/support/scenarios/types.ts (illustrative)
 type ScenarioClaimOp =
-  | { op: "add"; threadId: string; title: string; importance: ClaimImportance;
+  // wraps reflector `claim.add`; `supersedesRef` -> resolved to that claim's engine id -> `supersedesClaimId`
+  | { op: "add"; ref: string; threadId: string; threadTitle?: string; threadSummary?: string;
+      title: string; importance: ClaimImportance;
       workStatus?: ClaimWorkStatus; lifecycleStatus?: ClaimLifecycleStatus;
       humanStatus?: HumanStatus; before?: string | null; after?: string | null;
-      description?: string;
+      description?: string; supersedesRef?: string;
       evidence: { path: string; startLine: number; endLine: number; change: string }[] }
-  | { op: "edit"; claimRef: string; /* fields to change */ }
-  | { op: "supersede"; claimRef: string; /* replacement claim fields */ }
+  // wraps reflector `claim.edit`; `ref` resolves to the engine id of a prior `add`
+  | { op: "edit"; ref: string; /* fields to change */ }
+  // wraps reflector `file.acknowledge`
   | { op: "acknowledge"; path: string; reason: string };
 
 type Revision = {
   edits: Record<string, string | null>;                 // file → new full content (null = delete)
-  threads?: { id: string; title: string; summary?: string }[]; // threads introduced at this version
-  claims?: ScenarioClaimOp[];                            // claim ops applied at this version
+  claims?: ScenarioClaimOp[];                            // claim ops applied at this version (threads declared inline via `add`)
 };
 
 export type Scenario = {
@@ -83,7 +92,9 @@ Either way the UI's live `git diff` produces a real diff and evidence line numbe
 Two entry points, so unit tests don't pay for a git repo they don't need:
 
 - `scenarioState(scenario): { state: ReviewState; context: ReviewContext }` — pure, in-memory. Builds a **single** version's state via `createReviewState()` + the reflector reducers; synthesizes a `ReviewContext` from the scenario (declared changed files / touched ranges). No git, no DB. For **unit** tests and component-prop harnesses. (Cross-version behaviour needs real diffs, so it's exercised via `materializeScenario`, not here.)
-- `materializeScenario(scenario, opts): { repoRoot; reviewIds: string[]; db }` — generates the fixture git repo and **walks the scenario's revisions through the real incremental pipeline**: commit `base`; for each revision, commit its `edits`, run `getOrCreateReviewForTarget()` with `sourceReviewId` = the prior review (real carry-forward + remap), apply that revision's claim ops via `applyReflectorCommand()`, and persist as version N. Returns the persisted version chain (`reviewIds`) and selects the latest for `--serve`. For **visual** and **integration** use. `opts` carries `paireHome` (temp/fixtures) and `outDir`.
+- `materializeScenario(scenario, opts): { repoRoot; reviewIds: string[]; db }` — generates the fixture git repo, applies claim ops via `applyReflectorCommand()`, and persists. Returns the persisted `reviewIds` and selects the latest for `--serve`. For **visual** and **integration** use. `opts` carries `paireHome` (temp/fixtures) and `outDir`.
+  - **v1 is single-revision** (`revisions.length === 1`): commit `base`, commit (or leave dirty for uncommitted mode) the single revision's `edits`, run `getOrCreateReviewForTarget()`, apply its claim ops, persist. `reviewIds` has length 1. A scenario with more revisions is rejected until the next item ships.
+  - **Multi-version (milestone 7)** extends the same function to **walk the revision chain through the real incremental pipeline**: for each revision, commit its `edits`, run `getOrCreateReviewForTarget()` with `sourceReviewId` = the prior review (real carry-forward + remap), apply that revision's ops, and persist as version N - producing the full `review_states` chain. The type is already revision-oriented so this is an implementation extension, not a type change.
 
 ## Multi-version scenarios (testing incremental reviews)
 
@@ -97,7 +108,7 @@ scenario("evidence shifts when unrelated code is added above", {
   base: { "foo.ts": /* 40 lines */ },
   revisions: [
     { edits: { "foo.ts": /* touch lines 40-43 */ },
-      claims: [{ op: "add", threadId: "t1", title: "no backoff", importance: "important",
+      claims: [{ op: "add", ref: "c1", threadId: "t1", title: "no backoff", importance: "important",
                  evidence: [{ path: "foo.ts", startLine: 40, endLine: 43, change: "modified" }] }] },
     { edits: { "foo.ts": /* +10 unrelated lines above line 40 */ } }, // v2: claim carried forward
   ],
@@ -126,10 +137,10 @@ New `paire dev` command group:
 
 ### Distribution: contributor-only, never shipped as a product command
 
-Two independent guarantees keep this out of end users' hands:
+**A runtime `PAIRE_VERSION` check is not enough on its own.** `paire` ships as a single compiled binary (`bun build --compile` from `src/cli.ts`, see `scripts/build.ts`), so anything the CLI *statically* imports is bundled into the executable *before* any runtime gate runs. A `files` allowlist / `.npmignore` is irrelevant here - there is no npm tarball to trim; the code is embedded in the binary. So keeping this out of end users' hands requires that the dev machinery never enters the static import graph of the shipped CLI:
 
-1. **Dev-build gate.** The `paire dev` group is registered/executed only when `PAIRE_VERSION === "dev"` (i.e. running from source). It is absent from a published binary's `--help` and no-ops otherwise.
-2. **Machinery isn't packaged.** The scenario library + builders live under `test/support/**`, which is excluded from the published package (`files` allowlist / `.npmignore`). So even if the command were reachable in a release, there would be no scenarios to run — the exclusion does most of the work.
+1. **No static import from the shipped entrypoint.** `src/cli.ts` (and anything it eagerly imports) must not import `test/support/**`. The `paire dev` group is reached only via a **dev-only dynamic `import()`** guarded by `PAIRE_VERSION === "dev"`, so a production build never pulls the scenarios/builders into the bundle. (Equivalently, a separate contributor entrypoint - `bun src/cli.ts dev seed …` / a dedicated dev script - that is simply not one of the compiled binary's entrypoints.)
+2. **Prove it in CI.** A release-binary smoke test asserts the compiled `dist/paire` has no `dev` command (absent from `--help`, no-ops if invoked) and that no scenario/`test/support` strings are present in the binary. This is the guarantee; the runtime `PAIRE_VERSION === "dev"` check is only the developer-facing convenience on top of it.
 
 Contributors invoke it from a checkout (`bun src/cli.ts dev seed …`, i.e. `paire dev seed …` in dev). It is intentionally *not* discoverable or usable by installed end users.
 
@@ -137,6 +148,7 @@ Contributors invoke it from a checkout (`bun src/cli.ts dev seed …`, i.e. `pai
 
 - **Dedicated fixtures home.** `dev seed` targets a separate fixtures `PAIRE_HOME` (default `~/.paire-fixtures`, overridable) rather than the developer's real `~/.paire`, and `--serve` launches the web UI against that home — so seeding fake reviews can never pollute or overwrite real ones.
 - **Generated repos live outside the main working copy** (default under the fixtures home, e.g. `~/.paire-fixtures/repos/<scenario>/`, overridable via `--out`) to avoid nested-repo / `git status` pollution. They persist while being viewed and are regenerated on each seed.
+- **Reseed is a replace, not an append.** A fixture repo is owned by its scenario, so regenerating it rewrites commits that existing `review_states` rows may reference - leaving those rows pointing at commits that no longer exist and breaking their live diffs. Reseeding a scenario therefore **deletes that scenario's persisted rows first** (each seed run creates a fresh, self-consistent repo + row set); seeds are keyed by scenario so one scenario's reseed never touches another's. Because the fixtures home is fully disposable, `paire dev seed --clean [--scenario <name>]` (drop one scenario's repo + rows, or the whole fixtures home) is the explicit teardown, and deleting `~/.paire-fixtures` is always safe.
 
 ## Test helpers
 
@@ -184,6 +196,7 @@ test("review API returns the seeded claims + a resolvable diff", async () => {
 2. Reuse paire's own **`worktreeHash`** computation for uncommitted-mode targets so the app accepts them.
 3. Confirm how the web server picks which session/review to display (`review_selections` + `resolveReviewForCli`) so `--serve` reliably shows the seeded review.
 4. Confirm the default fixture-repo location and lifecycle (persist while viewing, regenerate on re-seed, easy to clean).
+5. **Keep the in-memory and git paths from deriving different truths.** `scenarioState` *synthesizes* a `ReviewContext` (changed files / touched ranges) from the scenario declaration, while `materializeScenario` *derives* the same from a real `git diff`. If they disagree, a unit fixture can pass while the same scenario's visual/integration form rejects its evidence (or vice versa). Both should compute changed files / touched ranges through **one shared helper** applied to the scenario's `base` vs revision `edits`, so the synthesized context matches the git-derived one by construction - guarded by the corpus test below.
 
 ## Milestones
 
@@ -201,7 +214,7 @@ test("review API returns the seeded claims + a resolvable diff", async () => {
 - A contributor runs `paire dev seed --scenario dense-claims --serve` and sees the full review page — claim cards **and** a working diff panel with evidence highlighting — with no model call.
 - A unit test does `const { state } = scenarioState(scenario)` and asserts on threads/claims/evidence without touching git or the DB.
 - An integration test materializes committed **and** uncommitted scenarios into an isolated `PAIRE_HOME`, asserts `/api/review` and `/api/review/diff` return the expected shape with a resolvable diff, and tears down cleanly — leaving `~/.paire` untouched.
-- A **multi-version** scenario materializes into a real `review_states` chain, and a `bun test` asserts carried-claim evidence + wording across versions (the issue-#17 timeline test).
+- *(Milestone 7, not v1.)* A **multi-version** scenario materializes into a real `review_states` chain, and a `bun test` asserts carried-claim evidence + wording across versions (the issue-#17 timeline test). v1 accepts only single-revision scenarios.
 - The scenario harness **reuses the extracted `test/cli.test.ts` scaffolding**; no second temp-repo / `PAIRE_HOME` / server harness is introduced, and existing unit/CLI tests aren't re-implemented.
 - Adding/renaming a `ReviewState` field breaks the scenario builders at **compile time**.
 
@@ -209,3 +222,4 @@ test("review API returns the seeded claims + a resolvable diff", async () => {
 
 - **Unit:** `scenarioState()` produces the expected `ReviewState`; evidence falls within declared touched ranges; claim status/importance/lifecycle map through correctly.
 - **Integration:** `materializeScenario()` for both modes → real repo + persisted row; API routes return seeded data and a live-resolvable diff; teardown removes the temp home + repo.
+- **Corpus parity:** for every checked-in scenario, the `ReviewContext` `scenarioState()` synthesizes matches the one `materializeScenario()` derives from the real `git diff` (changed files + touched ranges), so the in-memory and git paths cannot drift (open question 5).
